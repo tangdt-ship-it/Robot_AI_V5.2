@@ -1,0 +1,7 @@
+{
+  "name": "RobotLinkProtocol",
+  "version": "1.0.0",
+  "description": "Shared framed UART protocol for Robot_AI STM32 and ESP32-S3",
+  "frameworks": "arduino",
+  "platforms": "*"
+}

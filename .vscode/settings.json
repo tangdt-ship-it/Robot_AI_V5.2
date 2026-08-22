@@ -1,0 +1,5 @@
+{
+    "cmake.sourceDirectory": "F:/Robot/Robot_AI_V4_2/firmware/esp32-xiaozhi",
+    "idf.currentSetup": "C:\\Espressif\\frameworks\\esp-idf-v5.5.2",
+    "idf.portWin": "COM4"
+}

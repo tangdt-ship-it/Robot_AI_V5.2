@@ -1,0 +1,22 @@
+# Robot_AI ESP32-S3 N16R8 custom chatbox profile.
+CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_CAM=y
+CONFIG_LCD_ST7789_240X240=y
+
+# Production autonomous obstacle avoidance. STM32 still owns motor safety,
+# HC-SR04 braking, PS2 override and command-link timeout.
+# CONFIG_OBSTACLE_SHADOW_MODE is not set
+
+# Vietnamese UI, OTA locale and server/device language metadata.
+CONFIG_LANGUAGE_ZH_CN=n
+CONFIG_LANGUAGE_VI_VN=y
+
+# "Robot" is not a bundled fixed WakeNet word. Use Xiaozhi's supported
+# MultiNet custom wake-word path with the English model for this word.
+CONFIG_USE_AFE_WAKE_WORD=n
+CONFIG_USE_CUSTOM_WAKE_WORD=y
+CONFIG_CUSTOM_WAKE_WORD="robot"
+CONFIG_CUSTOM_WAKE_WORD_DISPLAY="Robot"
+CONFIG_CUSTOM_WAKE_WORD_THRESHOLD=20
+CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=n
+CONFIG_SR_MN_EN_NONE=n
+CONFIG_SR_MN_EN_MULTINET7_QUANT=y

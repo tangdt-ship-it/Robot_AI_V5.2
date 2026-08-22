@@ -1,0 +1,39 @@
+**/.pio/
+**/build/
+**/__pycache__/
+*.pyc
+.vscode/.browse_c_cpp.db*
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch/
+
+# Generated firmware, maps, monitor output, and temporary files
+*.elf
+*.map
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+firmware/esp32-xiaozhi/sdkconfig.old
+firmware/stm32/v42_fusion_log.txt
+
+# Local IDE, Python, and environment state
+.vscode/*.log
+.idea/
+.pytest_cache/
+.mypy_cache/
+.coverage
+.env
+.env.*
+!.env.example
+
+# Local credentials and private material; use documented example files only
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+**/*local_secret*
+**/*private_config*
