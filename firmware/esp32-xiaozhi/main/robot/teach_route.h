@@ -28,7 +28,14 @@ public:
     void HandleMapEvent(const char* action, uint8_t slot);
 
 private:
-    enum class Mode : uint8_t { READY, TEACHING, LOADED, DELETE_CONFIRM };
+    // Numeric values are mirrored by the STM32 LCD MAP,UI parser.
+    enum class Mode : uint8_t {
+        READY = 0,
+        TEACHING = 1,
+        LOADED = 2,
+        DELETE_CONFIRM = 3,
+        REPLAY_READY = 4,
+    };
     enum class WaypointSource : uint8_t {
         MANUAL,
         AUTO_DISTANCE,
@@ -55,6 +62,13 @@ private:
     void LoadSelected();
     void RequestDelete();
     void ConfirmDelete();
+
+    // Replay V1 is commissioned in safety gates. Phase A below validates a
+    // loaded route and the control/UI path without sending any motor command.
+    bool ArmReplay();
+    void CancelReplay();
+    bool RunReplayDryRun();
+
     void SetSelectedSlot(uint8_t slot);
     void Notify(const char* message, int duration_ms = 2500) const;
     void UpdateMapStatus() const;
@@ -83,6 +97,8 @@ private:
     bool last_sample_valid_ = false;
     bool corner_pending_ = false;
     uint8_t corner_stable_samples_ = 0;
+
+    bool replay_plan_valid_ = false;
 
     esp_timer_handle_t auto_timer_ = nullptr;
     std::atomic_bool auto_timer_enabled_{false};
