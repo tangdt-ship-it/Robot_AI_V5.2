@@ -40,6 +40,9 @@ constexpr float kReplayB1MaxSegmentMm = 1000.0f;
 constexpr float kReplayB1MaxHeadingDeg = 20.0f;
 constexpr int kReplayB1Speed = 10;
 constexpr uint32_t kReplayB1TimeoutMs = 20000U;
+constexpr float kReplayB3MinSegmentMm = 20.0f;
+constexpr float kReplayB3MaxSegmentMm = 500.0f;
+constexpr uint32_t kReplayB3TimeoutMs = 20000U;
 
 float NormalizeTurnDelta(float delta_deg) {
     while (delta_deg > 180.0f) delta_deg -= 360.0f;
@@ -85,8 +88,8 @@ bool TeachRoute::Begin() {
              static_cast<unsigned>(kCornerStableSamples),
              static_cast<unsigned>(kMaxWaypointsPerMap));
     ESP_LOGI(kTag,
-             "ROUTE,REPLAY_V1=PHASE_B2,TURN_ONLY=1,SPEED=%d,MAX_MM=%u",
-             kReplayB1Speed, static_cast<unsigned>(kReplayB1MaxSegmentMm));
+             "ROUTE,REPLAY_V1=PHASE_B3,FINAL_SEGMENT_ONLY=1,TURN=OFF,SPEED=%d",
+             kReplayB1Speed);
     ESP_LOGI(kTag,
              "ROUTE,REPLAY_B1_OBS_POLICY=VALID_FRESH_CLEAR,ECHO0_CLEAR_ALLOWED=1");
     ESP_LOGI(kTag,
@@ -181,7 +184,7 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
     // READY -> Teach
     // LOADED + unchecked -> Arm Replay
     // REPLAY_READY -> whole-route dry-run
-    // LOADED + dry-run PASS -> Phase B1 first-segment motion.
+    // LOADED + dry-run PASS -> B3 final-segment motion.
     if (strcmp(action, "TRIANGLE") == 0) {
         if (mode_ == Mode::TEACHING) {
             AddWaypoint(true);
@@ -196,7 +199,7 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
         } else if (mode_ == Mode::REPLAY_READY) {
             RunReplayDryRun();
         } else if (mode_ == Mode::REPLAY_CHECKED) {
-            StartReplayTurnAtWp2();
+            StartReplayFinalSegment();
         }
         return;
     }
@@ -1030,9 +1033,92 @@ bool TeachRoute::StartReplayTurnAtWp2() {
     return true;
 }
 
+bool TeachRoute::StartReplayFinalSegment() {
+    if (mode_ != Mode::REPLAY_CHECKED) {
+        ESP_LOGW(kTag,
+                 "ROUTE,REPLAY=B3_REJECT,REASON=MODE,MODE=%u,EXPECTED=REPLAY_CHECKED,MOTOR=0",
+                 static_cast<unsigned>(mode_));
+        return false;
+    }
+    if (!replay_plan_valid_ || replay_motion_running_.load() ||
+        robot_uart_ == nullptr || mission_manager_ == nullptr) {
+        return false;
+    }
+    const uint16_t count = loaded_route_.header.waypoint_count;
+    if (count < 3U) {
+        ESP_LOGW(kTag, "ROUTE,REPLAY=B3_REJECT,REASON=POINTS,MOTOR=0");
+        mode_ = Mode::REPLAY_HOLD;
+        UpdateMapStatus();
+        return false;
+    }
+    const RouteWaypoint& wp2 = loaded_route_.waypoints[1];
+    const RouteWaypoint& wp3 = loaded_route_.waypoints[2];
+    const float dx = static_cast<float>(wp3.x_mm - wp2.x_mm);
+    const float dy = static_cast<float>(wp3.y_mm - wp2.y_mm);
+    const float distance = sqrtf(dx * dx + dy * dy);
+    ESP_LOGI(kTag, "ROUTE,REPLAY=B3_GEOMETRY,WP=2->3,DIST_MM=%.1f", distance);
+    if (!std::isfinite(distance) || distance < kReplayB3MinSegmentMm ||
+        distance > kReplayB3MaxSegmentMm) {
+        ESP_LOGW(kTag,
+                 "ROUTE,REPLAY=B3_REJECT,REASON=SEGMENT_RANGE,DIST_MM=%.1f,MOTOR=0",
+                 distance);
+        mode_ = Mode::REPLAY_HOLD;
+        UpdateMapStatus();
+        return false;
+    }
+
+    ESP_LOGI(kTag,
+             "ROUTE,REPLAY=B3_PREREQ,POSE=WP2_ALIGNED,USER_CONFIRM_REQUIRED=1");
+    RobotState state;
+    RobotObstacleStatus obstacle;
+    const char* reason = "OK";
+    if (!CheckReplaySafety("B3_START_GATE", state, obstacle, reason)) {
+        ESP_LOGW(kTag, "ROUTE,REPLAY=B3_STOP,REASON=%s,CONTINUE=NO,MOTOR=0",
+                 reason);
+        mode_ = Mode::REPLAY_HOLD;
+        UpdateMapStatus();
+        return false;
+    }
+
+    replay_cancel_requested_.store(false);
+    replay_motion_running_.store(true);
+    replay_plan_valid_ = false;
+    replay_wp_index_ = 3U;
+    replay_wp_total_ = count;
+    replay_target_mm_ = static_cast<uint32_t>(lroundf(distance));
+    replay_travel_mm_ = 0U;
+    replay_error_mm_ = replay_target_mm_;
+    mode_ = Mode::REPLAY_RUNNING;
+    ESP_LOGI(kTag,
+             "ROUTE,REPLAY=B3_START,WP=3/%u,TARGET_MM=%lu,SPEED=%d,TURN=OFF,MOVE=0",
+             static_cast<unsigned>(count),
+             static_cast<unsigned long>(replay_target_mm_), kReplayB1Speed);
+    Notify("B3 FINAL WP3: X/R3 STOP", 3500);
+    UpdateMapStatus();
+    if (xTaskCreatePinnedToCore(ReplayFinalTaskEntry, "map_replay_b3", 4096,
+                                this, 3, &replay_task_, 1) != pdPASS) {
+        replay_task_ = nullptr;
+        replay_motion_running_.store(false);
+        mode_ = Mode::REPLAY_HOLD;
+        ESP_LOGE(kTag,
+                 "ROUTE,REPLAY=B3_STOP,REASON=TASK_CREATE,CONTINUE=NO,MOTOR=0");
+        UpdateMapStatus();
+        return false;
+    }
+    return true;
+}
+
 void TeachRoute::ReplayTurnTaskEntry(void* context) {
     if (context != nullptr) {
         static_cast<TeachRoute*>(context)->RunReplayTurnAtWp2();
+        static_cast<TeachRoute*>(context)->replay_task_ = nullptr;
+    }
+    vTaskDelete(nullptr);
+}
+
+void TeachRoute::ReplayFinalTaskEntry(void* context) {
+    if (context != nullptr) {
+        static_cast<TeachRoute*>(context)->RunReplayFinalSegment();
         static_cast<TeachRoute*>(context)->replay_task_ = nullptr;
     }
     vTaskDelete(nullptr);
@@ -1127,6 +1213,123 @@ void TeachRoute::RunReplayTurnAtWp2() {
              replay_turn_delta_deg_, result.target_deg, result.heading_deg,
              result.error_deg);
     Notify("B2 TURN DONE: STOPPED", 3500);
+    UpdateMapStatus();
+}
+
+void TeachRoute::RunReplayFinalSegment() {
+    const RouteWaypoint& wp2 = loaded_route_.waypoints[1];
+    const RouteWaypoint& wp3 = loaded_route_.waypoints[2];
+    const float dx = static_cast<float>(wp3.x_mm - wp2.x_mm);
+    const float dy = static_cast<float>(wp3.y_mm - wp2.y_mm);
+    const int target_mm = static_cast<int>(lroundf(sqrtf(dx * dx + dy * dy)));
+
+    RobotState state;
+    RobotObstacleStatus obstacle;
+    const char* reason = "OK";
+    bool safety_ready = false;
+    unsigned int precheck_attempt = 0;
+    for (precheck_attempt = 1; precheck_attempt <= 3; ++precheck_attempt) {
+        char stage[32];
+        snprintf(stage, sizeof(stage), "B3_WORKER_PRECHECK_%u",
+                 precheck_attempt);
+        if (CheckReplaySafety(stage, state, obstacle, reason)) {
+            safety_ready = true;
+            ESP_LOGI(kTag,
+                     "ROUTE,REPLAY=B3_PRECHECK_READY,ATTEMPT=%u/3,REASON=OK",
+                     precheck_attempt);
+            break;
+        }
+        const bool retryable = strcmp(reason, "STATE_RX") == 0 ||
+                               strcmp(reason, "OBS_RX") == 0;
+        if (!retryable) break;
+        if (precheck_attempt < 3) {
+            ESP_LOGW(kTag,
+                     "ROUTE,REPLAY=B3_PRECHECK_RETRY,ATTEMPT=%u/3,REASON=%s",
+                     precheck_attempt, reason);
+            vTaskDelay(pdMS_TO_TICKS(precheck_attempt == 1 ? 100 : 150));
+        }
+    }
+
+    if (!safety_ready) {
+        replay_motion_running_.store(false);
+        mode_ = Mode::REPLAY_HOLD;
+        const bool exhausted = precheck_attempt >= 3 &&
+                               (strcmp(reason, "STATE_RX") == 0 ||
+                                strcmp(reason, "OBS_RX") == 0);
+        const char* stop_reason = exhausted
+            ? (strcmp(reason, "STATE_RX") == 0
+                   ? "STATE_RX_RETRY_EXHAUSTED"
+                   : "OBS_RX_RETRY_EXHAUSTED")
+            : reason;
+        ESP_LOGW(kTag,
+                 "ROUTE,REPLAY=B3_STOP,REASON=%s,TRAVEL_MM=0,CONTINUE=NO,MOTOR=0",
+                 stop_reason);
+        UpdateMapStatus();
+        return;
+    }
+
+    const bool ai_mode = robot_uart_->SetMode(true, 700);
+    if (!ai_mode) {
+        replay_motion_running_.store(false);
+        mode_ = Mode::REPLAY_HOLD;
+        ESP_LOGW(kTag,
+                 "ROUTE,REPLAY=B3_STOP,REASON=AI_MODE_SESSION,CONTINUE=NO,MOTOR=0");
+        UpdateMapStatus();
+        return;
+    }
+    ESP_LOGI(kTag, "ROUTE,REPLAY=B3_SESSION,PASS=1,MODE=AI");
+
+    RobotDistanceResult result;
+    const bool moved = robot_uart_->MoveDistance(true, target_mm,
+                                                  kReplayB1Speed, result,
+                                                  kReplayB3TimeoutMs);
+    bool success = false;
+    if (replay_cancel_requested_.load()) {
+        reason = "X_CANCEL";
+    } else if (robot_uart_->Ps2OverrideActive()) {
+        reason = "PS2_OVERRIDE";
+    } else if (mission_manager_->IsAiObstacleHoldActive()) {
+        reason = "AI_OBSTACLE_HOLD";
+    } else {
+        RobotState after;
+        if (robot_uart_->GetState(after, 500) && after.valid &&
+            after.brake_enabled) {
+            reason = "R3_BRAKE";
+        } else if (moved && result.completed) {
+            success = true;
+            reason = "DONE";
+        } else {
+            reason = moved ? "MOVE_INCOMPLETE" : "MOVE_FAIL";
+        }
+    }
+
+    if (!robot_uart_->Ps2OverrideActive()) {
+        const bool restored = robot_uart_->SetMode(false, 700);
+        ESP_LOGI(kTag, "ROUTE,REPLAY=B3_SESSION,MODE=MANUAL,RESTORE=%s",
+                 restored ? "PASS" : "FAIL");
+    }
+
+    replay_motion_running_.store(false);
+    replay_travel_mm_ = static_cast<uint32_t>(lroundf(result.travelled_mm));
+    replay_error_mm_ = static_cast<uint32_t>(lroundf(
+        fabsf(result.travelled_mm - result.target_mm)));
+    if (success) {
+        mode_ = Mode::REPLAY_COMPLETE;
+        ESP_LOGI(kTag,
+                 "ROUTE,REPLAY=B3_DONE,WP=3/3,TARGET_MM=%.1f,TRAVEL_MM=%.1f,ERR_MM=%.1f,CONTINUE=NO,TURN=0,MOTOR=0",
+                 result.target_mm, result.travelled_mm,
+                 fabsf(result.travelled_mm - result.target_mm));
+        Notify("B3 COMPLETE: ROUTE FINISHED", 4000);
+    } else {
+        mode_ = Mode::REPLAY_HOLD;
+        ESP_LOGW(kTag,
+                 "ROUTE,REPLAY=B3_STOP,REASON=%s,TRAVEL_MM=%.1f,CONTINUE=NO,MOTOR=0",
+                 reason, result.travelled_mm);
+        Notify("B3 STOPPED: NO CONTINUE", 4000);
+    }
+    replay_cancel_requested_.store(false);
+    replay_plan_valid_ = false;
+    odometry_valid_ = false;
     UpdateMapStatus();
 }
 

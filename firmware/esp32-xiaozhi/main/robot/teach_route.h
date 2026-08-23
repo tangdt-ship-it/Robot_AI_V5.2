@@ -80,10 +80,13 @@ private:
     bool RunReplayDryRun();
     bool StartReplayFirstSegment();
     bool StartReplayTurnAtWp2();
+    bool StartReplayFinalSegment();
     static void ReplayTaskEntry(void* context);
     static void ReplayTurnTaskEntry(void* context);
+    static void ReplayFinalTaskEntry(void* context);
     void RunReplayFirstSegment();
     void RunReplayTurnAtWp2();
+    void RunReplayFinalSegment();
     bool CheckReplaySafety(const char* stage, RobotState& state,
                            RobotObstacleStatus& obstacle,
                            const char*& reason) const;
