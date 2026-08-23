@@ -3,6 +3,11 @@
 
 #include <Arduino.h>
 
+enum class LcdPage : uint8_t {
+  ROBOT = 0,
+  MAP = 1,
+};
+
 struct LcdDisplayData {
   float compassAngle = 0.0f;
   const char* ps2Status = "WAIT";
@@ -34,6 +39,17 @@ class LcdDisplay {
   void forceRefresh();
   bool isAvailable() const { return available_; }
 
+  // The STM32 LCD owns the lightweight Map page. The ESP32 TFT remains
+  // dedicated to Xiaozhi/chat/camera. These methods only change presentation;
+  // they never affect motor authority or navigation state.
+  void setPage(LcdPage page);
+  void togglePage();
+  LcdPage page() const { return page_; }
+  bool isMapPage() const { return page_ == LcdPage::MAP; }
+  void setMapSlot(uint8_t slot);
+  void toggleMapSlot();
+  uint8_t mapSlot() const { return mapSlot_; }
+
  private:
   class SoftI2C {
    public:
@@ -63,6 +79,8 @@ class LcdDisplay {
   void pulseEnable(uint8_t value);
   void setCursor(uint8_t column, uint8_t row);
   void buildDesiredLines();
+  void buildRobotLines();
+  void buildMapLines();
   bool sendOneDirtyCharacter();
   static void padLine(char (&line)[21]);
 
@@ -70,6 +88,8 @@ class LcdDisplay {
   uint8_t address_;
   bool available_ = false;
   LcdDisplayData data_;
+  LcdPage page_ = LcdPage::ROBOT;
+  uint8_t mapSlot_ = 1;
   char desired_[4][21] = {};
   char sent_[4][21] = {};
   uint32_t lastRenderMs_ = 0;
