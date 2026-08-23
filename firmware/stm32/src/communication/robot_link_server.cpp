@@ -1,5 +1,8 @@
 #include <communication/robot_link_server.h>
+#include <display/lcd_display.h>
 #include <robot_config.h>
+
+extern LcdDisplay display;
 
 namespace {
 const char* ObstacleZoneName(uint8_t zone) {
@@ -33,6 +36,7 @@ bool RequiresIntegrity(const char* frame) {
          strncmp(frame, "CMD,", 4) == 0 ||
          strncmp(frame, "TURN,", 5) == 0 ||
          strncmp(frame, "SET,", 4) == 0 ||
+         strncmp(frame, "MAP,UI,", 7) == 0 ||
          strcmp(frame, "COMPASS,RESET") == 0 ||
          strcmp(frame, "ENCODER,RESET") == 0 ||
          strcmp(frame, "HB") == 0 || strcmp(frame, "KEEPALIVE") == 0;
@@ -271,10 +275,6 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
                                        const RobotTelemetry& telemetry,
                                        bool integrityProtected) {
   const uint32_t now = millis();
-  // Read-only legacy angle-bracket requests remain available for diagnostics.
-  // Every state-changing V4 command must arrive inside the CRC16/sequence
-  // protected RobotLink frame. STOP is deliberately exempt so an emergency
-  // stop can still be issued by a simple terminal.
   lastConfirmedRxMs_ = now;
   if (integrityProtected) lastSessionActivityMs_ = now;
   if (strcmp(frame, "STOP") != 0 && strcmp(frame, "CMD,STOP") != 0 &&
@@ -473,6 +473,32 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     return;
   }
 
+  if (strncmp(frame, "MAP,UI,", 7) == 0) {
+    unsigned int slot = 0;
+    unsigned int storeState = 0;
+    unsigned int mode = 0;
+    unsigned int points = 0;
+    unsigned int maxPoints = 0;
+    unsigned long lengthMm = 0;
+    char trailing = '\0';
+    const int fields = sscanf(frame, "MAP,UI,%u,%u,%u,%u,%u,%lu%c", &slot,
+                              &storeState, &mode, &points, &maxPoints,
+                              &lengthMm, &trailing);
+    if (fields != 6 || slot < 1U || slot > 2U || storeState > 3U ||
+        mode > 3U || maxPoints == 0U || maxPoints > 128U ||
+        points > maxPoints) {
+      serial_.print("<ERR,MAP_UI>\r\n");
+      return;
+    }
+    display.setMapStatus(static_cast<uint8_t>(slot),
+                         static_cast<uint8_t>(storeState),
+                         static_cast<uint8_t>(mode),
+                         static_cast<uint16_t>(points),
+                         static_cast<uint16_t>(maxPoints),
+                         static_cast<uint32_t>(lengthMm));
+    return;
+  }
+
   RobotLinkConfigRequest config;
   int configValue = 0;
   char trailing = '\0';
@@ -498,10 +524,6 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
   } else if (strcmp(frame, "SET,RAMP,OFF") == 0) {
     config.type = RobotLinkConfigType::SET_RAMP;
   } else if (strcmp(frame, "COMPASS,RESET") == 0) {
-    // Match the physical L2 path: reset the reference/fusion state even when
-    // the compass sensor is temporarily LOST.  The main loop performs
-    // compass.resetZero() and heading.reset() before ACK; a valid compass
-    // sample is optional for this reference reset.
     debug_.println("STM32_COMMAND_RECEIVED=COMPASS,RESET");
     config.type = RobotLinkConfigType::RESET_COMPASS;
   } else if (strcmp(frame, "ENCODER,RESET") == 0) {
@@ -527,8 +549,6 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     return;
   }
   if (strcmp(frame, "MODE,AI") == 0) {
-    // Entering AI ownership never starts motion. Force STOP first; motion
-    // remains locked until its own raised-wheel validation phase.
     stopRequested_ = true;
     aiMode_ = true;
     lastSessionActivityMs_ = now;
@@ -595,8 +615,7 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
                     &trailingMotion) == 2) {
     motion = RobotLinkMotion::TURN_ABSOLUTE;
     deferredAck = true;
-  } else
-  if (sscanf(frame, "CMD,FWD,%d", &speed) == 1) {
+  } else if (sscanf(frame, "CMD,FWD,%d", &speed) == 1) {
     motion = RobotLinkMotion::FORWARD;
     ack = "<ACK,FWD>\r\n";
   } else if (sscanf(frame, "CMD,BACK,%d", &speed) == 1) {
@@ -691,7 +710,6 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     return;
   }
 
-  // Angle turns remain locked until basic pulse motions are validated.
   serial_.print("<ERR,UNKNOWN_COMMAND>\r\n");
 }
 
@@ -729,9 +747,6 @@ void RobotLinkServer::handleFrame(const RobotLink::Frame& frame,
   } else {
     snprintf(body, sizeof(body), "%s,%s", frame.type, frame.payload);
   }
-  // HELLO is the explicit peer-session boundary.  It must be accepted before
-  // anti-replay so an ESP32 reboot (sequence restarted at zero) cannot lock
-  // the link, while every subsequent motion command remains replay-protected.
   if (strcmp(body, "HELLO,PROTO,3") == 0) {
     rxSequenceInitialized_ = true;
     lastRxSequence_ = frame.sequence;
@@ -743,9 +758,6 @@ void RobotLinkServer::handleFrame(const RobotLink::Frame& frame,
     return;
   }
 
-  // STOP is idempotent and is intentionally accepted even when a repeated
-  // sequence is received. Every other command must monotonically advance the
-  // 16-bit sequence number to reject duplicated/replayed motor commands.
   const bool isStop = strcmp(frame.type, RobotLink::MessageType::STOP) == 0;
   if (!isStop && !acceptSequence(frame.sequence)) {
     serial_.print("<ERR,SEQ_REPLAY>\r\n");
@@ -762,8 +774,6 @@ bool RobotLinkServer::acceptSequence(uint16_t sequence) {
     return true;
   }
   const uint16_t delta = static_cast<uint16_t>(sequence - lastRxSequence_);
-  // Accept forward movement within half of the 16-bit sequence space. This
-  // naturally supports 65535 -> 0 wrap while rejecting duplicates/replays.
   if (delta == 0U || delta >= 0x8000U) return false;
   lastRxSequence_ = sequence;
   return true;
@@ -791,9 +801,6 @@ void RobotLinkServer::update(const RobotTelemetry& telemetry) {
       serial_.print(",DIST,");
       serial_.print(telemetry.obstacleDistanceCm, 1);
       serial_.print(">\r\n");
-      // DETECTED is telemetry only. Do not cancel the motion lease here:
-      // an avoidance turn can legitimately sweep past the same obstacle.
-      // Hard stopping is reported separately by EVENT,OBSTACLE,STOPPED.
     } else if (telemetry.obstacleZone == 1U) {
       serial_.print("<EVENT,OBSTACLE,CLEAR,DIST,");
       serial_.print(telemetry.obstacleDistanceCm, 1);
@@ -807,9 +814,6 @@ void RobotLinkServer::update(const RobotTelemetry& telemetry) {
     serial_.print(",DIST,");
     serial_.print(telemetry.obstacleDistanceCm, 1);
     serial_.print(">\r\n");
-    // Translational motion is finished by the hard obstacle limiter. Keep a
-    // turn lease alive so its heartbeat/result lifecycle is not aborted by a
-    // front-sensor warning while rotating in place.
     if (!turnLeaseActive_) motionLeaseActive_ = false;
   }
   const bool encoderFault = telemetry.encoderHealth >= 3U &&
@@ -840,8 +844,6 @@ void RobotLinkServer::update(const RobotTelemetry& telemetry) {
     }
   }
   if (aiMode_ && telemetry.ps2CommandActive) {
-    // PS2 preempts AI ownership without injecting a stop into the live manual
-    // command. RobotController switches to the PS2 command in the same loop.
     aiMode_ = false;
     motionRequested_ = false;
     motionRequest_ = {};
@@ -854,9 +856,6 @@ void RobotLinkServer::update(const RobotTelemetry& telemetry) {
   }
   if (aiMode_ && motionLeaseActive_ &&
       (now - lastMotionHeartbeatMs_) > ROBOT_MOTION_LEASE_TIMEOUT_MS) {
-    // V4 motion lease: stop the chassis immediately, but do not collapse the
-    // whole AI session. A later CRC-valid command may continue after the ESP32
-    // has recovered and explicitly starts a new motion.
     motionRequested_ = false;
     motionRequest_ = {};
     motionRequestInFlight_ = false;
