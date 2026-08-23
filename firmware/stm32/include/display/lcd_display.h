@@ -58,6 +58,10 @@ class LcdDisplay {
   void setMapSlot(uint8_t slot);
   void toggleMapSlot();
   uint8_t mapSlot() const { return mapSlot_; }
+  bool mapSlotLocked() const {
+    const LcdMapStatus& status = mapStatus_[mapSlot_ - 1U];
+    return status.valid && (status.mode == 1U || status.mode == 3U);
+  }
   void setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
                     uint16_t points, uint16_t maxPoints,
                     uint32_t lengthMm);
