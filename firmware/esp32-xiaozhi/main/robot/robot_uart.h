@@ -40,8 +40,6 @@ struct RobotPs2Status {
     bool enabled = false;
     bool fresh = false;
     uint32_t age_ms = 0;
-    // Raw STM32 PS2 mask is active-low. buttons_valid distinguishes an older
-    // peer that did not yet provide BTN from an all-buttons-released 0xFFFF.
     bool buttons_valid = false;
     uint16_t buttons = 0xFFFF;
 };
@@ -59,8 +57,6 @@ struct RobotObstacleStatus {
     char front_left_zone[12] = {};
     char front_right_zone[12] = {};
     char suggested_avoidance[8] = {};
-    // STM32 raw channels are physically crossed on this chassis. Keep raw
-    // fields above for diagnostics; use these accessors for robot-frame logic.
     float RobotLeftDistanceCm() const { return front_right_distance_cm; }
     float RobotRightDistanceCm() const { return front_left_distance_cm; }
     const char* RobotLeftZone() const { return front_right_zone; }
@@ -183,12 +179,12 @@ public:
         map_event_context_ = context;
     }
 
-    // STM32 sets this when a live PS2 command takes ownership from AI.
     bool Ps2OverrideActive() const;
-
     bool IsConnected() const;
 
 private:
+    friend class TeachRoute;
+
     static constexpr EventBits_t kResponsePong = BIT0;
     static constexpr EventBits_t kResponseAck = BIT1;
     static constexpr EventBits_t kResponseState = BIT2;
