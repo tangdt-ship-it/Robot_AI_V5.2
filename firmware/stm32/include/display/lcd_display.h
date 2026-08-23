@@ -30,6 +30,15 @@ struct LcdDisplayData {
   const char* fusionStatus = "LOST";
 };
 
+struct LcdMapStatus {
+  bool valid = false;
+  uint8_t storeState = 0;  // ESP32 RouteSlotState: EMPTY/SAVED/INVALID/ERROR.
+  uint8_t mode = 0;        // ESP32 TeachRoute mode: READY/TEACH/LOADED/DELETE.
+  uint16_t points = 0;
+  uint16_t maxPoints = 128;
+  uint32_t lengthMm = 0;
+};
+
 class LcdDisplay {
  public:
   LcdDisplay(uint32_t sclPin, uint32_t sdaPin, uint8_t address);
@@ -49,6 +58,9 @@ class LcdDisplay {
   void setMapSlot(uint8_t slot);
   void toggleMapSlot();
   uint8_t mapSlot() const { return mapSlot_; }
+  void setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
+                    uint16_t points, uint16_t maxPoints,
+                    uint32_t lengthMm);
 
  private:
   class SoftI2C {
@@ -90,6 +102,7 @@ class LcdDisplay {
   LcdDisplayData data_;
   LcdPage page_ = LcdPage::ROBOT;
   uint8_t mapSlot_ = 1;
+  LcdMapStatus mapStatus_[2] = {};
   char desired_[4][21] = {};
   char sent_[4][21] = {};
   uint32_t lastRenderMs_ = 0;
