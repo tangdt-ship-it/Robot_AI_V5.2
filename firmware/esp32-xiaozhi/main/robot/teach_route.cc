@@ -867,7 +867,13 @@ bool TeachRoute::CheckReplaySafety(const char* stage, RobotState& state,
 }
 
 bool TeachRoute::StartReplayFirstSegment() {
-    if (mode_ != Mode::LOADED || !replay_plan_valid_ ||
+    if (mode_ != Mode::REPLAY_CHECKED) {
+        ESP_LOGW(kTag,
+                 "ROUTE,REPLAY=B1_REJECT,REASON=MODE,MODE=%u,EXPECTED=REPLAY_CHECKED,MOTOR=0",
+                 static_cast<unsigned>(mode_));
+        return false;
+    }
+    if (!replay_plan_valid_ ||
         replay_motion_running_.load() || robot_uart_ == nullptr ||
         mission_manager_ == nullptr) {
         return false;
