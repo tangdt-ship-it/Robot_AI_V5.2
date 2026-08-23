@@ -89,14 +89,16 @@ class Ps2Controller {
   // Map action across an L3 page transition.
   bool mapEdgesInitialized_ = false;
   bool previousMapL3_ = false;
+  bool previousMapStart_ = false;
   bool previousMapSelect_ = false;
   bool previousMapTriangle_ = false;
   bool previousMapSquare_ = false;
   bool previousMapCircle_ = false;
+  bool previousMapCross_ = false;
 
   // Map actions are deliberately disarmed on every page transition and after
   // reconnect. They are armed only after two consecutive fresh frames show
-  // L3/SELECT/TRIANGLE/SQUARE/CIRCLE all released while the LCD is on MAP.
+  // every Map-related button released while the LCD is on MAP.
   bool mapActionsArmed_ = false;
   uint8_t mapNeutralReleaseFrames_ = 0;
   uint32_t lastMapPageToggleMs_ = 0;
