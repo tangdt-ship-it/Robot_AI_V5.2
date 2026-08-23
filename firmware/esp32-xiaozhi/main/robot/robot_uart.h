@@ -122,6 +122,8 @@ struct RobotFusionStatus {
 class RobotUart {
 public:
     using ObstacleStoppedCallback = void (*)(void*, const RobotObstacleStatus&, bool);
+    using MapEventCallback = void (*)(void*, const char*, uint8_t);
+
     RobotUart(gpio_num_t rx_pin, gpio_num_t tx_pin,
               uart_port_t port = UART_NUM_1, int baud_rate = 115200)
         : rx_pin_(rx_pin), tx_pin_(tx_pin), port_(port), baud_rate_(baud_rate) {}
@@ -173,7 +175,12 @@ public:
                          uint32_t timeout_ms = 500);
     bool GetCachedObstacle(RobotObstacleStatus& status);
     void SetObstacleStoppedCallback(ObstacleStoppedCallback callback, void* context) {
-        obstacle_stopped_callback_ = callback; obstacle_stopped_context_ = context;
+        obstacle_stopped_callback_ = callback;
+        obstacle_stopped_context_ = context;
+    }
+    void SetMapEventCallback(MapEventCallback callback, void* context) {
+        map_event_callback_ = callback;
+        map_event_context_ = context;
     }
 
     // STM32 sets this when a live PS2 command takes ownership from AI.
@@ -206,6 +213,7 @@ private:
     void HeartbeatTask();
     void RunLinkTest();
     void HandleFrame(const char* frame);
+    void DispatchMapEvent(const char* action, uint8_t slot);
     bool SendFrame(const char* body);
     bool SendAndWait(const char* body, EventBits_t expected,
                      uint32_t timeout_ms);
@@ -243,6 +251,8 @@ private:
     std::atomic_bool ps2_override_active_{false};
     ObstacleStoppedCallback obstacle_stopped_callback_ = nullptr;
     void* obstacle_stopped_context_ = nullptr;
+    MapEventCallback map_event_callback_ = nullptr;
+    void* map_event_context_ = nullptr;
     gpio_num_t rx_pin_;
     gpio_num_t tx_pin_;
     uart_port_t port_;
