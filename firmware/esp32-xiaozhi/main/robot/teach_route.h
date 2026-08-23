@@ -29,6 +29,12 @@ public:
 
 private:
     enum class Mode : uint8_t { READY, TEACHING, LOADED, DELETE_CONFIRM };
+    enum class WaypointSource : uint8_t {
+        MANUAL,
+        AUTO_DISTANCE,
+        AUTO_CORNER,
+        ENDPOINT,
+    };
 
     static void AutoTimerEntry(void* context);
     void AutoTimerTick();
@@ -39,6 +45,11 @@ private:
     void CancelTeach();
     void UpdateAutoWaypoint();
     void AddWaypoint(bool manual_mark);
+    bool AppendWaypoint(const RouteWaypoint& point, WaypointSource source);
+    bool ReadCurrentWaypoint(RouteWaypoint& point) const;
+    void TrackTravel(const RouteWaypoint& point);
+    void ResetSmartTracking();
+    void ResetCornerTracking();
     void UndoWaypoint();
     void SaveTeach();
     void LoadSelected();
@@ -50,6 +61,8 @@ private:
     bool ReadOdometry();
     static int16_t HeadingCdeg(float heading_rad);
     static float HeadingDeltaDeg(int16_t first, int16_t second);
+    static const char* WaypointSourceName(WaypointSource source);
+    static uint8_t WaypointSourceFlags(WaypointSource source);
 
     RobotUart* robot_uart_ = nullptr;
     MissionManager* mission_manager_ = nullptr;
@@ -62,6 +75,15 @@ private:
     float start_y_mm_ = 0.0f;
     float start_heading_rad_ = 0.0f;
     bool odometry_valid_ = false;
+
+    // Smart Waypoint V1 keeps frequent odometry samples for accurate travelled
+    // length but stores only manual points, sparse safety checkpoints and one
+    // stabilized point per meaningful corner. This preserves the 128-point V1
+    // storage format while extending practical route length dramatically.
+    RouteWaypoint last_sample_{};
+    bool last_sample_valid_ = false;
+    bool corner_pending_ = false;
+    uint8_t corner_stable_samples_ = 0;
 
     esp_timer_handle_t auto_timer_ = nullptr;
     std::atomic_bool auto_timer_enabled_{false};
