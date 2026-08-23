@@ -54,14 +54,14 @@ void Ps2Controller::reconnect(uint32_t nowMs) {
   state_.frameFresh = false;
   lastReconnectMs_ = nowMs;
 
-  // Re-arm Map edges from the first fresh frame after reconnect. This avoids
-  // synthesizing a press from stale pre-disconnect state.
   mapEdgesInitialized_ = false;
   previousMapL3_ = false;
+  previousMapStart_ = false;
   previousMapSelect_ = false;
   previousMapTriangle_ = false;
   previousMapSquare_ = false;
   previousMapCircle_ = false;
+  previousMapCross_ = false;
   mapActionsArmed_ = false;
   mapNeutralReleaseFrames_ = 0U;
   lastMapPageToggleMs_ = 0U;
@@ -122,25 +122,29 @@ void Ps2Controller::captureState(uint32_t nowMs) {
 
   if (!mapEdgesInitialized_) {
     previousMapL3_ = state_.l3;
+    previousMapStart_ = state_.start;
     previousMapSelect_ = state_.select;
     previousMapTriangle_ = state_.triangle;
     previousMapSquare_ = state_.square;
     previousMapCircle_ = state_.circle;
+    previousMapCross_ = state_.cross;
     mapEdgesInitialized_ = true;
     mapActionsArmed_ = false;
     mapNeutralReleaseFrames_ = 0U;
     resetMapPressTracking();
   } else {
     const bool l3Pressed = state_.l3 && !previousMapL3_;
+    const bool startPressed = state_.start && !previousMapStart_;
     const bool selectPressed = state_.select && !previousMapSelect_;
     const bool selectReleased = !state_.select && previousMapSelect_;
     const bool trianglePressed = state_.triangle && !previousMapTriangle_;
     const bool squarePressed = state_.square && !previousMapSquare_;
     const bool squareReleased = !state_.square && previousMapSquare_;
     const bool circlePressed = state_.circle && !previousMapCircle_;
+    const bool crossPressed = state_.cross && !previousMapCross_;
     const bool allMapButtonsReleased =
-        !state_.l3 && !state_.select && !state_.triangle && !state_.square &&
-        !state_.circle;
+        !state_.l3 && !state_.start && !state_.select && !state_.triangle &&
+        !state_.square && !state_.circle && !state_.cross;
 
     if (l3Pressed) {
       if (lastMapPageToggleMs_ == 0U ||
@@ -168,8 +172,14 @@ void Ps2Controller::captureState(uint32_t nowMs) {
         mapNeutralReleaseFrames_ = 0U;
       }
     } else {
-      // SELECT short toggles slot only on release. Holding it emits one
-      // SELECT_LONG and suppresses the short slot change on release.
+      // START is free from the Robot page and becomes an intuitive Map alias
+      // for TRIANGLE: start Teach when idle/loaded, or mark while teaching.
+      if (startPressed) emitMapEvent("TRIANGLE", display.mapSlot());
+
+      // CROSS (X) no longer toggles ramp. In Map it is a quick Cancel alias
+      // for SELECT_LONG, so Teach can be cancelled without a long press.
+      if (crossPressed) emitMapEvent("SELECT_LONG", display.mapSlot());
+
       if (selectPressed) {
         mapSelectPressActive_ = true;
         mapSelectLongFired_ = false;
@@ -190,8 +200,6 @@ void Ps2Controller::captureState(uint32_t nowMs) {
         mapSelectStartedMs_ = 0U;
       }
 
-      // SQUARE short = Undo while teaching. SQUARE long = Delete request when
-      // idle/loaded. Exactly one semantic event is emitted for each press.
       if (squarePressed) {
         mapSquarePressActive_ = true;
         mapSquareLongFired_ = false;
@@ -214,10 +222,12 @@ void Ps2Controller::captureState(uint32_t nowMs) {
     }
 
     previousMapL3_ = state_.l3;
+    previousMapStart_ = state_.start;
     previousMapSelect_ = state_.select;
     previousMapTriangle_ = state_.triangle;
     previousMapSquare_ = state_.square;
     previousMapCircle_ = state_.circle;
+    previousMapCross_ = state_.cross;
   }
 
   const bool analogFrame = driver_.mode() == 0x73 || driver_.mode() == 0x79;
@@ -287,10 +297,21 @@ uint16_t Ps2Controller::maskFor(Ps2Button button) {
 }
 
 bool Ps2Controller::buttonPressed(Ps2Button button) const {
-  return state_.frameFresh && driver_.ButtonPressed(maskFor(button));
+  if (!state_.frameFresh) return false;
+  // RobotController still asks for the legacy START brake edge. Remap that
+  // query to R3 so START itself is completely free for Map controls.
+  if (button == Ps2Button::START) return driver_.ButtonPressed(PSB_R3);
+  // CROSS no longer owns any Robot-page function (legacy ramp toggle removed).
+  // Its raw state remains available above for Map event generation.
+  if (button == Ps2Button::CROSS) return false;
+  return driver_.ButtonPressed(maskFor(button));
 }
+
 bool Ps2Controller::buttonReleased(Ps2Button button) const {
-  return state_.frameFresh && driver_.ButtonReleased(maskFor(button));
+  if (!state_.frameFresh) return false;
+  if (button == Ps2Button::START) return driver_.ButtonReleased(PSB_R3);
+  if (button == Ps2Button::CROSS) return false;
+  return driver_.ButtonReleased(maskFor(button));
 }
 
 bool Ps2Controller::motionCommandActive() const {
