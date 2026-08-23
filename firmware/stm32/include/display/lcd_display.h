@@ -33,7 +33,7 @@ struct LcdDisplayData {
 struct LcdMapStatus {
   bool valid = false;
   uint8_t storeState = 0;  // ESP32 RouteSlotState: EMPTY/SAVED/INVALID/ERROR.
-  uint8_t mode = 0;        // ESP32 TeachRoute mode: READY/TEACH/LOADED/DELETE.
+  uint8_t mode = 0;        // 0 READY, 1 TEACH, 2 LOADED, 3 DELETE, 4 REPLAY_READY.
   uint16_t points = 0;
   uint16_t maxPoints = 128;
   uint32_t lengthMm = 0;
@@ -60,7 +60,8 @@ class LcdDisplay {
   uint8_t mapSlot() const { return mapSlot_; }
   bool mapSlotLocked() const {
     const LcdMapStatus& status = mapStatus_[mapSlot_ - 1U];
-    return status.valid && (status.mode == 1U || status.mode == 3U);
+    return status.valid &&
+           (status.mode == 1U || status.mode == 3U || status.mode == 4U);
   }
   void setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
                     uint16_t points, uint16_t maxPoints,
