@@ -131,7 +131,10 @@ void LcdDisplay::toggleMapSlot() {
 
 void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
                               uint16_t points, uint16_t maxPoints,
-                              uint32_t lengthMm) {
+                              uint32_t lengthMm, uint16_t replayWp,
+                              uint16_t replayTotal, uint32_t replayTargetMm,
+                              uint32_t replayTravelMm,
+                              uint32_t replayErrorMm) {
   const uint8_t normalized = slot == 2U ? 2U : 1U;
   LcdMapStatus& status = mapStatus_[normalized - 1U];
   status.valid = true;
@@ -140,6 +143,11 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
   status.points = points;
   status.maxPoints = maxPoints == 0U ? 128U : maxPoints;
   status.lengthMm = lengthMm;
+  status.replayWp = replayWp;
+  status.replayTotal = replayTotal;
+  status.replayTargetMm = replayTargetMm;
+  status.replayTravelMm = replayTravelMm;
+  status.replayErrorMm = replayErrorMm;
   if (mapSlot_ == normalized) forceRefresh();
 }
 
@@ -190,6 +198,61 @@ void LcdDisplay::buildMapLines() {
   const uint32_t lengthTenthsM = (status.lengthMm + 50U) / 100U;
   const unsigned long wholeM = static_cast<unsigned long>(lengthTenthsM / 10U);
   const unsigned long tenthM = static_cast<unsigned long>(lengthTenthsM % 10U);
+
+  if (status.mode == 4U) {
+    snprintf(desired_[0], 21, "MAP%u REPLAY READY", mapSlot_);
+    snprintf(desired_[1], 21, "WP:%02u/%02u L:%lu.%lum",
+             static_cast<unsigned>(status.replayWp),
+             static_cast<unsigned>(status.replayTotal), wholeM, tenthM);
+    snprintf(desired_[2], 21, "START CHECK NO MOTOR");
+    snprintf(desired_[3], 21, "X CANCEL L3 EXIT");
+    return;
+  }
+  if (status.mode == 5U) {
+    snprintf(desired_[0], 21, "MAP%u CHECK PASS", mapSlot_);
+    snprintf(desired_[1], 21, "WP:%02u/%02u T:%lumm",
+             static_cast<unsigned>(status.replayWp),
+             static_cast<unsigned>(status.replayTotal),
+             static_cast<unsigned long>(status.replayTargetMm));
+    snprintf(desired_[2], 21, "START GO WP%u",
+             static_cast<unsigned>(status.replayWp));
+    snprintf(desired_[3], 21, "X CANCEL L3 EXIT");
+    return;
+  }
+  if (status.mode == 6U) {
+    snprintf(desired_[0], 21, "MAP%u RUN WP:%02u/%02u", mapSlot_,
+             static_cast<unsigned>(status.replayWp),
+             static_cast<unsigned>(status.replayTotal));
+    snprintf(desired_[1], 21, "T:%lumm V:%lumm",
+             static_cast<unsigned long>(status.replayTargetMm),
+             static_cast<unsigned long>(status.replayTravelMm));
+    snprintf(desired_[2], 21, "B1 STRAIGHT NO TURN");
+    snprintf(desired_[3], 21, "X STOP R3 BRAKE");
+    return;
+  }
+  if (status.mode == 7U) {
+    snprintf(desired_[0], 21, "MAP%u HOLD WP:%02u/%02u", mapSlot_,
+             static_cast<unsigned>(status.replayWp),
+             static_cast<unsigned>(status.replayTotal));
+    snprintf(desired_[1], 21, "T:%lu V:%lu E:%lu",
+             static_cast<unsigned long>(status.replayTargetMm),
+             static_cast<unsigned long>(status.replayTravelMm),
+             static_cast<unsigned long>(status.replayErrorMm));
+    snprintf(desired_[2], 21, "SAFETY STOPPED");
+    snprintf(desired_[3], 21, "X CANCEL L3 EXIT");
+    return;
+  }
+  if (status.mode == 8U) {
+    snprintf(desired_[0], 21, "MAP%u SEG DONE", mapSlot_);
+    snprintf(desired_[1], 21, "WP:%02u/%02u E:%lumm",
+             static_cast<unsigned>(status.replayWp),
+             static_cast<unsigned>(status.replayTotal),
+             static_cast<unsigned long>(status.replayErrorMm));
+    snprintf(desired_[2], 21, "STOPPED NO CONTINUE");
+    snprintf(desired_[3], 21, "X EXIT");
+    return;
+  }
+
   const char* title = "READY";
   if (status.mode == 1U) {
     title = "TEACH";
@@ -197,8 +260,6 @@ void LcdDisplay::buildMapLines() {
     title = "LOADED";
   } else if (status.mode == 3U) {
     title = "DELETE?";
-  } else if (status.mode == 4U) {
-    title = "REPLAY READY";
   } else if (status.storeState == 0U) {
     title = "EMPTY";
   } else if (status.storeState == 1U) {
@@ -225,9 +286,6 @@ void LcdDisplay::buildMapLines() {
   } else if (status.mode == 3U) {
     snprintf(desired_[2], 21, "CIR YES");
     snprintf(desired_[3], 21, "SELH CANCEL L3 EXIT");
-  } else if (status.mode == 4U) {
-    snprintf(desired_[2], 21, "START CHECK NO MOTOR");
-    snprintf(desired_[3], 21, "X CANCEL L3 EXIT");
   } else if (status.storeState == 0U) {
     snprintf(desired_[2], 21, "START TEACH");
     snprintf(desired_[3], 21, "SEL MAP L3 EXIT");
