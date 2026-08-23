@@ -220,13 +220,13 @@ void LcdDisplay::buildMapLines() {
     return;
   }
   if (status.mode == 6U) {
-    snprintf(desired_[0], 21, "MAP%u RUN WP:%02u/%02u", mapSlot_,
+    snprintf(desired_[0], 21, "MAP%u TURN WP:%02u/%02u", mapSlot_,
              static_cast<unsigned>(status.replayWp),
              static_cast<unsigned>(status.replayTotal));
-    snprintf(desired_[1], 21, "T:%lumm V:%lumm",
+    snprintf(desired_[1], 21, "A:+%lddeg E:%lddeg",
              static_cast<unsigned long>(status.replayTargetMm),
-             static_cast<unsigned long>(status.replayTravelMm));
-    snprintf(desired_[2], 21, "B1 STRAIGHT NO TURN");
+             static_cast<unsigned long>(status.replayErrorMm));
+    snprintf(desired_[2], 21, "TURN CLOSED LOOP");
     snprintf(desired_[3], 21, "X STOP R3 BRAKE");
     return;
   }
@@ -243,7 +243,7 @@ void LcdDisplay::buildMapLines() {
     return;
   }
   if (status.mode == 8U) {
-    snprintf(desired_[0], 21, "MAP%u SEG DONE", mapSlot_);
+    snprintf(desired_[0], 21, "MAP%u TURN DONE", mapSlot_);
     snprintf(desired_[1], 21, "WP:%02u/%02u E:%lumm",
              static_cast<unsigned>(status.replayWp),
              static_cast<unsigned>(status.replayTotal),

@@ -151,6 +151,8 @@ void RobotLinkServer::reportTurnResult(uint8_t code, float headingDeg,
     serial_.print("<ERR,HEADING,LOST>\r\n");
   } else if (code == 4U) {
     serial_.print("<ERR,TURN,MOTION_FAULT>\r\n");
+  } else if (code == 5U) {
+    serial_.print("<ERR,TURN,OBSTACLE>\r\n");
   }
 }
 

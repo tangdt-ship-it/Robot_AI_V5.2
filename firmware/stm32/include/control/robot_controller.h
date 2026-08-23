@@ -27,7 +27,7 @@ enum class RobotState : uint8_t {
 enum class AiMotionMode : uint8_t { NONE, PULSE, CONTINUOUS, TURN, DISTANCE };
 
 enum class AiTurnResultCode : uint8_t {
-  NONE, DONE, TIMEOUT, COMPASS_LOST, MOTION_FAULT
+  NONE, DONE, TIMEOUT, COMPASS_LOST, MOTION_FAULT, OBSTACLE
 };
 
 struct AiTurnResult {

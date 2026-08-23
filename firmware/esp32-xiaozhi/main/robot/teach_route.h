@@ -79,8 +79,11 @@ private:
     void CancelReplay();
     bool RunReplayDryRun();
     bool StartReplayFirstSegment();
+    bool StartReplayTurnAtWp2();
     static void ReplayTaskEntry(void* context);
+    static void ReplayTurnTaskEntry(void* context);
     void RunReplayFirstSegment();
+    void RunReplayTurnAtWp2();
     bool CheckReplaySafety(const char* stage, RobotState& state,
                            RobotObstacleStatus& obstacle,
                            const char*& reason) const;
@@ -123,6 +126,9 @@ private:
     uint32_t replay_target_mm_ = 0;
     uint32_t replay_travel_mm_ = 0;
     uint32_t replay_error_mm_ = 0;
+    float replay_bearing12_deg_ = 0.0f;
+    float replay_bearing23_deg_ = 0.0f;
+    float replay_turn_delta_deg_ = 0.0f;
 
     esp_timer_handle_t auto_timer_ = nullptr;
     std::atomic_bool auto_timer_enabled_{false};

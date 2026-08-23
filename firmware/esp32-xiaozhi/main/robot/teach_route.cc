@@ -39,6 +39,12 @@ constexpr float kReplayB1MaxSegmentMm = 1000.0f;
 constexpr float kReplayB1MaxHeadingDeg = 20.0f;
 constexpr int kReplayB1Speed = 10;
 constexpr uint32_t kReplayB1TimeoutMs = 20000U;
+
+float NormalizeTurnDelta(float delta_deg) {
+    while (delta_deg > 180.0f) delta_deg -= 360.0f;
+    while (delta_deg < -180.0f) delta_deg += 360.0f;
+    return delta_deg;
+}
 }
 
 TeachRoute::TeachRoute(RobotUart* robot_uart, MissionManager* mission_manager)
@@ -78,7 +84,7 @@ bool TeachRoute::Begin() {
              static_cast<unsigned>(kCornerStableSamples),
              static_cast<unsigned>(kMaxWaypointsPerMap));
     ESP_LOGI(kTag,
-             "ROUTE,REPLAY_V1=PHASE_B1,FIRST_SEGMENT_ONLY=1,TURN=OFF,SPEED=%d,MAX_MM=%u",
+             "ROUTE,REPLAY_V1=PHASE_B2,TURN_ONLY=1,SPEED=%d,MAX_MM=%u",
              kReplayB1Speed, static_cast<unsigned>(kReplayB1MaxSegmentMm));
     ESP_LOGI(kTag,
              "ROUTE,REPLAY_B1_OBS_POLICY=VALID_FRESH_CLEAR,ECHO0_CLEAR_ALLOWED=1");
@@ -189,7 +195,7 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
         } else if (mode_ == Mode::REPLAY_READY) {
             RunReplayDryRun();
         } else if (mode_ == Mode::REPLAY_CHECKED) {
-            StartReplayFirstSegment();
+            StartReplayTurnAtWp2();
         }
         return;
     }
@@ -652,6 +658,7 @@ void TeachRoute::LoadSelected() {
     replay_plan_valid_ = false;
     replay_wp_index_ = replay_wp_total_ = 0U;
     replay_target_mm_ = replay_travel_mm_ = replay_error_mm_ = 0U;
+    replay_bearing12_deg_ = replay_bearing23_deg_ = replay_turn_delta_deg_ = 0.0f;
     if (!store_.Load(selected_slot_, loaded_route_)) {
         Notify("MAP NOT SAVED", 3000);
         mode_ = Mode::READY;
@@ -786,6 +793,31 @@ bool TeachRoute::RunReplayDryRun() {
     }
 
     const uint32_t stored_mm = loaded_route_.header.route_length_mm;
+    if (count >= 3U) {
+        const RouteWaypoint& wp1 = loaded_route_.waypoints[0];
+        const RouteWaypoint& wp2 = loaded_route_.waypoints[1];
+        const RouteWaypoint& wp3 = loaded_route_.waypoints[2];
+        replay_bearing12_deg_ = atan2f(static_cast<float>(wp2.y_mm - wp1.y_mm),
+                                       static_cast<float>(wp2.x_mm - wp1.x_mm)) *
+                                57.2957795f;
+        replay_bearing23_deg_ = atan2f(static_cast<float>(wp3.y_mm - wp2.y_mm),
+                                       static_cast<float>(wp3.x_mm - wp2.x_mm)) *
+                                57.2957795f;
+        replay_turn_delta_deg_ = NormalizeTurnDelta(replay_bearing23_deg_ -
+                                                     replay_bearing12_deg_);
+        const float abs_delta = fabsf(replay_turn_delta_deg_);
+        ESP_LOGI(kTag,
+                 "ROUTE,REPLAY=B2_GEOMETRY,B12_DEG=%.1f,B23_DEG=%.1f,DELTA_DEG=%.1f,DIR=%s",
+                 replay_bearing12_deg_, replay_bearing23_deg_,
+                 replay_turn_delta_deg_, replay_turn_delta_deg_ > 0.0f ? "LEFT" :
+                 replay_turn_delta_deg_ < 0.0f ? "RIGHT" : "ALIGNED");
+        if (!std::isfinite(replay_turn_delta_deg_) || abs_delta > 120.0f) {
+            valid = false;
+            ESP_LOGW(kTag, "ROUTE,REPLAY=B2_REJECT,REASON=TURN_RANGE,MOTOR=0");
+        }
+    } else {
+        valid = false;
+    }
     const uint32_t length_error = summed_mm > stored_mm
         ? summed_mm - stored_mm : stored_mm - summed_mm;
     ESP_LOGI(kTag,
@@ -814,8 +846,8 @@ bool TeachRoute::RunReplayDryRun() {
              "ROUTE,REPLAY=DRY_RUN,PASS=%u,SLOT=%u,POINTS=%u,MOTOR=0,DRIVE=OFF,NEXT=%s",
              valid ? 1U : 0U, static_cast<unsigned>(selected_slot_),
              static_cast<unsigned>(count),
-             valid ? "B1_FIRST_SEGMENT" : "NONE");
-    Notify(valid ? "REPLAY DRY PASS: START=B1" : "REPLAY DRY FAIL", 4000);
+             valid ? "B2_TURN_AT_WP2" : "NONE");
+    Notify(valid ? "REPLAY DRY PASS: START=B2 TURN" : "REPLAY DRY FAIL", 4000);
     UpdateMapStatus();
     return valid;
 }
@@ -937,6 +969,115 @@ bool TeachRoute::StartReplayFirstSegment() {
         return false;
     }
     return true;
+}
+
+bool TeachRoute::StartReplayTurnAtWp2() {
+    if (mode_ != Mode::REPLAY_CHECKED) {
+        ESP_LOGW(kTag,
+                 "ROUTE,REPLAY=B2_REJECT,REASON=MODE,MODE=%u,EXPECTED=REPLAY_CHECKED,MOTOR=0",
+                 static_cast<unsigned>(mode_));
+        return false;
+    }
+    if (!replay_plan_valid_ || replay_motion_running_.load() ||
+        robot_uart_ == nullptr || mission_manager_ == nullptr) {
+        return false;
+    }
+    const float abs_delta = fabsf(replay_turn_delta_deg_);
+    if (!std::isfinite(abs_delta) || abs_delta > 120.0f) {
+        ESP_LOGW(kTag, "ROUTE,REPLAY=B2_REJECT,REASON=TURN_RANGE,MOTOR=0");
+        mode_ = Mode::REPLAY_HOLD;
+        UpdateMapStatus();
+        return false;
+    }
+
+    RobotState state;
+    RobotObstacleStatus obstacle;
+    const char* reason = "OK";
+    if (!CheckReplaySafety("B2_START_GATE", state, obstacle, reason)) {
+        ESP_LOGW(kTag, "ROUTE,REPLAY=B2_REJECT,REASON=%s,MOTOR=0", reason);
+        mode_ = Mode::REPLAY_HOLD;
+        UpdateMapStatus();
+        return false;
+    }
+
+    replay_cancel_requested_.store(false);
+    replay_motion_running_.store(true);
+    replay_plan_valid_ = false;
+    replay_wp_index_ = 2U;
+    replay_wp_total_ = loaded_route_.header.waypoint_count;
+    replay_target_mm_ = static_cast<uint32_t>(lroundf(abs_delta));
+    replay_travel_mm_ = 0U;
+    replay_error_mm_ = replay_target_mm_;
+    mode_ = Mode::REPLAY_RUNNING;
+    ESP_LOGI(kTag,
+             "ROUTE,REPLAY=B2_START,WP=2/%u,TARGET_DEG=%.1f,SPEED=%d,DIR=%s,MOVE=0",
+             static_cast<unsigned>(replay_wp_total_), replay_turn_delta_deg_,
+             kReplayB1Speed, replay_turn_delta_deg_ > 0.0f ? "LEFT" :
+             replay_turn_delta_deg_ < 0.0f ? "RIGHT" : "ALIGNED");
+    Notify("B2 TURN WP2: X/R3 STOP", 3500);
+    UpdateMapStatus();
+    if (xTaskCreatePinnedToCore(ReplayTurnTaskEntry, "map_replay_b2", 4096,
+                                this, 3, &replay_task_, 1) != pdPASS) {
+        replay_task_ = nullptr;
+        replay_motion_running_.store(false);
+        mode_ = Mode::REPLAY_HOLD;
+        ESP_LOGE(kTag, "ROUTE,REPLAY=B2_TURN_STOP,REASON=TASK_CREATE,CONTINUE=NO");
+        UpdateMapStatus();
+        return false;
+    }
+    return true;
+}
+
+void TeachRoute::ReplayTurnTaskEntry(void* context) {
+    if (context != nullptr) {
+        static_cast<TeachRoute*>(context)->RunReplayTurnAtWp2();
+        static_cast<TeachRoute*>(context)->replay_task_ = nullptr;
+    }
+    vTaskDelete(nullptr);
+}
+
+void TeachRoute::RunReplayTurnAtWp2() {
+    RobotState state;
+    RobotObstacleStatus obstacle;
+    const char* reason = "OK";
+    if (!CheckReplaySafety("B2_WORKER_PRECHECK", state, obstacle, reason)) {
+        replay_motion_running_.store(false);
+        mode_ = Mode::REPLAY_HOLD;
+        ESP_LOGW(kTag, "ROUTE,REPLAY=B2_TURN_STOP,REASON=%s,CONTINUE=NO", reason);
+        UpdateMapStatus();
+        return;
+    }
+
+    const float abs_delta = fabsf(replay_turn_delta_deg_);
+    RobotTurnResult result;
+    bool ok = true;
+    if (abs_delta >= 2.0f) {
+        ok = robot_uart_ != nullptr && robot_uart_->TurnRelative(
+            replay_turn_delta_deg_ > 0.0f, static_cast<int>(lroundf(abs_delta)),
+            kReplayB1Speed, result, 13000);
+    } else {
+        result.completed = true;
+        result.target_deg = 0.0f;
+        result.heading_deg = 0.0f;
+        result.error_deg = 0.0f;
+    }
+    replay_motion_running_.store(false);
+    if (!ok || !result.completed) {
+        mode_ = Mode::REPLAY_HOLD;
+        const char* fail = ok ? "TURN_FAIL" : "TURN_STOP";
+        ESP_LOGW(kTag, "ROUTE,REPLAY=B2_TURN_STOP,REASON=%s,CONTINUE=NO", fail);
+        UpdateMapStatus();
+        return;
+    }
+    replay_travel_mm_ = 0U;
+    replay_error_mm_ = static_cast<uint32_t>(lroundf(fabsf(result.error_deg)));
+    mode_ = Mode::REPLAY_COMPLETE;
+    ESP_LOGI(kTag,
+             "ROUTE,REPLAY=B2_TURN_DONE,WP=2/3,DELTA_DEG=%.1f,TARGET_DEG=%.1f,FINAL_H_DEG=%.1f,ERR_DEG=%.1f,CONTINUE=NO,MOVE=0",
+             replay_turn_delta_deg_, result.target_deg, result.heading_deg,
+             result.error_deg);
+    Notify("B2 TURN DONE: STOPPED", 3500);
+    UpdateMapStatus();
 }
 
 void TeachRoute::ReplayTaskEntry(void* context) {

@@ -563,6 +563,13 @@ void RobotController::updateAiDistance(uint32_t nowMs) {
 
 void RobotController::updateAiTurn(uint32_t nowMs) {
   if (aiMotionMode_ != AiMotionMode::TURN) return;
+  // Turning is allowed only with a fresh, clear ultrasonic assessment. A
+  // no-echo sample remains valid when the sensor reports FRESH+CLEAR.
+  if (!ultrasonic_.isFresh() ||
+      ultrasonic_.overallZone() != ObstacleZone::CLEAR) {
+    finishAiTurn(AiTurnResultCode::OBSTACLE);
+    return;
+  }
   if (!headingAvailable()) {
     finishAiTurn(AiTurnResultCode::COMPASS_LOST);
     return;
