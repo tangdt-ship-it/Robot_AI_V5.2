@@ -86,6 +86,7 @@ class Ps2Controller {
   // Map UI events use explicit controller-level edges instead of the PS2X
   // ButtonPressed() helper. This prevents a stale helper edge from leaking a
   // Map action across an L3 page transition.
+  bool mapEdgesInitialized_ = false;
   bool previousMapL3_ = false;
   bool previousMapSelect_ = false;
   bool previousMapTriangle_ = false;
