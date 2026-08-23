@@ -17,8 +17,6 @@ constexpr uint64_t kAutoWaypointPeriodUs = 100000ULL;  // 10 Hz sampling.
 
 // Smart Waypoint V1: manual points remain authoritative. Automatic points are
 // sparse safety checkpoints plus one stabilized point at meaningful corners.
-// This keeps the proven 128-point storage format while supporting much longer
-// practical routes than the old 125 mm / 12 degree recorder.
 constexpr float kAutoSafetyDistanceMm = 750.0f;
 constexpr float kCornerTriggerDeg = 25.0f;
 constexpr float kCornerReleaseDeg = 15.0f;
@@ -28,6 +26,12 @@ constexpr float kDuplicateDistanceMm = 20.0f;
 constexpr float kDuplicateHeadingDeg = 2.0f;
 constexpr float kEndpointDistanceMm = 50.0f;
 constexpr float kEndpointHeadingDeg = 5.0f;
+
+// Replay V1 Phase A is deliberately motor-disabled. A loaded route must pass
+// this structural/control-path gate before any future motion executor is added.
+constexpr float kReplayDuplicateDistanceMm = 5.0f;
+constexpr float kReplayDuplicateHeadingDeg = 1.0f;
+constexpr float kReplayMaxSegmentMm = 2000.0f;
 }
 
 TeachRoute::TeachRoute(RobotUart* robot_uart, MissionManager* mission_manager)
@@ -66,6 +70,7 @@ bool TeachRoute::Begin() {
              static_cast<unsigned>(kCornerTriggerDeg),
              static_cast<unsigned>(kCornerStableSamples),
              static_cast<unsigned>(kMaxWaypointsPerMap));
+    ESP_LOGI(kTag, "ROUTE,REPLAY_V1=DRY_RUN,DRIVE=OFF");
 
     for (RouteSlot slot : {RouteSlot::MAP_1, RouteSlot::MAP_2}) {
         const RouteSlotMetadata metadata = store_.GetMetadata(slot);
@@ -79,8 +84,6 @@ bool TeachRoute::Begin() {
 }
 
 bool TeachRoute::StartInputTask() {
-    // Deliberately no xTaskCreate here. PS2 is physically owned by STM32 and
-    // Map controls arrive as high-level EVENT,MAP frames.
     if (robot_uart_ == nullptr) {
         ESP_LOGE(kTag, "ROUTE,MAP_EVENT_CALLBACK=FAIL,REASON=NO_UART");
         return false;
@@ -114,8 +117,11 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
              action, static_cast<unsigned>(slot),
              static_cast<unsigned>(mode_));
 
+    const bool state_locked = mode_ == Mode::TEACHING ||
+                              mode_ == Mode::DELETE_CONFIRM ||
+                              mode_ == Mode::REPLAY_READY;
     if (strcmp(action, "SLOT") == 0) {
-        if (mode_ == Mode::TEACHING || mode_ == Mode::DELETE_CONFIRM) {
+        if (state_locked) {
             ESP_LOGW(kTag,
                      "ROUTE,EVENT=SLOT,RESULT=IGNORED,REASON=STATE_LOCKED,ACTIVE_SLOT=%u",
                      static_cast<unsigned>(selected_slot_));
@@ -123,12 +129,12 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
             return;
         }
         selected_slot_ = event_slot;
+        replay_plan_valid_ = false;
         UpdateMapStatus();
         return;
     }
 
-    if ((mode_ == Mode::TEACHING || mode_ == Mode::DELETE_CONFIRM) &&
-        event_slot != selected_slot_) {
+    if (state_locked && event_slot != selected_slot_) {
         ESP_LOGW(kTag,
                  "ROUTE,EVENT=REJECT,REASON=SLOT_MISMATCH,ACT=%s,EVENT_SLOT=%u,ACTIVE_SLOT=%u",
                  action, static_cast<unsigned>(event_slot),
@@ -136,15 +142,21 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
         UpdateMapStatus();
         return;
     }
-    if (mode_ != Mode::TEACHING && mode_ != Mode::DELETE_CONFIRM) {
+    if (!state_locked) {
         selected_slot_ = event_slot;
     }
 
+    // STM32 START is intentionally an alias of TRIANGLE on the MAP page.
+    // READY -> Teach; LOADED -> arm Replay; REPLAY_READY -> dry-run validate.
     if (strcmp(action, "TRIANGLE") == 0) {
         if (mode_ == Mode::TEACHING) {
             AddWaypoint(true);
-        } else if (mode_ == Mode::READY || mode_ == Mode::LOADED) {
+        } else if (mode_ == Mode::READY) {
             StartTeach();
+        } else if (mode_ == Mode::LOADED) {
+            ArmReplay();
+        } else if (mode_ == Mode::REPLAY_READY) {
+            RunReplayDryRun();
         }
         return;
     }
@@ -171,6 +183,7 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
         return;
     }
 
+    // STM32 X is an alias of SELECT_LONG. It remains a fast safe cancel.
     if (strcmp(action, "SELECT_LONG") == 0) {
         if (mode_ == Mode::TEACHING) {
             CancelTeach();
@@ -178,6 +191,8 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
             mode_ = Mode::READY;
             Notify("DELETE CANCELLED");
             UpdateMapStatus();
+        } else if (mode_ == Mode::REPLAY_READY) {
+            CancelReplay();
         }
         return;
     }
@@ -243,7 +258,8 @@ void TeachRoute::UpdateMapStatus() const {
     const RouteSlotMetadata metadata = store_.GetMetadata(selected_slot_);
     const char* mode = mode_ == Mode::TEACHING ? "TEACH" :
                        mode_ == Mode::LOADED ? "LOADED" :
-                       mode_ == Mode::DELETE_CONFIRM ? "DELETE" : "READY";
+                       mode_ == Mode::DELETE_CONFIRM ? "DELETE" :
+                       mode_ == Mode::REPLAY_READY ? "REPLAY_READY" : "READY";
     const uint16_t points = mode_ == Mode::TEACHING
                                 ? working_route_.header.waypoint_count
                                 : metadata.waypoint_count;
@@ -361,6 +377,7 @@ bool TeachRoute::StartTeach() {
         return false;
     }
 
+    replay_plan_valid_ = false;
     working_route_ = {};
     working_route_.header.waypoint_count = 1;
     working_route_.waypoints[0] = {0, 0, 0, 0, 0};
@@ -481,16 +498,11 @@ void TeachRoute::UpdateAutoWaypoint() {
     const float heading_delta =
         HeadingDeltaDeg(point.heading_cdeg, last.heading_cdeg);
 
-    // Hard safety spacing: never let a route segment grow beyond ~0.75 m even
-    // if the operator forgets to mark points on a long straight corridor.
     if (distance >= kAutoSafetyDistanceMm) {
         (void)AppendWaypoint(point, WaypointSource::AUTO_DISTANCE);
         return;
     }
 
-    // Corner detection is intentionally two-stage. A 25-degree deviation only
-    // arms a candidate. It is stored after heading settles for three samples,
-    // preventing a 90-degree turn from consuming several 25-degree points.
     if (heading_delta >= kCornerTriggerDeg) {
         corner_pending_ = true;
         if (sample_heading_delta <= kCornerStableStepDeg) {
@@ -541,8 +553,6 @@ void TeachRoute::SaveTeach() {
     if (mode_ != Mode::TEACHING) return;
     StopAutoTimer();
 
-    // Preserve the actual final pose even when the last manual/automatic point
-    // is still less than the 0.75 m safety spacing from the robot.
     RouteWaypoint endpoint;
     if (ReadCurrentWaypoint(endpoint)) {
         TrackSample(endpoint);
@@ -571,6 +581,7 @@ void TeachRoute::SaveTeach() {
     const uint16_t points = working_route_.header.waypoint_count;
     mode_ = Mode::READY;
     odometry_valid_ = false;
+    replay_plan_valid_ = false;
     ResetSmartTracking();
     char notification[64];
     snprintf(notification, sizeof(notification), "%s SAVED: %u SMART POINTS",
@@ -581,6 +592,7 @@ void TeachRoute::SaveTeach() {
 
 void TeachRoute::LoadSelected() {
     loaded_route_ = {};
+    replay_plan_valid_ = false;
     if (!store_.Load(selected_slot_, loaded_route_)) {
         Notify("MAP NOT SAVED", 3000);
         mode_ = Mode::READY;
@@ -594,6 +606,131 @@ void TeachRoute::LoadSelected() {
              loaded_route_.header.waypoint_count);
     Notify(notification, 3500);
     UpdateMapStatus();
+}
+
+bool TeachRoute::ArmReplay() {
+    if (mode_ != Mode::LOADED) return false;
+    if (loaded_route_.header.waypoint_count < 2U) {
+        Notify("REPLAY REJECT: NEED 2 POINTS", 3500);
+        return false;
+    }
+    if (mission_manager_ == nullptr || robot_uart_ == nullptr ||
+        mission_manager_->IsActive() || mission_manager_->IsAiObstacleHoldActive() ||
+        !robot_uart_->IsConnected()) {
+        Notify("REPLAY REJECT: ROBOT BUSY", 3500);
+        return false;
+    }
+
+    RobotState state;
+    if (!robot_uart_->GetState(state, 500) || !state.valid) {
+        Notify("REPLAY REJECT: STATE", 3500);
+        return false;
+    }
+    if (state.moving || state.left != 0 || state.right != 0) {
+        Notify("REPLAY REJECT: MOVING", 3500);
+        return false;
+    }
+    if (state.brake_enabled) {
+        Notify("REPLAY REJECT: BRAKE", 3500);
+        return false;
+    }
+    if (!ReadOdometry()) {
+        Notify("REPLAY REJECT: ODOM", 3500);
+        return false;
+    }
+
+    replay_plan_valid_ = false;
+    mode_ = Mode::REPLAY_READY;
+    ESP_LOGI(kTag,
+             "ROUTE,REPLAY=ARMED,SLOT=%u,POINTS=%u,ORIGIN_X=%.1f,ORIGIN_Y=%.1f,ORIGIN_H=%.3f,MOTOR=0",
+             static_cast<unsigned>(selected_slot_),
+             static_cast<unsigned>(loaded_route_.header.waypoint_count),
+             start_x_mm_, start_y_mm_, start_heading_rad_);
+    Notify("REPLAY READY: START CHECK", 3500);
+    UpdateMapStatus();
+    return true;
+}
+
+void TeachRoute::CancelReplay() {
+    if (mode_ != Mode::REPLAY_READY) return;
+    replay_plan_valid_ = false;
+    odometry_valid_ = false;
+    mode_ = Mode::LOADED;
+    ESP_LOGI(kTag, "ROUTE,REPLAY=CANCELLED,MOTOR=0");
+    Notify("REPLAY CANCELLED");
+    UpdateMapStatus();
+}
+
+bool TeachRoute::RunReplayDryRun() {
+    if (mode_ != Mode::REPLAY_READY || !odometry_valid_) return false;
+    const uint16_t count = loaded_route_.header.waypoint_count;
+    if (count < 2U) {
+        Notify("REPLAY CHECK FAIL: POINTS", 3500);
+        CancelReplay();
+        return false;
+    }
+
+    RobotState state;
+    if (robot_uart_ == nullptr || !robot_uart_->GetState(state, 500) ||
+        !state.valid || state.moving || state.left != 0 || state.right != 0 ||
+        state.brake_enabled) {
+        ESP_LOGW(kTag, "ROUTE,REPLAY=DRY_RUN,PASS=0,REASON=STATE,MOTOR=0");
+        Notify("REPLAY CHECK FAIL: STATE", 3500);
+        mode_ = Mode::LOADED;
+        replay_plan_valid_ = false;
+        odometry_valid_ = false;
+        UpdateMapStatus();
+        return false;
+    }
+
+    bool valid = true;
+    uint32_t summed_mm = 0U;
+    for (uint16_t index = 1U; index < count; ++index) {
+        const RouteWaypoint& prior = loaded_route_.waypoints[index - 1U];
+        const RouteWaypoint& point = loaded_route_.waypoints[index];
+        const float dx = static_cast<float>(point.x_mm - prior.x_mm);
+        const float dy = static_cast<float>(point.y_mm - prior.y_mm);
+        const float distance = sqrtf(dx * dx + dy * dy);
+        const float heading_delta =
+            HeadingDeltaDeg(point.heading_cdeg, prior.heading_cdeg);
+        const float bearing_deg = atan2f(dy, dx) * 57.2957795f;
+
+        const bool duplicate = distance < kReplayDuplicateDistanceMm &&
+                               heading_delta < kReplayDuplicateHeadingDeg;
+        const bool segment_too_long = distance > kReplayMaxSegmentMm;
+        if (duplicate || segment_too_long || !std::isfinite(distance) ||
+            !std::isfinite(bearing_deg)) {
+            valid = false;
+        }
+        summed_mm += static_cast<uint32_t>(lroundf(distance));
+        ESP_LOGI(kTag,
+                 "ROUTE,REPLAY_PLAN,WP=%u/%u,DIST_MM=%lu,BEARING_DEG=%.1f,H_DEG=%.1f,H_DELTA=%.1f,FLAGS=0x%02X,VALID=%u",
+                 static_cast<unsigned>(index + 1U), static_cast<unsigned>(count),
+                 static_cast<unsigned long>(lroundf(distance)), bearing_deg,
+                 static_cast<float>(point.heading_cdeg) / 100.0f,
+                 heading_delta, static_cast<unsigned>(point.flags),
+                 (duplicate || segment_too_long) ? 0U : 1U);
+    }
+
+    const uint32_t stored_mm = loaded_route_.header.route_length_mm;
+    const uint32_t length_error = summed_mm > stored_mm
+        ? summed_mm - stored_mm : stored_mm - summed_mm;
+    ESP_LOGI(kTag,
+             "ROUTE,REPLAY_PLAN,SUM_MM=%lu,STORED_MM=%lu,LENGTH_ERR_MM=%lu",
+             static_cast<unsigned long>(summed_mm),
+             static_cast<unsigned long>(stored_mm),
+             static_cast<unsigned long>(length_error));
+
+    replay_plan_valid_ = valid;
+    mode_ = Mode::LOADED;
+    odometry_valid_ = false;
+    ESP_LOGI(kTag,
+             "ROUTE,REPLAY=DRY_RUN,PASS=%u,SLOT=%u,POINTS=%u,MOTOR=0,DRIVE=OFF",
+             valid ? 1U : 0U, static_cast<unsigned>(selected_slot_),
+             static_cast<unsigned>(count));
+    Notify(valid ? "REPLAY DRY PASS: NO MOTOR" : "REPLAY DRY FAIL", 4000);
+    UpdateMapStatus();
+    return valid;
 }
 
 void TeachRoute::RequestDelete() {
@@ -621,6 +758,7 @@ void TeachRoute::ConfirmDelete() {
         return;
     }
     loaded_route_ = {};
+    replay_plan_valid_ = false;
     mode_ = Mode::READY;
     char notification[40];
     snprintf(notification, sizeof(notification), "%s DELETED",
