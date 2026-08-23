@@ -47,7 +47,7 @@ private:
     void AddWaypoint(bool manual_mark);
     bool AppendWaypoint(const RouteWaypoint& point, WaypointSource source);
     bool ReadCurrentWaypoint(RouteWaypoint& point) const;
-    void TrackTravel(const RouteWaypoint& point);
+    void TrackSample(const RouteWaypoint& point);
     void ResetSmartTracking();
     void ResetCornerTracking();
     void UndoWaypoint();
@@ -76,10 +76,9 @@ private:
     float start_heading_rad_ = 0.0f;
     bool odometry_valid_ = false;
 
-    // Smart Waypoint V1 keeps frequent odometry samples for accurate travelled
-    // length but stores only manual points, sparse safety checkpoints and one
-    // stabilized point per meaningful corner. This preserves the 128-point V1
-    // storage format while extending practical route length dramatically.
+    // Smart Waypoint V1 samples odometry frequently but stores only manual
+    // points, sparse safety checkpoints and one stabilized point per meaningful
+    // corner. The persistent V1 format and 128-point cap remain unchanged.
     RouteWaypoint last_sample_{};
     bool last_sample_valid_ = false;
     bool corner_pending_ = false;
