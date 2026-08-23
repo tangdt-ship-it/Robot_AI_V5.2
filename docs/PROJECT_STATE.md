@@ -44,9 +44,9 @@ Raw channels remain available for diagnostics. Camera frame is normal; no camera
 
 `feature/map-replay-v1-turn`
 
-Current tested repository head before the next B2 physical-turn test:
+Current commissioned repository head:
 
-`d2acc3b91745effbdd805ac7a85bca9b9645293e`
+`578d751efca50924135565b4f757d7327ce1f776`
 
 This branch contains the commissioned MAP Teach/Smart Waypoint work, Replay Phase A, B1 straight-segment motion, B2 turn-only implementation, and the MAP UI V2 parser regression fix.
 
@@ -172,9 +172,20 @@ Do not revert this condition to `fields == 12` in later branches.
 
 ## Replay B2 — waypoint turn
 
-Implementation status: `BUILT / FLASHED / READY FOR PHYSICAL TEST`
+Implementation status: `COMMISSIONED / PASS`
 
-Not yet physically commissioned.
+B2 physical commissioning result on MAP2:
+
+- `B2_START_GATE = PASS / OK`
+- worker transport precheck attempt `1/3 = PASS / OK`
+- `B12 = -1.7 deg`, `B23 = -7.4 deg`, runtime delta = `-5.7 deg`, direction = `RIGHT`
+- RobotLink turn command: `TURN,REL,RIGHT,6,10`
+- final heading = `2.3 deg`, RobotLink target = `-0.5 deg`, reported error = `-2.8 deg`
+- `B2_TURN_DONE`, `CONTINUE=NO`, `MOVE=0`
+- manual mode restore = `PASS`
+- robot stopped; WP3 was not run; no translation command was issued
+
+The previous physical run exposed a transient `STATE_RX` at the worker precheck. The hardened policy now uses a 900 ms replay safety transaction timeout and retries only `STATE_RX` / `OBS_RX` up to three attempts (100 ms then 150 ms delay). Safety failures are never retried. RobotLink transaction failures log the failure stage (`MUTEX_TIMEOUT`, `SEND_FAIL`, `WAIT_TIMEOUT`, or `NACK`).
 
 B2 design:
 
@@ -191,7 +202,12 @@ B2 design:
 - `ECHO=0 + FRESH + CLEAR` remains allowed
 - X / R3 / PS2 takeover / obstacle safety retain stop authority
 
-Next step: perform B2 geometry/dry-run, confirm safe physical surroundings, then execute the single turn at WP2 and measure final heading error. Do not run B3 or full replay until B2 passes.
+- STM32 session recovery: after STM32 `BOOT`, the ESP32 invalidates the cached
+  protocol session; B2 renegotiates `HELLO -> PING -> MODE,AI` before `TURN` and
+  restores `MODE,MANUAL` after the turn
+
+WP3 was not run. Do not run B3 or full replay until a separate commissioning
+decision is made.
 
 ---
 
