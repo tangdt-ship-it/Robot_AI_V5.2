@@ -480,13 +480,32 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     unsigned int points = 0;
     unsigned int maxPoints = 0;
     unsigned long lengthMm = 0;
+    unsigned int replayWp = 0;
+    unsigned int replayTotal = 0;
+    unsigned long replayTargetMm = 0;
+    unsigned long replayTravelMm = 0;
+    unsigned long replayErrorMm = 0;
     char trailing = '\0';
-    const int fields = sscanf(frame, "MAP,UI,%u,%u,%u,%u,%u,%lu%c", &slot,
-                              &storeState, &mode, &points, &maxPoints,
-                              &lengthMm, &trailing);
-    if (fields != 6 || slot < 1U || slot > 2U || storeState > 3U ||
-        mode > 3U || maxPoints == 0U || maxPoints > 128U ||
-        points > maxPoints) {
+    const int fields = sscanf(
+        frame, "MAP,UI,%u,%u,%u,%u,%u,%lu,%u,%u,%lu,%lu,%lu%c", &slot,
+        &storeState, &mode, &points, &maxPoints, &lengthMm, &replayWp,
+        &replayTotal, &replayTargetMm, &replayTravelMm, &replayErrorMm,
+        &trailing);
+    const bool v2 = fields == 12;
+    if (!v2) {
+      replayWp = replayTotal = 0;
+      replayTargetMm = replayTravelMm = replayErrorMm = 0;
+      const int v1Fields = sscanf(frame, "MAP,UI,%u,%u,%u,%u,%u,%lu%c",
+                                  &slot, &storeState, &mode, &points,
+                                  &maxPoints, &lengthMm, &trailing);
+      if (v1Fields != 6) {
+        serial_.print("<ERR,MAP_UI>\r\n");
+        return;
+      }
+    }
+    if (slot < 1U || slot > 2U || storeState > 3U || mode > 8U ||
+        maxPoints == 0U || maxPoints > 128U || points > maxPoints ||
+        (replayTotal > 0U && (replayTotal > maxPoints || replayWp > replayTotal))) {
       serial_.print("<ERR,MAP_UI>\r\n");
       return;
     }
@@ -495,7 +514,12 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
                          static_cast<uint8_t>(mode),
                          static_cast<uint16_t>(points),
                          static_cast<uint16_t>(maxPoints),
-                         static_cast<uint32_t>(lengthMm));
+                         static_cast<uint32_t>(lengthMm),
+                         static_cast<uint16_t>(replayWp),
+                         static_cast<uint16_t>(replayTotal),
+                         static_cast<uint32_t>(replayTargetMm),
+                         static_cast<uint32_t>(replayTravelMm),
+                         static_cast<uint32_t>(replayErrorMm));
     return;
   }
 
