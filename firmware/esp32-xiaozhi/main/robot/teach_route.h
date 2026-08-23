@@ -3,7 +3,10 @@
 
 #include "route_store.h"
 
+#include <atomic>
 #include <cstdint>
+
+#include <esp_timer.h>
 
 class Display;
 class MissionManager;
@@ -13,31 +16,25 @@ class TeachRoute {
 public:
     TeachRoute(RobotUart* robot_uart, MissionManager* mission_manager);
 
-    // Kept only for source compatibility with the existing board constructor.
-    // MAP V1 no longer renders on the ESP32 TFT; the argument is ignored.
+    // Compatibility shim only. MAP V1 never renders on the ESP32 TFT.
     void SetDisplay(Display* display);
     bool Begin();
+
+    // Kept for board-source compatibility. No raw PS2 polling task is created.
     bool StartInputTask();
+
+    // High-level Map events are emitted by STM32 after it owns/debounces PS2.
+    static void OnMapEvent(void* context, const char* action, uint8_t slot);
+    void HandleMapEvent(const char* action, uint8_t slot);
 
 private:
     enum class Mode : uint8_t { READY, TEACHING, LOADED, DELETE_CONFIRM };
 
-    static void InputTaskEntry(void* context);
-    void InputTask();
-    void Update();
-    void HandleButtons(uint16_t buttons, uint32_t now_ms);
-    struct ButtonTracker {
-        const char* name = "";
-        uint16_t mask = 0;
-        bool press_active = false;
-        uint32_t press_started_ms = 0;
-        bool long_fired = false;
-    };
-    void UpdateButton(ButtonTracker& button, bool raw_down, uint32_t now_ms);
-    void LogPollTiming() const;
-    void OnButtonPressed(ButtonTracker& button);
-    void OnButtonReleased(ButtonTracker& button, uint32_t duration_ms);
-    void OnButtonLong(ButtonTracker& button, uint32_t duration_ms);
+    static void AutoTimerEntry(void* context);
+    void AutoTimerTick();
+    bool StartAutoTimer();
+    void StopAutoTimer();
+
     bool StartTeach();
     void CancelTeach();
     void UpdateAutoWaypoint();
@@ -47,8 +44,7 @@ private:
     void LoadSelected();
     void RequestDelete();
     void ConfirmDelete();
-    void TogglePage();
-    void SelectNextSlot();
+    void SetSelectedSlot(uint8_t slot);
     void Notify(const char* message, int duration_ms = 2500) const;
     void UpdateMapStatus() const;
     bool ReadOdometry();
@@ -60,22 +56,16 @@ private:
     RouteStore store_;
     RouteSlot selected_slot_ = RouteSlot::MAP_1;
     Mode mode_ = Mode::READY;
-    bool map_page_ = false;
-    ButtonTracker select_button_{"SELECT", 0x0001};
-    ButtonTracker l3_button_{"L3", 0x0002};
-    ButtonTracker triangle_button_{"TRIANGLE", 0x1000};
-    ButtonTracker circle_button_{"CIRCLE", 0x2000};
-    ButtonTracker square_button_{"SQUARE", 0x8000};
-    uint32_t last_ps2_poll_ms_ = 0;
-    uint32_t last_ps2_poll_dt_ms_ = 0;
-    uint32_t ps2_poll_min_ms_ = UINT32_MAX;
-    uint32_t ps2_poll_max_ms_ = 0;
     RouteData working_route_{};
     RouteData loaded_route_{};
     float start_x_mm_ = 0.0f;
     float start_y_mm_ = 0.0f;
     float start_heading_rad_ = 0.0f;
     bool odometry_valid_ = false;
+
+    esp_timer_handle_t auto_timer_ = nullptr;
+    std::atomic_bool auto_timer_enabled_{false};
+    std::atomic_bool auto_tick_pending_{false};
 };
 
 #endif  // XIAOZHI_TEACH_ROUTE_H
