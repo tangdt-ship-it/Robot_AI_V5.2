@@ -493,7 +493,7 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
         &storeState, &mode, &points, &maxPoints, &lengthMm, &replayWp,
         &replayTotal, &replayTargetMm, &replayTravelMm, &replayErrorMm,
         &trailing);
-    const bool v2 = fields == 12;
+    const bool v2 = fields == 11;
     if (!v2) {
       replayWp = replayTotal = 0;
       replayTargetMm = replayTravelMm = replayErrorMm = 0;
