@@ -129,6 +129,20 @@ void LcdDisplay::toggleMapSlot() {
   setMapSlot(mapSlot_ == 1U ? 2U : 1U);
 }
 
+void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
+                              uint16_t points, uint16_t maxPoints,
+                              uint32_t lengthMm) {
+  const uint8_t normalized = slot == 2U ? 2U : 1U;
+  LcdMapStatus& status = mapStatus_[normalized - 1U];
+  status.valid = true;
+  status.storeState = storeState;
+  status.mode = mode;
+  status.points = points;
+  status.maxPoints = maxPoints == 0U ? 128U : maxPoints;
+  status.lengthMm = lengthMm;
+  if (mapSlot_ == normalized) forceRefresh();
+}
+
 void LcdDisplay::buildRobotLines() {
   const int compassTenths = static_cast<int>(roundf(data_.compassAngle * 10.0f));
   const int targetTenths = static_cast<int>(roundf(data_.headingTarget * 10.0f));
@@ -166,13 +180,58 @@ void LcdDisplay::buildRobotLines() {
 }
 
 void LcdDisplay::buildMapLines() {
-  // Phase-1 Map LCD migration intentionally keeps the display lightweight and
-  // independent of ESP32 LVGL. Route data/NVS remain authoritative on ESP32;
-  // this page presents the selected slot and the physical button map only.
-  snprintf(desired_[0], 21, "MAP%u ROUTE CONTROL", mapSlot_);
-  snprintf(desired_[1], 21, "STATE: ESP32 / NVS");
-  snprintf(desired_[2], 21, "TRI MARK  CIR SAVE");
-  snprintf(desired_[3], 21, "SEL MAP   L3 EXIT");
+  const LcdMapStatus& status = mapStatus_[mapSlot_ - 1U];
+  if (!status.valid) {
+    snprintf(desired_[0], 21, "MAP%u SYNC", mapSlot_);
+    snprintf(desired_[1], 21, "P:---/--- L:---");
+    snprintf(desired_[2], 21, "WAIT ESP32 STATUS");
+    snprintf(desired_[3], 21, "SEL MAP L3 EXIT");
+    return;
+  }
+
+  const uint32_t lengthTenthsM = (status.lengthMm + 50U) / 100U;
+  const unsigned long wholeM = static_cast<unsigned long>(lengthTenthsM / 10U);
+  const unsigned long tenthM = static_cast<unsigned long>(lengthTenthsM % 10U);
+  const char* title = "READY";
+  if (status.mode == 1U) {
+    title = "TEACH";
+  } else if (status.mode == 2U) {
+    title = "LOADED";
+  } else if (status.mode == 3U) {
+    title = "DELETE?";
+  } else if (status.storeState == 0U) {
+    title = "EMPTY";
+  } else if (status.storeState == 1U) {
+    title = "SAVED";
+  } else if (status.storeState >= 2U) {
+    title = "ERROR";
+  }
+
+  if (status.mode == 3U) {
+    snprintf(desired_[0], 21, "DELETE MAP%u?", mapSlot_);
+  } else {
+    snprintf(desired_[0], 21, "MAP%u %s", mapSlot_, title);
+  }
+  snprintf(desired_[1], 21, "P:%03u/%03u L:%lu.%lum",
+           static_cast<unsigned>(status.points),
+           static_cast<unsigned>(status.maxPoints), wholeM, tenthM);
+
+  if (status.mode == 1U) {
+    snprintf(desired_[2], 21, "TR MARK SQ UNDO");
+    snprintf(desired_[3], 21, "CIR SAVE SELH CAN");
+  } else if (status.mode == 3U) {
+    snprintf(desired_[2], 21, "CIR YES");
+    snprintf(desired_[3], 21, "SELH CANCEL L3 EXIT");
+  } else if (status.storeState == 0U) {
+    snprintf(desired_[2], 21, "TR TEACH");
+    snprintf(desired_[3], 21, "SEL MAP L3 EXIT");
+  } else if (status.storeState == 1U) {
+    snprintf(desired_[2], 21, "TR TEACH CIR LOAD");
+    snprintf(desired_[3], 21, "SEL MAP SQH DEL L3");
+  } else {
+    snprintf(desired_[2], 21, "CHECK ESP32/NVS");
+    snprintf(desired_[3], 21, "SEL MAP L3 EXIT");
+  }
 }
 
 void LcdDisplay::buildDesiredLines() {
