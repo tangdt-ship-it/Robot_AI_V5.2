@@ -13,6 +13,8 @@
 class Display;
 class MissionManager;
 class RobotUart;
+struct RobotState;
+struct RobotObstacleStatus;
 
 class TeachRoute {
 public:
@@ -30,15 +32,18 @@ public:
     void HandleMapEvent(const char* action, uint8_t slot);
 
 private:
-    // Numeric values are mirrored by the STM32 LCD MAP,UI parser. Phase B1
-    // keeps the wire UI in READY/TEACH/LOADED/DELETE only; REPLAY_READY is an
-    // internal/log state until the LCD protocol is extended in a later phase.
+    // Numeric values are part of the ESP32 -> STM32 MAP,UI wire contract.
+    // Keep these synchronized with the STM32 LCD parser/presentation.
     enum class Mode : uint8_t {
         READY = 0,
         TEACHING = 1,
         LOADED = 2,
         DELETE_CONFIRM = 3,
         REPLAY_READY = 4,
+        REPLAY_CHECKED = 5,
+        REPLAY_RUNNING = 6,
+        REPLAY_HOLD = 7,
+        REPLAY_COMPLETE = 8,
     };
     enum class WaypointSource : uint8_t {
         MANUAL,
@@ -76,6 +81,9 @@ private:
     bool StartReplayFirstSegment();
     static void ReplayTaskEntry(void* context);
     void RunReplayFirstSegment();
+    bool CheckReplaySafety(const char* stage, RobotState& state,
+                           RobotObstacleStatus& obstacle,
+                           const char*& reason) const;
 
     void SetSelectedSlot(uint8_t slot);
     void Notify(const char* message, int duration_ms = 2500) const;
@@ -110,6 +118,11 @@ private:
     std::atomic_bool replay_motion_running_{false};
     std::atomic_bool replay_cancel_requested_{false};
     TaskHandle_t replay_task_ = nullptr;
+    uint16_t replay_wp_index_ = 0;
+    uint16_t replay_wp_total_ = 0;
+    uint32_t replay_target_mm_ = 0;
+    uint32_t replay_travel_mm_ = 0;
+    uint32_t replay_error_mm_ = 0;
 
     esp_timer_handle_t auto_timer_ = nullptr;
     std::atomic_bool auto_timer_enabled_{false};
