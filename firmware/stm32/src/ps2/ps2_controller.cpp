@@ -142,8 +142,6 @@ void Ps2Controller::captureState(uint32_t nowMs) {
         !state_.l3 && !state_.select && !state_.triangle && !state_.square &&
         !state_.circle;
 
-    // L3 remains 100% local to STM32. Any L3 rising edge creates a hard Map
-    // action barrier for the current frame.
     if (l3Pressed) {
       if (lastMapPageToggleMs_ == 0U ||
           (nowMs - lastMapPageToggleMs_) >= kMapPageToggleGuardMs) {
@@ -183,7 +181,7 @@ void Ps2Controller::captureState(uint32_t nowMs) {
         mapSelectLongFired_ = true;
       }
       if (selectReleased && mapSelectPressActive_) {
-        if (!mapSelectLongFired_) {
+        if (!mapSelectLongFired_ && !display.mapSlotLocked()) {
           display.toggleMapSlot();
           emitMapEvent("SLOT", display.mapSlot());
         }
@@ -222,8 +220,6 @@ void Ps2Controller::captureState(uint32_t nowMs) {
     previousMapCircle_ = state_.circle;
   }
 
-  // A digital 0x41 frame contains no axis bytes; the unused bytes commonly
-  // read 0xFF and must never be interpreted as full joystick deflection.
   const bool analogFrame = driver_.mode() == 0x73 || driver_.mode() == 0x79;
   const uint8_t lxRaw = analogFrame ? driver_.Analog(PSS_LX) : 128U;
   const uint8_t lyRaw = analogFrame ? driver_.Analog(PSS_LY) : 128U;
