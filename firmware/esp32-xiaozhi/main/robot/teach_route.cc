@@ -13,11 +13,21 @@
 
 namespace {
 constexpr const char* kTag = "TeachRoute";
-constexpr uint64_t kAutoWaypointPeriodUs = 100000ULL;  // 10 Hz while teaching.
-constexpr float kAutoDistanceMm = 125.0f;
-constexpr float kAutoHeadingDeg = 12.0f;
-constexpr float kDuplicateDistanceMm = 10.0f;
-constexpr float kDuplicateHeadingDeg = 1.0f;
+constexpr uint64_t kAutoWaypointPeriodUs = 100000ULL;  // 10 Hz sampling.
+
+// Smart Waypoint V1: manual points remain authoritative. Automatic points are
+// sparse safety checkpoints plus one stabilized point at meaningful corners.
+// This keeps the proven 128-point storage format while supporting much longer
+// practical routes than the old 125 mm / 12 degree recorder.
+constexpr float kAutoSafetyDistanceMm = 750.0f;
+constexpr float kCornerTriggerDeg = 25.0f;
+constexpr float kCornerReleaseDeg = 15.0f;
+constexpr float kCornerStableStepDeg = 2.0f;
+constexpr uint8_t kCornerStableSamples = 3U;
+constexpr float kDuplicateDistanceMm = 20.0f;
+constexpr float kDuplicateHeadingDeg = 2.0f;
+constexpr float kEndpointDistanceMm = 50.0f;
+constexpr float kEndpointHeadingDeg = 5.0f;
 }
 
 TeachRoute::TeachRoute(RobotUart* robot_uart, MissionManager* mission_manager)
@@ -50,6 +60,13 @@ bool TeachRoute::Begin() {
         }
     }
 
+    ESP_LOGI(kTag,
+             "ROUTE,SMART_WP=ON,AUTO_MM=%u,CORNER_DEG=%u,STABLE_SAMPLES=%u,MAX=%u",
+             static_cast<unsigned>(kAutoSafetyDistanceMm),
+             static_cast<unsigned>(kCornerTriggerDeg),
+             static_cast<unsigned>(kCornerStableSamples),
+             static_cast<unsigned>(kMaxWaypointsPerMap));
+
     for (RouteSlot slot : {RouteSlot::MAP_1, RouteSlot::MAP_2}) {
         const RouteSlotMetadata metadata = store_.GetMetadata(slot);
         ESP_LOGI(kTag, "ROUTE,BOOT,SLOT=%u,STATE=%s,POINTS=%u,LENGTH_MM=%lu",
@@ -63,9 +80,7 @@ bool TeachRoute::Begin() {
 
 bool TeachRoute::StartInputTask() {
     // Deliberately no xTaskCreate here. PS2 is physically owned by STM32 and
-    // Map controls arrive as high-level EVENT,MAP frames. Register the event
-    // callback only after RobotUart::Begin(), which is exactly when the board
-    // calls this compatibility entry point.
+    // Map controls arrive as high-level EVENT,MAP frames.
     if (robot_uart_ == nullptr) {
         ESP_LOGE(kTag, "ROUTE,MAP_EVENT_CALLBACK=FAIL,REASON=NO_UART");
         return false;
@@ -73,8 +88,6 @@ bool TeachRoute::StartInputTask() {
     robot_uart_->SetMapEventCallback(&TeachRoute::OnMapEvent, this);
     ESP_LOGI(kTag,
              "ROUTE,INPUT_OWNER=STM32,ESP32_PS2_POLL=OFF,INPUT_TASK=DISABLED,MAP_EVENT_CALLBACK=ON");
-    // Seed the STM32 LCD with authoritative metadata for the default slot as
-    // soon as RobotLink is available. Other slots are refreshed on SELECT.
     UpdateMapStatus();
     return true;
 }
@@ -114,9 +127,6 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
         return;
     }
 
-    // During a stateful operation, the slot that started the operation is
-    // authoritative. Reject a mismatched event instead of silently saving or
-    // deleting the wrong map if the local LCD slot ever becomes desynchronized.
     if ((mode_ == Mode::TEACHING || mode_ == Mode::DELETE_CONFIRM) &&
         event_slot != selected_slot_) {
         ESP_LOGW(kTag,
@@ -189,10 +199,6 @@ void TeachRoute::AutoTimerTick() {
     if (!auto_timer_enabled_.load()) return;
     if (auto_tick_pending_.exchange(true)) return;
 
-    // esp_timer callback runs on the shared ESP timer task. Never block that
-    // task with a RobotLink transaction; hand the odometry sample to Xiaozhi's
-    // existing main-task scheduler instead. The atomic gate guarantees at most
-    // one pending sample if the main task is temporarily busy with camera/audio.
     Application::GetInstance().Schedule([this]() {
         if (auto_timer_enabled_.load()) UpdateAutoWaypoint();
         auto_tick_pending_.store(false);
@@ -211,7 +217,7 @@ bool TeachRoute::StartAutoTimer() {
                  esp_err_to_name(err));
         return false;
     }
-    ESP_LOGI(kTag, "ROUTE,AUTO_TIMER=START,PERIOD_MS=%u",
+    ESP_LOGI(kTag, "ROUTE,AUTO_TIMER=START,PERIOD_MS=%u,SMART=1",
              static_cast<unsigned>(kAutoWaypointPeriodUs / 1000ULL));
     return true;
 }
@@ -229,8 +235,6 @@ void TeachRoute::StopAutoTimer() {
 }
 
 void TeachRoute::Notify(const char* message, int duration_ms) const {
-    // Map notifications remain log-only on ESP32. TFT is reserved for
-    // Xiaozhi/chat/camera; the physical Map UI belongs to STM32 LCD.
     (void)duration_ms;
     ESP_LOGI(kTag, "ROUTE,NOTICE=%s", message != nullptr ? message : "");
 }
@@ -253,9 +257,6 @@ void TeachRoute::UpdateMapStatus() const {
              static_cast<unsigned>(kMaxWaypointsPerMap),
              static_cast<unsigned long>(length_mm));
 
-    // UI state is fire-and-forget and integrity/sequence protected by the
-    // existing RobotLink V3 framing. No ACK is generated for MAP,UI, so this
-    // cannot leave a stale generic ACK that could satisfy another transaction.
     if (robot_uart_ != nullptr && robot_uart_->IsConnected()) {
         char command[96];
         const int written = snprintf(
@@ -284,6 +285,17 @@ bool TeachRoute::ReadOdometry() {
     return true;
 }
 
+bool TeachRoute::ReadCurrentWaypoint(RouteWaypoint& point) const {
+    if (robot_uart_ == nullptr || !odometry_valid_) return false;
+    RobotOdometry odometry;
+    if (!robot_uart_->GetOdometry(odometry, 250) || !odometry.valid) return false;
+    point = {};
+    point.x_mm = static_cast<int32_t>(lroundf(odometry.x_mm - start_x_mm_));
+    point.y_mm = static_cast<int32_t>(lroundf(odometry.y_mm - start_y_mm_));
+    point.heading_cdeg = HeadingCdeg(odometry.heading_rad - start_heading_rad_);
+    return true;
+}
+
 int16_t TeachRoute::HeadingCdeg(float heading_rad) {
     float degrees = heading_rad * 57.2957795f;
     while (degrees > 180.0f) degrees -= 360.0f;
@@ -298,6 +310,42 @@ float TeachRoute::HeadingDeltaDeg(int16_t first, int16_t second) {
     return fabsf(delta);
 }
 
+const char* TeachRoute::WaypointSourceName(WaypointSource source) {
+    switch (source) {
+        case WaypointSource::MANUAL: return "MANUAL";
+        case WaypointSource::AUTO_DISTANCE: return "AUTO_SAFE";
+        case WaypointSource::AUTO_CORNER: return "AUTO_CORNER";
+        case WaypointSource::ENDPOINT: return "ENDPOINT";
+    }
+    return "UNKNOWN";
+}
+
+uint8_t TeachRoute::WaypointSourceFlags(WaypointSource source) {
+    switch (source) {
+        case WaypointSource::MANUAL: return kRouteWaypointManualMark;
+        case WaypointSource::AUTO_DISTANCE: return kRouteWaypointAutoDistance;
+        case WaypointSource::AUTO_CORNER: return kRouteWaypointAutoCorner;
+        case WaypointSource::ENDPOINT: return kRouteWaypointEndpoint;
+    }
+    return 0;
+}
+
+void TeachRoute::ResetCornerTracking() {
+    corner_pending_ = false;
+    corner_stable_samples_ = 0U;
+}
+
+void TeachRoute::ResetSmartTracking() {
+    last_sample_ = {};
+    last_sample_valid_ = false;
+    ResetCornerTracking();
+}
+
+void TeachRoute::TrackSample(const RouteWaypoint& point) {
+    last_sample_ = point;
+    last_sample_valid_ = true;
+}
+
 bool TeachRoute::StartTeach() {
     if (mission_manager_ == nullptr || robot_uart_ == nullptr ||
         mission_manager_->IsActive() || mission_manager_->IsAiObstacleHoldActive() ||
@@ -307,8 +355,6 @@ bool TeachRoute::StartTeach() {
         return false;
     }
 
-    // The event itself came from a fresh STM32 PS2 frame. Do not query raw PS2
-    // back from ESP32; that polling path was the source of the reset regression.
     if (!ReadOdometry()) {
         Notify("TEACH REJECT: ODOM", 3500);
         UpdateMapStatus();
@@ -318,18 +364,21 @@ bool TeachRoute::StartTeach() {
     working_route_ = {};
     working_route_.header.waypoint_count = 1;
     working_route_.waypoints[0] = {0, 0, 0, 0, 0};
+    ResetSmartTracking();
+    TrackSample(working_route_.waypoints[0]);
     mode_ = Mode::TEACHING;
     if (!StartAutoTimer()) {
         working_route_ = {};
         odometry_valid_ = false;
+        ResetSmartTracking();
         mode_ = Mode::READY;
         Notify("TEACH REJECT: TIMER", 3500);
         UpdateMapStatus();
         return false;
     }
 
-    char notification[48];
-    snprintf(notification, sizeof(notification), "TEACH %s START",
+    char notification[64];
+    snprintf(notification, sizeof(notification), "TEACH %s SMART START",
              RouteStore::SlotName(selected_slot_));
     Notify(notification, 3500);
     UpdateMapStatus();
@@ -341,79 +390,135 @@ void TeachRoute::CancelTeach() {
     StopAutoTimer();
     working_route_ = {};
     odometry_valid_ = false;
+    ResetSmartTracking();
     mode_ = Mode::READY;
     Notify("TEACH CANCELLED");
     UpdateMapStatus();
 }
 
-void TeachRoute::AddWaypoint(bool manual_mark) {
-    if (mode_ != Mode::TEACHING || !odometry_valid_) return;
-    RobotOdometry odometry;
-    if (robot_uart_ == nullptr || !robot_uart_->GetOdometry(odometry, 250) ||
-        !odometry.valid) {
-        Notify("ODOMETRY ERROR");
-        return;
-    }
-
-    const int32_t x = static_cast<int32_t>(lroundf(odometry.x_mm - start_x_mm_));
-    const int32_t y = static_cast<int32_t>(lroundf(odometry.y_mm - start_y_mm_));
-    const int16_t heading = HeadingCdeg(odometry.heading_rad - start_heading_rad_);
+bool TeachRoute::AppendWaypoint(const RouteWaypoint& candidate,
+                                WaypointSource source) {
+    if (mode_ != Mode::TEACHING) return false;
     const uint16_t count = working_route_.header.waypoint_count;
-    if (count == 0U) return;
+    if (count == 0U) return false;
 
-    RouteWaypoint& last = working_route_.waypoints[count - 1];
-    const float dx = static_cast<float>(x - last.x_mm);
-    const float dy = static_cast<float>(y - last.y_mm);
+    RouteWaypoint& last = working_route_.waypoints[count - 1U];
+    const float dx = static_cast<float>(candidate.x_mm - last.x_mm);
+    const float dy = static_cast<float>(candidate.y_mm - last.y_mm);
     const float distance = sqrtf(dx * dx + dy * dy);
-    const float heading_delta = HeadingDeltaDeg(heading, last.heading_cdeg);
+    const float heading_delta =
+        HeadingDeltaDeg(candidate.heading_cdeg, last.heading_cdeg);
 
-    if (manual_mark && distance < kDuplicateDistanceMm &&
+    if (distance < kDuplicateDistanceMm &&
         heading_delta < kDuplicateHeadingDeg) {
-        last.flags |= kRouteWaypointManualMark;
-        Notify("POINT MARKED");
-        UpdateMapStatus();
-        return;
+        if (source == WaypointSource::MANUAL) {
+            last.flags |= kRouteWaypointManualMark;
+            Notify("POINT MARKED");
+            ESP_LOGI(kTag, "ROUTE,POINT=%u,SOURCE=MANUAL_MARK_EXISTING",
+                     static_cast<unsigned>(count));
+            UpdateMapStatus();
+        }
+        return false;
     }
-    if (!manual_mark && distance < kAutoDistanceMm &&
-        heading_delta < kAutoHeadingDeg) {
-        return;
-    }
+
     if (count >= kMaxWaypointsPerMap) {
         Notify("MAP FULL: SAVE OR CANCEL", 4000);
-        return;
+        return false;
     }
 
     RouteWaypoint& point = working_route_.waypoints[count];
-    point = {x, y, heading,
-             static_cast<uint8_t>(manual_mark ? kRouteWaypointManualMark : 0), 0};
-    working_route_.header.waypoint_count = count + 1;
+    point = candidate;
+    point.flags |= WaypointSourceFlags(source);
+    working_route_.header.waypoint_count = count + 1U;
     working_route_.header.route_length_mm +=
         static_cast<uint32_t>(lroundf(distance));
 
     ESP_LOGI(kTag,
-             "ROUTE,POINT=%u,SOURCE=%s,X=%ld,Y=%ld,H_CDEG=%d,LENGTH_MM=%lu",
-             static_cast<unsigned>(count + 1),
-             manual_mark ? "MANUAL" : "AUTO", static_cast<long>(x),
-             static_cast<long>(y), static_cast<int>(heading),
+             "ROUTE,POINT=%u,SOURCE=%s,X=%ld,Y=%ld,H_CDEG=%d,SEG_MM=%lu,LENGTH_MM=%lu",
+             static_cast<unsigned>(count + 1U), WaypointSourceName(source),
+             static_cast<long>(point.x_mm), static_cast<long>(point.y_mm),
+             static_cast<int>(point.heading_cdeg),
+             static_cast<unsigned long>(lroundf(distance)),
              static_cast<unsigned long>(working_route_.header.route_length_mm));
+    ResetCornerTracking();
     UpdateMapStatus();
+    return true;
+}
+
+void TeachRoute::AddWaypoint(bool manual_mark) {
+    if (mode_ != Mode::TEACHING || !odometry_valid_) return;
+    RouteWaypoint point;
+    if (!ReadCurrentWaypoint(point)) {
+        Notify("ODOMETRY ERROR");
+        return;
+    }
+    TrackSample(point);
+    if (manual_mark) {
+        (void)AppendWaypoint(point, WaypointSource::MANUAL);
+    }
 }
 
 void TeachRoute::UpdateAutoWaypoint() {
-    if (mode_ == Mode::TEACHING) AddWaypoint(false);
+    if (mode_ != Mode::TEACHING || !odometry_valid_) return;
+
+    RouteWaypoint point;
+    if (!ReadCurrentWaypoint(point)) {
+        ESP_LOGW(kTag, "ROUTE,SMART_SAMPLE=SKIP,REASON=ODOM");
+        return;
+    }
+
+    const float sample_heading_delta = last_sample_valid_
+        ? HeadingDeltaDeg(point.heading_cdeg, last_sample_.heading_cdeg)
+        : 0.0f;
+    TrackSample(point);
+
+    const uint16_t count = working_route_.header.waypoint_count;
+    if (count == 0U) return;
+    const RouteWaypoint& last = working_route_.waypoints[count - 1U];
+    const float dx = static_cast<float>(point.x_mm - last.x_mm);
+    const float dy = static_cast<float>(point.y_mm - last.y_mm);
+    const float distance = sqrtf(dx * dx + dy * dy);
+    const float heading_delta =
+        HeadingDeltaDeg(point.heading_cdeg, last.heading_cdeg);
+
+    // Hard safety spacing: never let a route segment grow beyond ~0.75 m even
+    // if the operator forgets to mark points on a long straight corridor.
+    if (distance >= kAutoSafetyDistanceMm) {
+        (void)AppendWaypoint(point, WaypointSource::AUTO_DISTANCE);
+        return;
+    }
+
+    // Corner detection is intentionally two-stage. A 25-degree deviation only
+    // arms a candidate. It is stored after heading settles for three samples,
+    // preventing a 90-degree turn from consuming several 25-degree points.
+    if (heading_delta >= kCornerTriggerDeg) {
+        corner_pending_ = true;
+        if (sample_heading_delta <= kCornerStableStepDeg) {
+            if (corner_stable_samples_ < kCornerStableSamples) {
+                ++corner_stable_samples_;
+            }
+        } else {
+            corner_stable_samples_ = 0U;
+        }
+        if (corner_stable_samples_ >= kCornerStableSamples) {
+            (void)AppendWaypoint(point, WaypointSource::AUTO_CORNER);
+        }
+    } else if (corner_pending_ && heading_delta < kCornerReleaseDeg) {
+        ResetCornerTracking();
+    }
 }
 
 void TeachRoute::UndoWaypoint() {
     if (mode_ != Mode::TEACHING) return;
     const uint16_t count = working_route_.header.waypoint_count;
-    if (count <= 1) {
+    if (count <= 1U) {
         Notify("CANNOT DELETE START");
         UpdateMapStatus();
         return;
     }
 
-    const RouteWaypoint& last = working_route_.waypoints[count - 1];
-    const RouteWaypoint& prior = working_route_.waypoints[count - 2];
+    const RouteWaypoint& last = working_route_.waypoints[count - 1U];
+    const RouteWaypoint& prior = working_route_.waypoints[count - 2U];
     const float dx = static_cast<float>(last.x_mm - prior.x_mm);
     const float dy = static_cast<float>(last.y_mm - prior.y_mm);
     const uint32_t segment =
@@ -421,8 +526,9 @@ void TeachRoute::UndoWaypoint() {
     working_route_.header.route_length_mm =
         working_route_.header.route_length_mm > segment
             ? working_route_.header.route_length_mm - segment
-            : 0;
-    working_route_.header.waypoint_count = count - 1;
+            : 0U;
+    working_route_.header.waypoint_count = count - 1U;
+    ResetCornerTracking();
 
     ESP_LOGI(kTag, "ROUTE,UNDO,REMOVED=%u,POINTS=%u,LENGTH_MM=%lu",
              static_cast<unsigned>(count),
@@ -434,6 +540,27 @@ void TeachRoute::UndoWaypoint() {
 void TeachRoute::SaveTeach() {
     if (mode_ != Mode::TEACHING) return;
     StopAutoTimer();
+
+    // Preserve the actual final pose even when the last manual/automatic point
+    // is still less than the 0.75 m safety spacing from the robot.
+    RouteWaypoint endpoint;
+    if (ReadCurrentWaypoint(endpoint)) {
+        TrackSample(endpoint);
+        const uint16_t count = working_route_.header.waypoint_count;
+        if (count > 0U) {
+            const RouteWaypoint& last = working_route_.waypoints[count - 1U];
+            const float dx = static_cast<float>(endpoint.x_mm - last.x_mm);
+            const float dy = static_cast<float>(endpoint.y_mm - last.y_mm);
+            const float distance = sqrtf(dx * dx + dy * dy);
+            const float heading_delta =
+                HeadingDeltaDeg(endpoint.heading_cdeg, last.heading_cdeg);
+            if (distance >= kEndpointDistanceMm ||
+                heading_delta >= kEndpointHeadingDeg) {
+                (void)AppendWaypoint(endpoint, WaypointSource::ENDPOINT);
+            }
+        }
+    }
+
     if (!store_.Save(selected_slot_, working_route_)) {
         Notify("STORAGE ERROR", 4000);
         (void)StartAutoTimer();
@@ -444,8 +571,9 @@ void TeachRoute::SaveTeach() {
     const uint16_t points = working_route_.header.waypoint_count;
     mode_ = Mode::READY;
     odometry_valid_ = false;
-    char notification[56];
-    snprintf(notification, sizeof(notification), "%s SAVED: %u POINTS",
+    ResetSmartTracking();
+    char notification[64];
+    snprintf(notification, sizeof(notification), "%s SAVED: %u SMART POINTS",
              RouteStore::SlotName(selected_slot_), points);
     Notify(notification, 3500);
     UpdateMapStatus();
