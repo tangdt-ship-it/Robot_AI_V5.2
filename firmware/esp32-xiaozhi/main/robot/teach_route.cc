@@ -27,11 +27,18 @@ constexpr float kDuplicateHeadingDeg = 2.0f;
 constexpr float kEndpointDistanceMm = 50.0f;
 constexpr float kEndpointHeadingDeg = 5.0f;
 
-// Replay V1 Phase A is deliberately motor-disabled. A loaded route must pass
-// this structural/control-path gate before any future motion executor is added.
+// Replay V1 commissioning limits. Phase A validates the whole route with
+// DRIVE=OFF. Phase B1 may drive only WP1 -> WP2 and deliberately performs no
+// automatic turn; the operator must place the robot at the taught start pose
+// and align it with the taught start heading before pressing START.
 constexpr float kReplayDuplicateDistanceMm = 5.0f;
 constexpr float kReplayDuplicateHeadingDeg = 1.0f;
 constexpr float kReplayMaxSegmentMm = 2000.0f;
+constexpr float kReplayB1MinSegmentMm = 100.0f;
+constexpr float kReplayB1MaxSegmentMm = 1000.0f;
+constexpr float kReplayB1MaxHeadingDeg = 20.0f;
+constexpr int kReplayB1Speed = 10;
+constexpr uint32_t kReplayB1TimeoutMs = 20000U;
 }
 
 TeachRoute::TeachRoute(RobotUart* robot_uart, MissionManager* mission_manager)
@@ -70,7 +77,9 @@ bool TeachRoute::Begin() {
              static_cast<unsigned>(kCornerTriggerDeg),
              static_cast<unsigned>(kCornerStableSamples),
              static_cast<unsigned>(kMaxWaypointsPerMap));
-    ESP_LOGI(kTag, "ROUTE,REPLAY_V1=DRY_RUN,DRIVE=OFF");
+    ESP_LOGI(kTag,
+             "ROUTE,REPLAY_V1=PHASE_B1,FIRST_SEGMENT_ONLY=1,TURN=OFF,SPEED=%d,MAX_MM=%u",
+             kReplayB1Speed, static_cast<unsigned>(kReplayB1MaxSegmentMm));
 
     for (RouteSlot slot : {RouteSlot::MAP_1, RouteSlot::MAP_2}) {
         const RouteSlotMetadata metadata = store_.GetMetadata(slot);
@@ -113,13 +122,24 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
     }
 
     const RouteSlot event_slot = slot == 2U ? RouteSlot::MAP_2 : RouteSlot::MAP_1;
-    ESP_LOGI(kTag, "ROUTE,EVENT=RX,ACT=%s,SLOT=%u,MODE=%u",
+    ESP_LOGI(kTag, "ROUTE,EVENT=RX,ACT=%s,SLOT=%u,MODE=%u,REPLAY_RUNNING=%u",
              action, static_cast<unsigned>(slot),
-             static_cast<unsigned>(mode_));
+             static_cast<unsigned>(mode_),
+             replay_motion_running_.load() ? 1U : 0U);
+
+    // During the B1 worker, only the explicit X/SELECT_LONG cancel path is
+    // accepted. This prevents LOAD/SLOT/TEACH events racing an active motor
+    // lease while still preserving the operator's immediate stop authority.
+    if (replay_motion_running_.load() && strcmp(action, "SELECT_LONG") != 0) {
+        ESP_LOGW(kTag, "ROUTE,EVENT=IGNORED,REASON=REPLAY_RUNNING,ACT=%s",
+                 action);
+        return;
+    }
 
     const bool state_locked = mode_ == Mode::TEACHING ||
                               mode_ == Mode::DELETE_CONFIRM ||
-                              mode_ == Mode::REPLAY_READY;
+                              mode_ == Mode::REPLAY_READY ||
+                              replay_motion_running_.load();
     if (strcmp(action, "SLOT") == 0) {
         if (state_locked) {
             ESP_LOGW(kTag,
@@ -146,15 +166,22 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
         selected_slot_ = event_slot;
     }
 
-    // STM32 START is intentionally an alias of TRIANGLE on the MAP page.
-    // READY -> Teach; LOADED -> arm Replay; REPLAY_READY -> dry-run validate.
+    // STM32 START is an alias of TRIANGLE on the MAP page.
+    // READY -> Teach
+    // LOADED + unchecked -> Arm Replay
+    // REPLAY_READY -> whole-route dry-run
+    // LOADED + dry-run PASS -> Phase B1 first-segment motion.
     if (strcmp(action, "TRIANGLE") == 0) {
         if (mode_ == Mode::TEACHING) {
             AddWaypoint(true);
         } else if (mode_ == Mode::READY) {
             StartTeach();
         } else if (mode_ == Mode::LOADED) {
-            ArmReplay();
+            if (replay_plan_valid_) {
+                StartReplayFirstSegment();
+            } else {
+                ArmReplay();
+            }
         } else if (mode_ == Mode::REPLAY_READY) {
             RunReplayDryRun();
         }
@@ -183,21 +210,30 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
         return;
     }
 
-    // STM32 X is an alias of SELECT_LONG. It remains a fast safe cancel.
+    // STM32 X is an alias of SELECT_LONG. It remains the fastest replay stop.
     if (strcmp(action, "SELECT_LONG") == 0) {
-        if (mode_ == Mode::TEACHING) {
+        if (replay_motion_running_.load()) {
+            replay_cancel_requested_.store(true);
+            ESP_LOGW(kTag, "ROUTE,REPLAY=B1_CANCEL_REQUEST,MOTOR_STOP=REQUESTED");
+            if (robot_uart_ != nullptr && !robot_uart_->Ps2OverrideActive()) {
+                (void)robot_uart_->Stop(700);
+            }
+        } else if (mode_ == Mode::TEACHING) {
             CancelTeach();
         } else if (mode_ == Mode::DELETE_CONFIRM) {
             mode_ = Mode::READY;
             Notify("DELETE CANCELLED");
             UpdateMapStatus();
-        } else if (mode_ == Mode::REPLAY_READY) {
+        } else if (mode_ == Mode::REPLAY_READY || replay_plan_valid_) {
             CancelReplay();
         }
         return;
     }
     if (strcmp(action, "SQUARE_LONG") == 0) {
-        if (mode_ == Mode::READY || mode_ == Mode::LOADED) RequestDelete();
+        if (mode_ == Mode::READY ||
+            (mode_ == Mode::LOADED && !replay_plan_valid_)) {
+            RequestDelete();
+        }
         return;
     }
 
@@ -267,19 +303,27 @@ void TeachRoute::UpdateMapStatus() const {
                                    ? working_route_.header.route_length_mm
                                    : metadata.route_length_mm;
     ESP_LOGI(kTag,
-             "ROUTE,UI,OWNER=STM32,SLOT=%u,STORE=%s,MODE=%s,POINTS=%u,MAX=%u,LENGTH_MM=%lu",
+             "ROUTE,UI,OWNER=STM32,SLOT=%u,STORE=%s,MODE=%s,POINTS=%u,MAX=%u,LENGTH_MM=%lu,REPLAY_CHECKED=%u,REPLAY_RUNNING=%u",
              static_cast<unsigned>(selected_slot_),
              RouteStore::StateName(metadata.state), mode, points,
              static_cast<unsigned>(kMaxWaypointsPerMap),
-             static_cast<unsigned long>(length_mm));
+             static_cast<unsigned long>(length_mm),
+             replay_plan_valid_ ? 1U : 0U,
+             replay_motion_running_.load() ? 1U : 0U);
 
     if (robot_uart_ != nullptr && robot_uart_->IsConnected()) {
+        // The current STM32 MAP,UI parser accepts modes 0..3. Keep the wire
+        // status at LOADED while the internal Phase-B replay gate is armed so
+        // the known Phase-A ERR,MAP_UI is eliminated without changing STM32.
+        const unsigned wire_mode = mode_ == Mode::REPLAY_READY
+            ? static_cast<unsigned>(Mode::LOADED)
+            : static_cast<unsigned>(mode_);
         char command[96];
         const int written = snprintf(
             command, sizeof(command), "MAP,UI,%u,%u,%u,%u,%u,%lu",
             static_cast<unsigned>(selected_slot_),
-            static_cast<unsigned>(metadata.state),
-            static_cast<unsigned>(mode_), static_cast<unsigned>(points),
+            static_cast<unsigned>(metadata.state), wire_mode,
+            static_cast<unsigned>(points),
             static_cast<unsigned>(kMaxWaypointsPerMap),
             static_cast<unsigned long>(length_mm));
         if (written <= 0 || static_cast<size_t>(written) >= sizeof(command) ||
@@ -363,8 +407,9 @@ void TeachRoute::TrackSample(const RouteWaypoint& point) {
 }
 
 bool TeachRoute::StartTeach() {
-    if (mission_manager_ == nullptr || robot_uart_ == nullptr ||
-        mission_manager_->IsActive() || mission_manager_->IsAiObstacleHoldActive() ||
+    if (replay_motion_running_.load() || mission_manager_ == nullptr ||
+        robot_uart_ == nullptr || mission_manager_->IsActive() ||
+        mission_manager_->IsAiObstacleHoldActive() ||
         !robot_uart_->IsConnected()) {
         Notify("TEACH REJECT: ROBOT BUSY", 3500);
         UpdateMapStatus();
@@ -609,7 +654,7 @@ void TeachRoute::LoadSelected() {
 }
 
 bool TeachRoute::ArmReplay() {
-    if (mode_ != Mode::LOADED) return false;
+    if (mode_ != Mode::LOADED || replay_motion_running_.load()) return false;
     if (loaded_route_.header.waypoint_count < 2U) {
         Notify("REPLAY REJECT: NEED 2 POINTS", 3500);
         return false;
@@ -652,7 +697,14 @@ bool TeachRoute::ArmReplay() {
 }
 
 void TeachRoute::CancelReplay() {
-    if (mode_ != Mode::REPLAY_READY) return;
+    if (replay_motion_running_.load()) {
+        replay_cancel_requested_.store(true);
+        if (robot_uart_ != nullptr && !robot_uart_->Ps2OverrideActive()) {
+            (void)robot_uart_->Stop(700);
+        }
+        return;
+    }
+    if (mode_ != Mode::REPLAY_READY && !replay_plan_valid_) return;
     replay_plan_valid_ = false;
     odometry_valid_ = false;
     mode_ = Mode::LOADED;
@@ -725,12 +777,171 @@ bool TeachRoute::RunReplayDryRun() {
     mode_ = Mode::LOADED;
     odometry_valid_ = false;
     ESP_LOGI(kTag,
-             "ROUTE,REPLAY=DRY_RUN,PASS=%u,SLOT=%u,POINTS=%u,MOTOR=0,DRIVE=OFF",
+             "ROUTE,REPLAY=DRY_RUN,PASS=%u,SLOT=%u,POINTS=%u,MOTOR=0,DRIVE=OFF,NEXT=%s",
              valid ? 1U : 0U, static_cast<unsigned>(selected_slot_),
-             static_cast<unsigned>(count));
-    Notify(valid ? "REPLAY DRY PASS: NO MOTOR" : "REPLAY DRY FAIL", 4000);
+             static_cast<unsigned>(count),
+             valid ? "B1_FIRST_SEGMENT" : "NONE");
+    Notify(valid ? "REPLAY DRY PASS: START=B1" : "REPLAY DRY FAIL", 4000);
     UpdateMapStatus();
     return valid;
+}
+
+bool TeachRoute::StartReplayFirstSegment() {
+    if (mode_ != Mode::LOADED || !replay_plan_valid_ ||
+        replay_motion_running_.load() || robot_uart_ == nullptr ||
+        mission_manager_ == nullptr) {
+        return false;
+    }
+    const uint16_t count = loaded_route_.header.waypoint_count;
+    if (count < 2U) return false;
+
+    const RouteWaypoint& start = loaded_route_.waypoints[0];
+    const RouteWaypoint& target = loaded_route_.waypoints[1];
+    const float dx = static_cast<float>(target.x_mm - start.x_mm);
+    const float dy = static_cast<float>(target.y_mm - start.y_mm);
+    const float distance = sqrtf(dx * dx + dy * dy);
+    const float target_heading = fabsf(static_cast<float>(target.heading_cdeg) / 100.0f);
+    if (!std::isfinite(distance) || distance < kReplayB1MinSegmentMm ||
+        distance > kReplayB1MaxSegmentMm || target_heading > kReplayB1MaxHeadingDeg) {
+        ESP_LOGW(kTag,
+                 "ROUTE,REPLAY=B1_REJECT,REASON=SEGMENT,DIST_MM=%.1f,H_DEG=%.1f,MIN_MM=%.0f,MAX_MM=%.0f,MAX_H=%.0f",
+                 distance, target_heading, kReplayB1MinSegmentMm,
+                 kReplayB1MaxSegmentMm, kReplayB1MaxHeadingDeg);
+        Notify("B1 REJECT: FIRST SEGMENT", 4000);
+        replay_plan_valid_ = false;
+        UpdateMapStatus();
+        return false;
+    }
+
+    RobotState state;
+    RobotObstacleStatus obstacle;
+    if (mission_manager_->IsActive() || mission_manager_->IsAiObstacleHoldActive() ||
+        robot_uart_->Ps2OverrideActive() ||
+        !robot_uart_->GetState(state, 500) || !state.valid || state.moving ||
+        state.left != 0 || state.right != 0 || state.brake_enabled ||
+        !robot_uart_->GetObstacle(obstacle, 500) || !obstacle.valid ||
+        !obstacle.fresh || !obstacle.echo_valid ||
+        strcmp(obstacle.zone, "CLEAR") != 0) {
+        ESP_LOGW(kTag,
+                 "ROUTE,REPLAY=B1_REJECT,REASON=SAFETY,STATE_VALID=%u,MOVING=%u,BRAKE=%u,PS2_OVERRIDE=%u,OBS_VALID=%u,OBS_FRESH=%u,OBS_ECHO=%u,OBS_ZONE=%s",
+                 state.valid ? 1U : 0U, state.moving ? 1U : 0U,
+                 state.brake_enabled ? 1U : 0U,
+                 robot_uart_->Ps2OverrideActive() ? 1U : 0U,
+                 obstacle.valid ? 1U : 0U, obstacle.fresh ? 1U : 0U,
+                 obstacle.echo_valid ? 1U : 0U,
+                 obstacle.zone[0] != '\0' ? obstacle.zone : "UNKNOWN");
+        Notify("B1 REJECT: SAFETY", 4000);
+        replay_plan_valid_ = false;
+        UpdateMapStatus();
+        return false;
+    }
+
+    replay_cancel_requested_.store(false);
+    replay_motion_running_.store(true);
+    replay_plan_valid_ = false;
+    ESP_LOGI(kTag,
+             "ROUTE,REPLAY=B1_START,SLOT=%u,WP=2/%u,TARGET_MM=%lu,SPEED=%d,TURN=OFF,ALIGN_REQUIRED=MANUAL",
+             static_cast<unsigned>(selected_slot_), static_cast<unsigned>(count),
+             static_cast<unsigned long>(lroundf(distance)), kReplayB1Speed);
+    Notify("B1 GO WP2: X/R3 STOP", 3500);
+    UpdateMapStatus();
+
+    if (xTaskCreatePinnedToCore(ReplayTaskEntry, "map_replay_b1", 4096, this, 3,
+                                &replay_task_, 1) != pdPASS) {
+        replay_task_ = nullptr;
+        replay_motion_running_.store(false);
+        ESP_LOGE(kTag, "ROUTE,REPLAY=B1_REJECT,REASON=TASK_CREATE");
+        Notify("B1 REJECT: NO TASK", 4000);
+        UpdateMapStatus();
+        return false;
+    }
+    return true;
+}
+
+void TeachRoute::ReplayTaskEntry(void* context) {
+    if (context != nullptr) {
+        static_cast<TeachRoute*>(context)->RunReplayFirstSegment();
+        static_cast<TeachRoute*>(context)->replay_task_ = nullptr;
+    }
+    vTaskDelete(nullptr);
+}
+
+void TeachRoute::RunReplayFirstSegment() {
+    const uint16_t count = loaded_route_.header.waypoint_count;
+    const RouteWaypoint& start = loaded_route_.waypoints[0];
+    const RouteWaypoint& target = loaded_route_.waypoints[1];
+    const float dx = static_cast<float>(target.x_mm - start.x_mm);
+    const float dy = static_cast<float>(target.y_mm - start.y_mm);
+    const int target_mm = static_cast<int>(lroundf(sqrtf(dx * dx + dy * dy)));
+
+    bool success = false;
+    const char* reason = "MOVE_FAIL";
+    RobotDistanceResult result;
+
+    RobotState state;
+    RobotObstacleStatus obstacle;
+    const bool safe_before = !replay_cancel_requested_.load() &&
+        !mission_manager_->IsActive() &&
+        !mission_manager_->IsAiObstacleHoldActive() &&
+        !robot_uart_->Ps2OverrideActive() &&
+        robot_uart_->GetState(state, 500) && state.valid && !state.moving &&
+        state.left == 0 && state.right == 0 && !state.brake_enabled &&
+        robot_uart_->GetObstacle(obstacle, 500) && obstacle.valid &&
+        obstacle.fresh && obstacle.echo_valid &&
+        strcmp(obstacle.zone, "CLEAR") == 0;
+
+    if (!safe_before) {
+        reason = "PRECHECK";
+    } else if (!robot_uart_->SetMode(true, 700)) {
+        reason = "AI_MODE";
+    } else {
+        const bool moved = robot_uart_->MoveDistance(
+            true, target_mm, kReplayB1Speed, result, kReplayB1TimeoutMs);
+
+        if (replay_cancel_requested_.load()) {
+            reason = "X_CANCEL";
+        } else if (robot_uart_->Ps2OverrideActive()) {
+            reason = "PS2_OVERRIDE";
+        } else if (mission_manager_->IsAiObstacleHoldActive()) {
+            reason = "AI_OBSTACLE_HOLD";
+        } else {
+            RobotState after;
+            if (robot_uart_->GetState(after, 500) && after.valid &&
+                after.brake_enabled) {
+                reason = "R3_BRAKE";
+            } else if (moved && result.completed) {
+                success = true;
+                reason = "DONE";
+            }
+        }
+    }
+
+    // Do not race a PS2 takeover with MODE,MANUAL. Otherwise restore MANUAL
+    // after the closed-loop B1 lease finishes or fails.
+    if (!robot_uart_->Ps2OverrideActive()) {
+        (void)robot_uart_->SetMode(false, 700);
+    }
+
+    if (success) {
+        const float error_mm = fabsf(result.travelled_mm - result.target_mm);
+        ESP_LOGI(kTag,
+                 "ROUTE,REPLAY=B1_DONE,WP=2/%u,TARGET_MM=%.1f,TRAVEL_MM=%.1f,ERR_MM=%.1f,CONTINUE=NO,MOTOR=0",
+                 static_cast<unsigned>(count), result.target_mm,
+                 result.travelled_mm, error_mm);
+        Notify("B1 WP2 DONE: STOPPED", 4000);
+    } else {
+        ESP_LOGW(kTag,
+                 "ROUTE,REPLAY=B1_STOP,REASON=%s,WP=2/%u,TARGET_MM=%d,CONTINUE=NO,MOTOR=0",
+                 reason, static_cast<unsigned>(count), target_mm);
+        Notify("B1 STOPPED: NO CONTINUE", 4000);
+    }
+
+    replay_cancel_requested_.store(false);
+    replay_motion_running_.store(false);
+    replay_plan_valid_ = false;
+    odometry_valid_ = false;
+    mode_ = Mode::LOADED;
+    UpdateMapStatus();
 }
 
 void TeachRoute::RequestDelete() {
