@@ -16,7 +16,10 @@ enum class RouteSlot : uint8_t {
 };
 
 enum RouteWaypointFlags : uint8_t {
-    kRouteWaypointManualMark = 1U << 0,
+    kRouteWaypointManualMark   = 1U << 0,
+    kRouteWaypointAutoDistance = 1U << 1,
+    kRouteWaypointAutoCorner   = 1U << 2,
+    kRouteWaypointEndpoint     = 1U << 3,
 };
 
 struct RouteWaypoint {
