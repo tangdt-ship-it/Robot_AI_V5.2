@@ -1,6 +1,5 @@
 #include "teach_route.h"
 
-#include "display.h"
 #include "mission_manager.h"
 #include "robot_uart.h"
 
@@ -37,7 +36,9 @@ TeachRoute::TeachRoute(RobotUart* robot_uart, MissionManager* mission_manager)
     : robot_uart_(robot_uart), mission_manager_(mission_manager) {}
 
 void TeachRoute::SetDisplay(Display* display) {
-    display_ = display;
+    // Compatibility shim only. MAP V1 intentionally does not touch the ESP32
+    // TFT/LVGL path. The STM32 20x4 LCD owns the Map page presentation.
+    (void)display;
 }
 
 bool TeachRoute::Begin() {
@@ -80,31 +81,37 @@ void TeachRoute::InputTask() {
 }
 
 void TeachRoute::Notify(const char* message, int duration_ms) const {
-    ESP_LOGI(kTag, "%s", message);
-    if (display_ != nullptr) display_->ShowNotification(message, duration_ms);
+    // Map notifications are deliberately log-only on the ESP32. Do not call
+    // Display::ShowNotification()/SetStatus() from this worker task: the TFT is
+    // reserved for Xiaozhi/chat/camera and the Map page lives on STM32 LCD.
+    (void)duration_ms;
+    ESP_LOGI(kTag, "ROUTE,NOTICE=%s", message != nullptr ? message : "");
 }
 
 void TeachRoute::UpdateMapStatus() const {
-    if (!map_page_ || display_ == nullptr) return;
     const RouteSlotMetadata metadata = store_.GetMetadata(selected_slot_);
     const char* mode = mode_ == Mode::TEACHING ? "TEACH" :
                        mode_ == Mode::LOADED ? "LOADED" :
-                       mode_ == Mode::DELETE_CONFIRM ? "DELETE?" : "READY";
-    char status[96];
-    snprintf(status, sizeof(status), "%s %s %u/%u %s", RouteStore::SlotName(selected_slot_),
-             RouteStore::StateName(metadata.state), metadata.waypoint_count,
-             static_cast<unsigned>(kMaxWaypointsPerMap), mode);
-    display_->SetStatus(status);
+                       mode_ == Mode::DELETE_CONFIRM ? "DELETE" : "READY";
+    const uint16_t points = mode_ == Mode::TEACHING
+                                ? working_route_.header.waypoint_count
+                                : metadata.waypoint_count;
+    const uint32_t length_mm = mode_ == Mode::TEACHING
+                                   ? working_route_.header.route_length_mm
+                                   : metadata.route_length_mm;
+    ESP_LOGI(kTag,
+             "ROUTE,UI,PAGE=%s,SLOT=%u,STORE=%s,MODE=%s,POINTS=%u,MAX=%u,LENGTH_MM=%lu",
+             map_page_ ? "MAP" : "ROBOT",
+             static_cast<unsigned>(selected_slot_),
+             RouteStore::StateName(metadata.state), mode, points,
+             static_cast<unsigned>(kMaxWaypointsPerMap),
+             static_cast<unsigned long>(length_mm));
 }
 
 void TeachRoute::TogglePage() {
     map_page_ = !map_page_;
-    if (map_page_) {
-        Notify("MAP PAGE", 1500);
-        UpdateMapStatus();
-    } else {
-        Notify("ROBOT PAGE", 1500);
-    }
+    Notify(map_page_ ? "MAP PAGE" : "ROBOT PAGE", 1500);
+    UpdateMapStatus();
 }
 
 void TeachRoute::SelectNextSlot() {
@@ -199,6 +206,7 @@ void TeachRoute::AddWaypoint(bool manual_mark) {
         heading_delta < kDuplicateHeadingDeg) {
         last.flags |= kRouteWaypointManualMark;
         Notify("POINT MARKED");
+        UpdateMapStatus();
         return;
     }
     if (!manual_mark && distance < kAutoDistanceMm && heading_delta < kAutoHeadingDeg) {
@@ -263,16 +271,19 @@ void TeachRoute::SaveTeach() {
 }
 
 void TeachRoute::LoadSelected() {
-    RouteData route{};
-    if (!store_.Load(selected_slot_, route)) {
+    // RouteData is ~1.5 KiB. Loading it into a local variable on the 3 KiB
+    // TeachRoute task stack can overflow once nested RobotLink/logging calls are
+    // added. Reuse the persistent member buffer instead.
+    loaded_route_ = {};
+    if (!store_.Load(selected_slot_, loaded_route_)) {
         Notify("MAP NOT SAVED", 3000);
         return;
     }
-    loaded_route_ = route;
     mode_ = Mode::LOADED;
     char notification[56];
     snprintf(notification, sizeof(notification), "%s LOADED: %u POINTS",
-             RouteStore::SlotName(selected_slot_), route.header.waypoint_count);
+             RouteStore::SlotName(selected_slot_),
+             loaded_route_.header.waypoint_count);
     Notify(notification, 3500);
     UpdateMapStatus();
 }
