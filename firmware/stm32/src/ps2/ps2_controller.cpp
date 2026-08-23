@@ -1,6 +1,7 @@
 #include <ps2/ps2_controller.h>
 #include <robot_config.h>
 #include <display/lcd_display.h>
+#include <string.h>
 
 // These objects are owned by main.cpp. Map page/slot presentation is kept on
 // STM32 so L3/SELECT never depend on ESP32 polling. Short Map actions are sent
@@ -11,10 +12,19 @@ extern HardwareSerial robotAiSerial;
 
 namespace {
 void emitMapEvent(const char* action, uint8_t slot) {
+  const uint8_t normalizedSlot = slot == 2U ? 2U : 1U;
+  if (strcmp(action, "SLOT") == 0) {
+    // Slot-selection event has the compact canonical form
+    // <EVENT,MAP,SLOT,1|2>. Do not emit the duplicated SLOT token.
+    robotAiSerial.print("<EVENT,MAP,SLOT,");
+    robotAiSerial.print(normalizedSlot);
+    robotAiSerial.print(">\r\n");
+    return;
+  }
   robotAiSerial.print("<EVENT,MAP,");
   robotAiSerial.print(action);
   robotAiSerial.print(",SLOT,");
-  robotAiSerial.print(slot == 2U ? 2U : 1U);
+  robotAiSerial.print(normalizedSlot);
   robotAiSerial.print(">\r\n");
 }
 }  // namespace
@@ -33,6 +43,15 @@ void Ps2Controller::reconnect(uint32_t nowMs) {
   state_.receiverConnected = (configResult_ == 0);
   state_.frameFresh = false;
   lastReconnectMs_ = nowMs;
+
+  // Re-arm Map edges from the first fresh frame after reconnect. This avoids
+  // synthesizing a press from stale pre-disconnect state.
+  mapEdgesInitialized_ = false;
+  previousMapL3_ = false;
+  previousMapSelect_ = false;
+  previousMapTriangle_ = false;
+  previousMapSquare_ = false;
+  previousMapCircle_ = false;
 }
 
 int16_t Ps2Controller::processAxis(uint8_t raw, bool invert) {
@@ -87,28 +106,50 @@ void Ps2Controller::captureState(uint32_t nowMs) {
   state_.cross = driver_.Button(PSB_CROSS);
   state_.square = driver_.Button(PSB_SQUARE);
 
-  // L3 is deliberately 100% local to STM32: it only changes the LCD page and
-  // emits no ESP32 Map action. This preserves the reset-free isolation result.
-  if (driver_.ButtonPressed(PSB_L3)) {
-    display.togglePage();
-  }
+  // Use explicit edges from the captured boolean state rather than the
+  // library ButtonPressed() helper for Map controls. The latter can retain a
+  // transition long enough to leak an action across an L3 page change.
+  if (!mapEdgesInitialized_) {
+    previousMapL3_ = state_.l3;
+    previousMapSelect_ = state_.select;
+    previousMapTriangle_ = state_.triangle;
+    previousMapSquare_ = state_.square;
+    previousMapCircle_ = state_.circle;
+    mapEdgesInitialized_ = true;
+  } else {
+    const bool l3Pressed = state_.l3 && !previousMapL3_;
+    const bool selectPressed = state_.select && !previousMapSelect_;
+    const bool trianglePressed = state_.triangle && !previousMapTriangle_;
+    const bool squarePressed = state_.square && !previousMapSquare_;
+    const bool circlePressed = state_.circle && !previousMapCircle_;
 
-  if (display.isMapPage()) {
-    // SELECT changes the slot locally first, then reports the already-selected
-    // slot as a high-level event. The ESP32 does not need raw button polling.
-    if (driver_.ButtonPressed(PSB_SELECT)) {
-      display.toggleMapSlot();
-      emitMapEvent("SLOT", display.mapSlot());
+    // L3 is deliberately 100% local to STM32: it only changes the LCD page and
+    // emits no ESP32 Map action. If L3 changes page in this frame, suppress all
+    // other Map actions until the next fresh frame so no event can cross the
+    // page boundary.
+    if (l3Pressed) {
+      display.togglePage();
+    } else if (display.isMapPage()) {
+      if (selectPressed) {
+        display.toggleMapSlot();
+        emitMapEvent("SLOT", display.mapSlot());
+      }
+      if (trianglePressed) {
+        emitMapEvent("TRIANGLE", display.mapSlot());
+      }
+      if (squarePressed) {
+        emitMapEvent("SQUARE", display.mapSlot());
+      }
+      if (circlePressed) {
+        emitMapEvent("CIRCLE", display.mapSlot());
+      }
     }
-    if (driver_.ButtonPressed(PSB_TRIANGLE)) {
-      emitMapEvent("TRIANGLE", display.mapSlot());
-    }
-    if (driver_.ButtonPressed(PSB_SQUARE)) {
-      emitMapEvent("SQUARE", display.mapSlot());
-    }
-    if (driver_.ButtonPressed(PSB_CIRCLE)) {
-      emitMapEvent("CIRCLE", display.mapSlot());
-    }
+
+    previousMapL3_ = state_.l3;
+    previousMapSelect_ = state_.select;
+    previousMapTriangle_ = state_.triangle;
+    previousMapSquare_ = state_.square;
+    previousMapCircle_ = state_.circle;
   }
 
   // A digital 0x41 frame contains no axis bytes; the unused bytes commonly
