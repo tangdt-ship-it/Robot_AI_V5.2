@@ -67,6 +67,7 @@ class Ps2Controller {
   void captureState(uint32_t nowMs);
   void updateActivity(uint32_t nowMs, uint16_t buttons, uint8_t lx,
                       uint8_t ly, uint8_t rx, uint8_t ry);
+  void resetMapPressTracking();
 
   PS2X_STM32 driver_;
   Ps2State state_;
@@ -96,11 +97,19 @@ class Ps2Controller {
   // Map actions are deliberately disarmed on every page transition and after
   // reconnect. They are armed only after two consecutive fresh frames show
   // L3/SELECT/TRIANGLE/SQUARE/CIRCLE all released while the LCD is on MAP.
-  // This creates a clean page-boundary barrier so a release/press transition
-  // from the previous page cannot leak into the new one.
   bool mapActionsArmed_ = false;
   uint8_t mapNeutralReleaseFrames_ = 0;
   uint32_t lastMapPageToggleMs_ = 0;
+
+  // SELECT and SQUARE need mutually-exclusive short/long semantics. Short
+  // actions fire on release; a held press emits one *_LONG event and suppresses
+  // the short action on release.
+  bool mapSelectPressActive_ = false;
+  bool mapSelectLongFired_ = false;
+  uint32_t mapSelectStartedMs_ = 0;
+  bool mapSquarePressActive_ = false;
+  bool mapSquareLongFired_ = false;
+  uint32_t mapSquareStartedMs_ = 0;
 };
 
 #endif
