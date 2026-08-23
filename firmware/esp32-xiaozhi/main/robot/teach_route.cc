@@ -80,6 +80,8 @@ bool TeachRoute::Begin() {
     ESP_LOGI(kTag,
              "ROUTE,REPLAY_V1=PHASE_B1,FIRST_SEGMENT_ONLY=1,TURN=OFF,SPEED=%d,MAX_MM=%u",
              kReplayB1Speed, static_cast<unsigned>(kReplayB1MaxSegmentMm));
+    ESP_LOGI(kTag,
+             "ROUTE,REPLAY_B1_OBS_POLICY=VALID_FRESH_CLEAR,ECHO0_CLEAR_ALLOWED=1");
 
     for (RouteSlot slot : {RouteSlot::MAP_1, RouteSlot::MAP_2}) {
         const RouteSlotMetadata metadata = store_.GetMetadata(slot);
@@ -820,7 +822,7 @@ bool TeachRoute::StartReplayFirstSegment() {
         !robot_uart_->GetState(state, 500) || !state.valid || state.moving ||
         state.left != 0 || state.right != 0 || state.brake_enabled ||
         !robot_uart_->GetObstacle(obstacle, 500) || !obstacle.valid ||
-        !obstacle.fresh || !obstacle.echo_valid ||
+        !obstacle.fresh ||
         strcmp(obstacle.zone, "CLEAR") != 0) {
         ESP_LOGW(kTag,
                  "ROUTE,REPLAY=B1_REJECT,REASON=SAFETY,STATE_VALID=%u,MOVING=%u,BRAKE=%u,PS2_OVERRIDE=%u,OBS_VALID=%u,OBS_FRESH=%u,OBS_ECHO=%u,OBS_ZONE=%s",
@@ -835,6 +837,14 @@ bool TeachRoute::StartReplayFirstSegment() {
         UpdateMapStatus();
         return false;
     }
+
+    ESP_LOGI(kTag,
+             "ROUTE,REPLAY=B1_SAFETY_PASS,OBS_VALID=%u,OBS_FRESH=%u,OBS_ECHO=%u,OBS_ECHO_CLASS=%s,OBS_DIST_CM=%.1f,OBS_ZONE=%s",
+             obstacle.valid ? 1U : 0U, obstacle.fresh ? 1U : 0U,
+             obstacle.echo_valid ? 1U : 0U,
+             obstacle.echo_valid ? "RANGE_RETURN" : "NO_RETURN_CLEAR",
+             obstacle.distance_cm,
+             obstacle.zone[0] != '\0' ? obstacle.zone : "UNKNOWN");
 
     replay_cancel_requested_.store(false);
     replay_motion_running_.store(true);
@@ -887,7 +897,7 @@ void TeachRoute::RunReplayFirstSegment() {
         robot_uart_->GetState(state, 500) && state.valid && !state.moving &&
         state.left == 0 && state.right == 0 && !state.brake_enabled &&
         robot_uart_->GetObstacle(obstacle, 500) && obstacle.valid &&
-        obstacle.fresh && obstacle.echo_valid &&
+        obstacle.fresh &&
         strcmp(obstacle.zone, "CLEAR") == 0;
 
     if (!safe_before) {
