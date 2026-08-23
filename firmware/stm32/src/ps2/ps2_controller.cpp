@@ -2,10 +2,22 @@
 #include <robot_config.h>
 #include <display/lcd_display.h>
 
-// The display object is owned by main.cpp. Map page switching is presentation
-// only and is kept next to the native PS2 edge source so it does not depend on
-// ESP32 polling timing.
+// These objects are owned by main.cpp. Map page/slot presentation is kept on
+// STM32 so L3/SELECT never depend on ESP32 polling. Short Map actions are sent
+// upward as lightweight unsolicited RobotLink events; ESP32 can observe them
+// without owning the raw PS2 polling loop.
 extern LcdDisplay display;
+extern HardwareSerial robotAiSerial;
+
+namespace {
+void emitMapEvent(const char* action, uint8_t slot) {
+  robotAiSerial.print("<EVENT,MAP,");
+  robotAiSerial.print(action);
+  robotAiSerial.print(",SLOT,");
+  robotAiSerial.print(slot == 2U ? 2U : 1U);
+  robotAiSerial.print(">\r\n");
+}
+}  // namespace
 
 Ps2Controller::Ps2Controller()
     : driver_(PS2_CLK_PIN, PS2_CMD_PIN, PS2_ATT_PIN, PS2_DAT_PIN) {}
@@ -75,14 +87,28 @@ void Ps2Controller::captureState(uint32_t nowMs) {
   state_.cross = driver_.Button(PSB_CROSS);
   state_.square = driver_.Button(PSB_SQUARE);
 
-  // LCD page navigation is handled from the native STM32 PS2 edge rather than
-  // waiting for ESP32 PS2,STATUS polling. This is display-only: no motor,
-  // navigation or RouteStore state is changed here.
+  // L3 is deliberately 100% local to STM32: it only changes the LCD page and
+  // emits no ESP32 Map action. This preserves the reset-free isolation result.
   if (driver_.ButtonPressed(PSB_L3)) {
     display.togglePage();
   }
-  if (display.isMapPage() && driver_.ButtonPressed(PSB_SELECT)) {
-    display.toggleMapSlot();
+
+  if (display.isMapPage()) {
+    // SELECT changes the slot locally first, then reports the already-selected
+    // slot as a high-level event. The ESP32 does not need raw button polling.
+    if (driver_.ButtonPressed(PSB_SELECT)) {
+      display.toggleMapSlot();
+      emitMapEvent("SLOT", display.mapSlot());
+    }
+    if (driver_.ButtonPressed(PSB_TRIANGLE)) {
+      emitMapEvent("TRIANGLE", display.mapSlot());
+    }
+    if (driver_.ButtonPressed(PSB_SQUARE)) {
+      emitMapEvent("SQUARE", display.mapSlot());
+    }
+    if (driver_.ButtonPressed(PSB_CIRCLE)) {
+      emitMapEvent("CIRCLE", display.mapSlot());
+    }
   }
 
   // A digital 0x41 frame contains no axis bytes; the unused bytes commonly
