@@ -12,6 +12,7 @@
 #include <esp_timer.h>
 
 namespace {
+constexpr uint32_t kReplaySafetyRxTimeoutMs = 900;
 constexpr const char* kTag = "TeachRoute";
 constexpr uint64_t kAutoWaypointPeriodUs = 100000ULL;  // 10 Hz sampling.
 
@@ -867,13 +868,14 @@ bool TeachRoute::CheckReplaySafety(const char* stage, RobotState& state,
     else if (mission) { reason = "MISSION_ACTIVE"; pass = false; }
     else if (ai_hold) { reason = "AI_OBSTACLE_HOLD"; pass = false; }
     else if (ps2) { reason = "PS2_OVERRIDE"; pass = false; }
-    else if (robot_uart_ == nullptr || !robot_uart_->GetState(state, 500)) {
+    else if (robot_uart_ == nullptr ||
+             !robot_uart_->GetState(state, kReplaySafetyRxTimeoutMs)) {
         reason = "STATE_RX"; pass = false;
     } else if (!state.valid) { reason = "STATE_INVALID"; pass = false; }
     else if (state.moving || state.left != 0 || state.right != 0) {
         reason = "MOVING"; pass = false;
     } else if (state.brake_enabled) { reason = "BRAKE"; pass = false; }
-    else if (!robot_uart_->GetObstacle(obstacle, 500)) {
+    else if (!robot_uart_->GetObstacle(obstacle, kReplaySafetyRxTimeoutMs)) {
         reason = "OBS_RX"; pass = false;
     } else if (!obstacle.valid) { reason = "OBS_INVALID"; pass = false; }
     else if (!obstacle.fresh) { reason = "OBS_STALE"; pass = false; }
@@ -1040,10 +1042,43 @@ void TeachRoute::RunReplayTurnAtWp2() {
     RobotState state;
     RobotObstacleStatus obstacle;
     const char* reason = "OK";
-    if (!CheckReplaySafety("B2_WORKER_PRECHECK", state, obstacle, reason)) {
+    bool safety_ready = false;
+    unsigned int precheck_attempt = 0;
+    for (precheck_attempt = 1; precheck_attempt <= 3; ++precheck_attempt) {
+        char stage[32];
+        snprintf(stage, sizeof(stage), "B2_WORKER_PRECHECK_%u",
+                 precheck_attempt);
+        if (CheckReplaySafety(stage, state, obstacle, reason)) {
+            safety_ready = true;
+            ESP_LOGI(kTag,
+                     "ROUTE,REPLAY=B2_PRECHECK_READY,ATTEMPT=%u/3,REASON=OK",
+                     precheck_attempt);
+            break;
+        }
+        const bool retryable = strcmp(reason, "STATE_RX") == 0 ||
+                               strcmp(reason, "OBS_RX") == 0;
+        if (!retryable) break;
+        if (precheck_attempt < 3) {
+            ESP_LOGW(kTag,
+                     "ROUTE,REPLAY=B2_PRECHECK_RETRY,ATTEMPT=%u/3,REASON=%s",
+                     precheck_attempt, reason);
+            vTaskDelay(pdMS_TO_TICKS(precheck_attempt == 1 ? 100 : 150));
+        }
+    }
+    if (!safety_ready) {
         replay_motion_running_.store(false);
         mode_ = Mode::REPLAY_HOLD;
-        ESP_LOGW(kTag, "ROUTE,REPLAY=B2_TURN_STOP,REASON=%s,CONTINUE=NO", reason);
+        const bool exhausted = precheck_attempt >= 3 &&
+                               (strcmp(reason, "STATE_RX") == 0 ||
+                                strcmp(reason, "OBS_RX") == 0);
+        const char* stop_reason = exhausted
+            ? (strcmp(reason, "STATE_RX") == 0
+                   ? "STATE_RX_RETRY_EXHAUSTED"
+                   : "OBS_RX_RETRY_EXHAUSTED")
+            : reason;
+        ESP_LOGW(kTag,
+                 "ROUTE,REPLAY=B2_TURN_STOP,REASON=%s,CONTINUE=NO,MOVE=0",
+                 stop_reason);
         UpdateMapStatus();
         return;
     }

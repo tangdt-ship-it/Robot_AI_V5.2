@@ -133,9 +133,17 @@ bool RobotUart::SendFrame(const char* body) {
 
 bool RobotUart::SendAndWait(const char* body, EventBits_t expected,
                             uint32_t timeout_ms) {
-    if (!started_ ||
-        xSemaphoreTake(transaction_mutex_, pdMS_TO_TICKS(timeout_ms)) !=
-            pdTRUE) {
+    if (!started_) {
+        ESP_LOGW(kTag, "ROBOT_TXN_FAIL,BODY=%s,STAGE=NOT_STARTED",
+                 body != nullptr ? body : "");
+        return false;
+    }
+    if (xSemaphoreTake(transaction_mutex_, pdMS_TO_TICKS(timeout_ms)) !=
+        pdTRUE) {
+        ESP_LOGW(kTag,
+                 "ROBOT_TXN_FAIL,BODY=%s,STAGE=MUTEX_TIMEOUT,TIMEOUT_MS=%lu",
+                 body != nullptr ? body : "",
+                 static_cast<unsigned long>(timeout_ms));
         return false;
     }
     xEventGroupClearBits(response_events_, expected | kResponseNack);
@@ -147,8 +155,24 @@ bool RobotUart::SendAndWait(const char* body, EventBits_t expected,
                                    pdMS_TO_TICKS(timeout_ms));
     }
     xSemaphoreGive(transaction_mutex_);
-    return sent && (bits & expected) != 0 &&
-           (bits & kResponseNack) == 0;
+    if (!sent) {
+        ESP_LOGW(kTag, "ROBOT_TXN_FAIL,BODY=%s,STAGE=SEND_FAIL",
+                 body != nullptr ? body : "");
+        return false;
+    }
+    if ((bits & kResponseNack) != 0) {
+        ESP_LOGW(kTag, "ROBOT_TXN_FAIL,BODY=%s,STAGE=NACK",
+                 body != nullptr ? body : "");
+        return false;
+    }
+    if ((bits & expected) == 0) {
+        ESP_LOGW(kTag,
+                 "ROBOT_TXN_FAIL,BODY=%s,STAGE=WAIT_TIMEOUT,TIMEOUT_MS=%lu",
+                 body != nullptr ? body : "",
+                 static_cast<unsigned long>(timeout_ms));
+        return false;
+    }
+    return true;
 }
 
 bool RobotUart::Ping(uint32_t timeout_ms) {
