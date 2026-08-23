@@ -507,6 +507,23 @@ bool RobotUart::IsConnected() const {
     return last_rx != 0 && (NowMs() - last_rx) <= 1500;
 }
 
+void RobotUart::DispatchMapEvent(const char* action, uint8_t slot) {
+    if (action == nullptr || (slot != 1U && slot != 2U)) return;
+    const MapEventCallback callback = map_event_callback_;
+    void* const context = map_event_context_;
+    if (callback == nullptr) {
+        ESP_LOGW(kTag, "MAP event dropped: no callback action=%s slot=%u",
+                 action, static_cast<unsigned>(slot));
+        return;
+    }
+
+    const std::string action_copy(action);
+    Application::GetInstance().Schedule(
+        [callback, context, action_copy, slot]() {
+            callback(context, action_copy.c_str(), slot);
+        });
+}
+
 void RobotUart::HandleFrame(const char* frame) {
     last_rx_ms_ = NowMs();
     ESP_LOGI(kTag, "ROBOT RX: <%s>", frame);
@@ -519,6 +536,20 @@ void RobotUart::HandleFrame(const char* frame) {
         xEventGroupSetBits(response_events_, kResponseHello);
         return;
     }
+
+    unsigned int map_slot = 0;
+    if (sscanf(frame, "EVENT,MAP,SLOT,%u", &map_slot) == 1 &&
+        (map_slot == 1U || map_slot == 2U)) {
+        DispatchMapEvent("SLOT", static_cast<uint8_t>(map_slot));
+        return;
+    }
+    char map_action[20] = {};
+    if (sscanf(frame, "EVENT,MAP,%19[^,],SLOT,%u", map_action, &map_slot) == 2 &&
+        (map_slot == 1U || map_slot == 2U)) {
+        DispatchMapEvent(map_action, static_cast<uint8_t>(map_slot));
+        return;
+    }
+
     if (strncmp(frame, "ACK,", 4) == 0) {
         xEventGroupSetBits(response_events_, kResponseAck);
         return;
