@@ -527,6 +527,14 @@ void RobotUart::DispatchMapEvent(const char* action, uint8_t slot) {
 void RobotUart::HandleFrame(const char* frame) {
     last_rx_ms_ = NowMs();
     ESP_LOGI(kTag, "ROBOT RX: <%s>", frame);
+    if (strncmp(frame, "BOOT,STM32,ROBOT_AI,PROTO,3", sizeof("BOOT,STM32,ROBOT_AI,PROTO,3") - 1U) == 0) {
+        protocol_compatible_ = false;
+        motion_lease_active_ = false;
+        if (turn_waiting_) xEventGroupSetBits(response_events_, kResponseTurnError);
+        if (distance_waiting_) xEventGroupSetBits(response_events_, kResponseDistanceError);
+        ESP_LOGW(kTag, "ROBOT_SESSION=INVALIDATED,REASON=STM32_BOOT");
+        return;
+    }
     if (strcmp(frame, "PONG") == 0) {
         xEventGroupSetBits(response_events_, kResponsePong);
         return;

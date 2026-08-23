@@ -1051,7 +1051,17 @@ void TeachRoute::RunReplayTurnAtWp2() {
     const float abs_delta = fabsf(replay_turn_delta_deg_);
     RobotTurnResult result;
     bool ok = true;
+    bool ai_mode = false;
     if (abs_delta >= 2.0f) {
+        ai_mode = robot_uart_ != nullptr && robot_uart_->SetMode(true, 700);
+        if (!ai_mode) {
+            replay_motion_running_.store(false);
+            mode_ = Mode::REPLAY_HOLD;
+            ESP_LOGW(kTag, "ROUTE,REPLAY=B2_TURN_STOP,REASON=AI_MODE_SESSION,CONTINUE=NO,MOVE=0");
+            UpdateMapStatus();
+            return;
+        }
+        ESP_LOGI(kTag, "ROUTE,REPLAY=B2_SESSION,PASS=1,MODE=AI");
         ok = robot_uart_ != nullptr && robot_uart_->TurnRelative(
             replay_turn_delta_deg_ > 0.0f, static_cast<int>(lroundf(abs_delta)),
             kReplayB1Speed, result, 13000);
@@ -1060,6 +1070,11 @@ void TeachRoute::RunReplayTurnAtWp2() {
         result.target_deg = 0.0f;
         result.heading_deg = 0.0f;
         result.error_deg = 0.0f;
+    }
+    if (ai_mode && robot_uart_ != nullptr && !robot_uart_->Ps2OverrideActive()) {
+        const bool restored = robot_uart_->SetMode(false, 700);
+        ESP_LOGI(kTag, "ROUTE,REPLAY=B2_SESSION,MODE=MANUAL,RESTORE=%s",
+                 restored ? "PASS" : "FAIL");
     }
     replay_motion_running_.store(false);
     if (!ok || !result.completed) {
