@@ -94,6 +94,8 @@ bool LcdDisplay::begin() {
   write4(0x20);
   command(0x28); command(0x08); clearHardware(); command(0x06); command(0x0C);
   available_ = true;
+  page_ = LcdPage::ROBOT;
+  mapSlot_ = 1;
   forceRefresh();
   return true;
 }
@@ -106,7 +108,28 @@ void LcdDisplay::padLine(char (&line)[21]) {
 
 void LcdDisplay::setData(const LcdDisplayData& data) { data_ = data; }
 
-void LcdDisplay::buildDesiredLines() {
+void LcdDisplay::setPage(LcdPage page) {
+  if (page_ == page) return;
+  page_ = page;
+  forceRefresh();
+}
+
+void LcdDisplay::togglePage() {
+  setPage(page_ == LcdPage::ROBOT ? LcdPage::MAP : LcdPage::ROBOT);
+}
+
+void LcdDisplay::setMapSlot(uint8_t slot) {
+  const uint8_t normalized = slot == 2U ? 2U : 1U;
+  if (mapSlot_ == normalized) return;
+  mapSlot_ = normalized;
+  forceRefresh();
+}
+
+void LcdDisplay::toggleMapSlot() {
+  setMapSlot(mapSlot_ == 1U ? 2U : 1U);
+}
+
+void LcdDisplay::buildRobotLines() {
   const int compassTenths = static_cast<int>(roundf(data_.compassAngle * 10.0f));
   const int targetTenths = static_cast<int>(roundf(data_.headingTarget * 10.0f));
   snprintf(desired_[0], 21, "HDG:%4d.%1d PS2:%-4s",
@@ -139,6 +162,24 @@ void LcdDisplay::buildDesiredLines() {
     snprintf(desired_[3], 21, "IMU:%-4.4s FUS:%-4.4s",
              data_.imuStatus != nullptr ? data_.imuStatus : "LOST",
              data_.fusionStatus != nullptr ? data_.fusionStatus : "LOST");
+  }
+}
+
+void LcdDisplay::buildMapLines() {
+  // Phase-1 Map LCD migration intentionally keeps the display lightweight and
+  // independent of ESP32 LVGL. Route data/NVS remain authoritative on ESP32;
+  // this page presents the selected slot and the physical button map only.
+  snprintf(desired_[0], 21, "MAP%u ROUTE CONTROL", mapSlot_);
+  snprintf(desired_[1], 21, "STATE: ESP32 / NVS");
+  snprintf(desired_[2], 21, "TRI MARK  CIR SAVE");
+  snprintf(desired_[3], 21, "SEL MAP   L3 EXIT");
+}
+
+void LcdDisplay::buildDesiredLines() {
+  if (page_ == LcdPage::MAP) {
+    buildMapLines();
+  } else {
+    buildRobotLines();
   }
   for (uint8_t row = 0; row < 4; ++row) padLine(desired_[row]);
 }
