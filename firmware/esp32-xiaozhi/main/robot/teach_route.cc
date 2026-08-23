@@ -73,6 +73,9 @@ bool TeachRoute::StartInputTask() {
     robot_uart_->SetMapEventCallback(&TeachRoute::OnMapEvent, this);
     ESP_LOGI(kTag,
              "ROUTE,INPUT_OWNER=STM32,ESP32_PS2_POLL=OFF,INPUT_TASK=DISABLED,MAP_EVENT_CALLBACK=ON");
+    // Seed the STM32 LCD with authoritative metadata for the default slot as
+    // soon as RobotLink is available. Other slots are refreshed on SELECT.
+    UpdateMapStatus();
     return true;
 }
 
@@ -103,6 +106,7 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
             ESP_LOGW(kTag,
                      "ROUTE,EVENT=SLOT,RESULT=IGNORED,REASON=STATE_LOCKED,ACTIVE_SLOT=%u",
                      static_cast<unsigned>(selected_slot_));
+            UpdateMapStatus();
             return;
         }
         selected_slot_ = event_slot;
@@ -119,6 +123,7 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
                  "ROUTE,EVENT=REJECT,REASON=SLOT_MISMATCH,ACT=%s,EVENT_SLOT=%u,ACTIVE_SLOT=%u",
                  action, static_cast<unsigned>(event_slot),
                  static_cast<unsigned>(selected_slot_));
+        UpdateMapStatus();
         return;
     }
     if (mode_ != Mode::TEACHING && mode_ != Mode::DELETE_CONFIRM) {
@@ -140,6 +145,7 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
         } else {
             ESP_LOGI(kTag, "ROUTE,SQUARE_SHORT=IGNORED,MODE=%u",
                      static_cast<unsigned>(mode_));
+            UpdateMapStatus();
         }
         return;
     }
@@ -155,10 +161,14 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
         return;
     }
 
-    // Reserved for the next STM32 input phase; accepting these here keeps the
-    // ESP32 state machine ready without reintroducing raw-button timing.
     if (strcmp(action, "SELECT_LONG") == 0) {
-        if (mode_ == Mode::TEACHING) CancelTeach();
+        if (mode_ == Mode::TEACHING) {
+            CancelTeach();
+        } else if (mode_ == Mode::DELETE_CONFIRM) {
+            mode_ = Mode::READY;
+            Notify("DELETE CANCELLED");
+            UpdateMapStatus();
+        }
         return;
     }
     if (strcmp(action, "SQUARE_LONG") == 0) {
@@ -242,6 +252,25 @@ void TeachRoute::UpdateMapStatus() const {
              RouteStore::StateName(metadata.state), mode, points,
              static_cast<unsigned>(kMaxWaypointsPerMap),
              static_cast<unsigned long>(length_mm));
+
+    // UI state is fire-and-forget and integrity/sequence protected by the
+    // existing RobotLink V3 framing. No ACK is generated for MAP,UI, so this
+    // cannot leave a stale generic ACK that could satisfy another transaction.
+    if (robot_uart_ != nullptr && robot_uart_->IsConnected()) {
+        char command[96];
+        const int written = snprintf(
+            command, sizeof(command), "MAP,UI,%u,%u,%u,%u,%u,%lu",
+            static_cast<unsigned>(selected_slot_),
+            static_cast<unsigned>(metadata.state),
+            static_cast<unsigned>(mode_), static_cast<unsigned>(points),
+            static_cast<unsigned>(kMaxWaypointsPerMap),
+            static_cast<unsigned long>(length_mm));
+        if (written <= 0 || static_cast<size_t>(written) >= sizeof(command) ||
+            !robot_uart_->SendFrame(command)) {
+            ESP_LOGW(kTag, "ROUTE,UI_TX=FAIL,SLOT=%u",
+                     static_cast<unsigned>(selected_slot_));
+        }
+    }
 }
 
 bool TeachRoute::ReadOdometry() {
@@ -274,6 +303,7 @@ bool TeachRoute::StartTeach() {
         mission_manager_->IsActive() || mission_manager_->IsAiObstacleHoldActive() ||
         !robot_uart_->IsConnected()) {
         Notify("TEACH REJECT: ROBOT BUSY", 3500);
+        UpdateMapStatus();
         return false;
     }
 
@@ -281,6 +311,7 @@ bool TeachRoute::StartTeach() {
     // back from ESP32; that polling path was the source of the reset regression.
     if (!ReadOdometry()) {
         Notify("TEACH REJECT: ODOM", 3500);
+        UpdateMapStatus();
         return false;
     }
 
@@ -293,6 +324,7 @@ bool TeachRoute::StartTeach() {
         odometry_valid_ = false;
         mode_ = Mode::READY;
         Notify("TEACH REJECT: TIMER", 3500);
+        UpdateMapStatus();
         return false;
     }
 
@@ -376,6 +408,7 @@ void TeachRoute::UndoWaypoint() {
     const uint16_t count = working_route_.header.waypoint_count;
     if (count <= 1) {
         Notify("CANNOT DELETE START");
+        UpdateMapStatus();
         return;
     }
 
@@ -404,6 +437,7 @@ void TeachRoute::SaveTeach() {
     if (!store_.Save(selected_slot_, working_route_)) {
         Notify("STORAGE ERROR", 4000);
         (void)StartAutoTimer();
+        UpdateMapStatus();
         return;
     }
 
@@ -418,11 +452,11 @@ void TeachRoute::SaveTeach() {
 }
 
 void TeachRoute::LoadSelected() {
-    // RouteData is ~1.5 KiB. Reuse the persistent member buffer; never place a
-    // full route object on a small task/main stack.
     loaded_route_ = {};
     if (!store_.Load(selected_slot_, loaded_route_)) {
         Notify("MAP NOT SAVED", 3000);
+        mode_ = Mode::READY;
+        UpdateMapStatus();
         return;
     }
     mode_ = Mode::LOADED;
@@ -436,6 +470,13 @@ void TeachRoute::LoadSelected() {
 
 void TeachRoute::RequestDelete() {
     if (mode_ != Mode::READY && mode_ != Mode::LOADED) return;
+    const RouteSlotMetadata metadata = store_.GetMetadata(selected_slot_);
+    if (metadata.state != RouteSlotState::SAVED) {
+        Notify("MAP EMPTY");
+        mode_ = Mode::READY;
+        UpdateMapStatus();
+        return;
+    }
     mode_ = Mode::DELETE_CONFIRM;
     char notification[64];
     snprintf(notification, sizeof(notification), "DELETE %s? CIRCLE=YES",
@@ -448,6 +489,7 @@ void TeachRoute::ConfirmDelete() {
     if (mode_ != Mode::DELETE_CONFIRM) return;
     if (!store_.Delete(selected_slot_)) {
         Notify("STORAGE ERROR", 4000);
+        UpdateMapStatus();
         return;
     }
     loaded_route_ = {};
