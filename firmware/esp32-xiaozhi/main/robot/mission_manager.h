@@ -161,6 +161,9 @@ public:
     // suppresses the legacy automatic bypass; it never resumes motion.
     void HoldForAiObstacle();
     bool IsActive() const;
+    // Read-only integration gate for Teach Route. It does not release the
+    // commissioned AI obstacle hold and cannot cause motion.
+    bool IsAiObstacleHoldActive() const;
     std::string StatusJson() const;
     std::string HomeJson() const;
     std::string MapJson() const;

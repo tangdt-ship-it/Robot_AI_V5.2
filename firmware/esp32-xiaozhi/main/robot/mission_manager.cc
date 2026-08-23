@@ -1052,6 +1052,10 @@ bool MissionManager::IsActive() const {
     return lock.locked() && active_;
 }
 
+bool MissionManager::IsAiObstacleHoldActive() const {
+    return ai_obstacle_hold_.load();
+}
+
 bool MissionManager::CancelRequested() {
     if (cancel_requested_.load()) return true;
     if (robot_uart_ != nullptr && robot_uart_->Ps2OverrideActive()) {

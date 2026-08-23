@@ -33,6 +33,8 @@ set(SOURCES "audio/audio_codec.cc"
             "robot/mission_manager.cc"
             "robot/obstacle_assist.cc"
             "robot/robot_uart.cc"
+            "robot/route_store.cc"
+            "robot/teach_route.cc"
             "system_info.cc"
             "application.cc"
             "ota.cc"
@@ -217,6 +219,7 @@ idf_component_register(SRCS ${SOURCES}
                         esp_driver_jpeg
                         esp_driver_ppa
                         esp_app_format
+                        nvs_flash
                         app_update
                         spi_flash
                         console

@@ -814,8 +814,12 @@ void RobotUart::HandleFrame(const char* frame) {
     int enabled = 0;
     int fresh = 0;
     unsigned long age = 0;
-    if (sscanf(frame, "PS2,STATE,%7[^,],ENABLED,%d,FRESH,%d,AGE,%lu",
-               text_value, &enabled, &fresh, &age) == 4) {
+    unsigned int buttons = 0;
+    const int ps2_fields = sscanf(
+        frame,
+        "PS2,STATE,%7[^,],ENABLED,%d,FRESH,%d,AGE,%lu,MODE,%*x,BTN,%x",
+        text_value, &enabled, &fresh, &age, &buttons);
+    if (ps2_fields >= 4) {
         if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
             ps2_status_.valid = true;
             strncpy(ps2_status_.state, text_value,
@@ -824,6 +828,8 @@ void RobotUart::HandleFrame(const char* frame) {
             ps2_status_.enabled = enabled != 0;
             ps2_status_.fresh = fresh != 0;
             ps2_status_.age_ms = static_cast<uint32_t>(age);
+            ps2_status_.buttons_valid = ps2_fields == 5;
+            ps2_status_.buttons = static_cast<uint16_t>(buttons);
             xSemaphoreGive(state_mutex_);
         }
         xEventGroupSetBits(response_events_, kResponsePs2);

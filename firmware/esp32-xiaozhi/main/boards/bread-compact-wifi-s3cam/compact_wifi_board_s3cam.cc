@@ -12,6 +12,7 @@
 #include "robot_uart.h"
 #include "robot/mission_manager.h"
 #include "robot/obstacle_assist.h"
+#include "robot/teach_route.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -73,6 +74,7 @@ private:
     mutable RobotUart robot_uart_;
     MissionManager mission_manager_;
     ObstacleAssist obstacle_assist_;
+    TeachRoute teach_route_{&robot_uart_, &mission_manager_};
     volatile bool diagnostic_turn_active_ = false;
 
     struct DiagnosticTurnRequest {
@@ -1104,11 +1106,14 @@ public:
           obstacle_assist_(&robot_uart_) {
         InitializeSpi();
         InitializeLcdDisplay();
+        teach_route_.SetDisplay(display_);
+        teach_route_.Begin();
         InitializeButtons();
         InitializeCamera();
         if (robot_uart_.Begin()) {
             robot_uart_.SetObstacleStoppedCallback(&ObstacleAssist::OnStopped,
                                                    &obstacle_assist_);
+            teach_route_.StartInputTask();
             InitializeRobotTools();
             InitializeDiagnosticConsole();
         }

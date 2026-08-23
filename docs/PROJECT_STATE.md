@@ -42,7 +42,13 @@ required.
 
 ## Next feature
 
-`NOT STARTED`
+`MAP V1 / TEACH ROUTE`
 
-No work has started for AI Obstacle V2, map, teach/replay route, find object,
-find owner, or camera landmark.
+## Current feature branch
+
+`MAP V1 / TEACH ROUTE` is in development on `feature/map-v1`. Stable `main`
+remains the commissioned V4.3 baseline. Map V1 records and persists manual
+PS2 routes only; it does not replay, navigate, or issue motor commands.
+
+No work has started for AI Obstacle V2, replay route, find object, find owner,
+or camera landmark.

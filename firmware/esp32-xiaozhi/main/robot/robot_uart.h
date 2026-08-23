@@ -40,6 +40,10 @@ struct RobotPs2Status {
     bool enabled = false;
     bool fresh = false;
     uint32_t age_ms = 0;
+    // Raw STM32 PS2 mask is active-low. buttons_valid distinguishes an older
+    // peer that did not yet provide BTN from an all-buttons-released 0xFFFF.
+    bool buttons_valid = false;
+    uint16_t buttons = 0xFFFF;
 };
 
 struct RobotObstacleStatus {
