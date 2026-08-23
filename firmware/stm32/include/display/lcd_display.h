@@ -33,10 +33,18 @@ struct LcdDisplayData {
 struct LcdMapStatus {
   bool valid = false;
   uint8_t storeState = 0;  // ESP32 RouteSlotState: EMPTY/SAVED/INVALID/ERROR.
-  uint8_t mode = 0;        // 0 READY, 1 TEACH, 2 LOADED, 3 DELETE, 4 REPLAY_READY.
+  // ESP32 MAP UI modes:
+  // 0 READY, 1 TEACH, 2 LOADED, 3 DELETE, 4 REPLAY_READY,
+  // 5 REPLAY_CHECKED, 6 REPLAY_RUNNING, 7 REPLAY_HOLD, 8 REPLAY_COMPLETE.
+  uint8_t mode = 0;
   uint16_t points = 0;
   uint16_t maxPoints = 128;
   uint32_t lengthMm = 0;
+  uint16_t replayWp = 0;
+  uint16_t replayTotal = 0;
+  uint32_t replayTargetMm = 0;
+  uint32_t replayTravelMm = 0;
+  uint32_t replayErrorMm = 0;
 };
 
 class LcdDisplay {
@@ -60,12 +68,14 @@ class LcdDisplay {
   uint8_t mapSlot() const { return mapSlot_; }
   bool mapSlotLocked() const {
     const LcdMapStatus& status = mapStatus_[mapSlot_ - 1U];
-    return status.valid &&
-           (status.mode == 1U || status.mode == 3U || status.mode == 4U);
+    return status.valid && (status.mode == 1U || status.mode >= 3U);
   }
   void setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
                     uint16_t points, uint16_t maxPoints,
-                    uint32_t lengthMm);
+                    uint32_t lengthMm, uint16_t replayWp = 0,
+                    uint16_t replayTotal = 0, uint32_t replayTargetMm = 0,
+                    uint32_t replayTravelMm = 0,
+                    uint32_t replayErrorMm = 0);
 
  private:
   class SoftI2C {
