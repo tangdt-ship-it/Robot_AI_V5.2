@@ -11,6 +11,9 @@ extern LcdDisplay display;
 extern HardwareSerial robotAiSerial;
 
 namespace {
+constexpr uint32_t kMapPageToggleGuardMs = 250U;
+constexpr uint8_t kMapNeutralFramesToArm = 2U;
+
 void emitMapEvent(const char* action, uint8_t slot) {
   const uint8_t normalizedSlot = slot == 2U ? 2U : 1U;
   if (strcmp(action, "SLOT") == 0) {
@@ -52,6 +55,9 @@ void Ps2Controller::reconnect(uint32_t nowMs) {
   previousMapTriangle_ = false;
   previousMapSquare_ = false;
   previousMapCircle_ = false;
+  mapActionsArmed_ = false;
+  mapNeutralReleaseFrames_ = 0U;
+  lastMapPageToggleMs_ = 0U;
 }
 
 int16_t Ps2Controller::processAxis(uint8_t raw, bool invert) {
@@ -107,8 +113,10 @@ void Ps2Controller::captureState(uint32_t nowMs) {
   state_.square = driver_.Button(PSB_SQUARE);
 
   // Use explicit edges from the captured boolean state rather than the
-  // library ButtonPressed() helper for Map controls. The latter can retain a
-  // transition long enough to leak an action across an L3 page change.
+  // library ButtonPressed() helper for Map controls. In addition, Map actions
+  // are disarmed across every page boundary and require two fully-neutral
+  // fresh frames on the MAP page before they can fire. This prevents a stale
+  // or near-simultaneous transition from leaking across an L3 page change.
   if (!mapEdgesInitialized_) {
     previousMapL3_ = state_.l3;
     previousMapSelect_ = state_.select;
@@ -116,20 +124,50 @@ void Ps2Controller::captureState(uint32_t nowMs) {
     previousMapSquare_ = state_.square;
     previousMapCircle_ = state_.circle;
     mapEdgesInitialized_ = true;
+    mapActionsArmed_ = false;
+    mapNeutralReleaseFrames_ = 0U;
   } else {
     const bool l3Pressed = state_.l3 && !previousMapL3_;
     const bool selectPressed = state_.select && !previousMapSelect_;
     const bool trianglePressed = state_.triangle && !previousMapTriangle_;
     const bool squarePressed = state_.square && !previousMapSquare_;
     const bool circlePressed = state_.circle && !previousMapCircle_;
+    const bool allMapButtonsReleased =
+        !state_.l3 && !state_.select && !state_.triangle && !state_.square &&
+        !state_.circle;
 
-    // L3 is deliberately 100% local to STM32: it only changes the LCD page and
-    // emits no ESP32 Map action. If L3 changes page in this frame, suppress all
-    // other Map actions until the next fresh frame so no event can cross the
-    // page boundary.
+    // L3 remains 100% local to STM32. Any L3 rising edge creates a hard Map
+    // action barrier for the current frame. A small time guard rejects a
+    // mechanical/reception bounce that could otherwise immediately toggle the
+    // page back and make an outside-page button look like a Map action.
     if (l3Pressed) {
-      display.togglePage();
-    } else if (display.isMapPage()) {
+      if (lastMapPageToggleMs_ == 0U ||
+          (nowMs - lastMapPageToggleMs_) >= kMapPageToggleGuardMs) {
+        display.togglePage();
+        lastMapPageToggleMs_ = nowMs;
+      }
+      mapActionsArmed_ = false;
+      mapNeutralReleaseFrames_ = 0U;
+    } else if (!display.isMapPage()) {
+      // ROBOT page is an unconditional sink: Map actions stay disarmed even if
+      // a button edge arrives immediately after leaving MAP.
+      mapActionsArmed_ = false;
+      mapNeutralReleaseFrames_ = 0U;
+    } else if (!mapActionsArmed_) {
+      // Entering MAP never arms on the same frame as L3. Wait until the user
+      // has released every Map-related button for two consecutive fresh PS2
+      // frames, then accept new presses from a clean baseline.
+      if (allMapButtonsReleased) {
+        if (mapNeutralReleaseFrames_ < kMapNeutralFramesToArm) {
+          ++mapNeutralReleaseFrames_;
+        }
+        if (mapNeutralReleaseFrames_ >= kMapNeutralFramesToArm) {
+          mapActionsArmed_ = true;
+        }
+      } else {
+        mapNeutralReleaseFrames_ = 0U;
+      }
+    } else {
       if (selectPressed) {
         display.toggleMapSlot();
         emitMapEvent("SLOT", display.mapSlot());
