@@ -63,10 +63,16 @@ bool TeachRoute::Begin() {
 
 bool TeachRoute::StartInputTask() {
     // Deliberately no xTaskCreate here. PS2 is physically owned by STM32 and
-    // Map controls arrive as high-level EVENT,MAP frames. This keeps the
-    // reset-causing raw PS2 polling path permanently disabled on ESP32.
+    // Map controls arrive as high-level EVENT,MAP frames. Register the event
+    // callback only after RobotUart::Begin(), which is exactly when the board
+    // calls this compatibility entry point.
+    if (robot_uart_ == nullptr) {
+        ESP_LOGE(kTag, "ROUTE,MAP_EVENT_CALLBACK=FAIL,REASON=NO_UART");
+        return false;
+    }
+    robot_uart_->SetMapEventCallback(&TeachRoute::OnMapEvent, this);
     ESP_LOGI(kTag,
-             "ROUTE,INPUT_OWNER=STM32,ESP32_PS2_POLL=OFF,INPUT_TASK=DISABLED");
+             "ROUTE,INPUT_OWNER=STM32,ESP32_PS2_POLL=OFF,INPUT_TASK=DISABLED,MAP_EVENT_CALLBACK=ON");
     return true;
 }
 
