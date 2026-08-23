@@ -1,5 +1,11 @@
 #include <ps2/ps2_controller.h>
 #include <robot_config.h>
+#include <display/lcd_display.h>
+
+// The display object is owned by main.cpp. Map page switching is presentation
+// only and is kept next to the native PS2 edge source so it does not depend on
+// ESP32 polling timing.
+extern LcdDisplay display;
 
 Ps2Controller::Ps2Controller()
     : driver_(PS2_CLK_PIN, PS2_CMD_PIN, PS2_ATT_PIN, PS2_DAT_PIN) {}
@@ -68,6 +74,16 @@ void Ps2Controller::captureState(uint32_t nowMs) {
   state_.circle = driver_.Button(PSB_CIRCLE);
   state_.cross = driver_.Button(PSB_CROSS);
   state_.square = driver_.Button(PSB_SQUARE);
+
+  // LCD page navigation is handled from the native STM32 PS2 edge rather than
+  // waiting for ESP32 PS2,STATUS polling. This is display-only: no motor,
+  // navigation or RouteStore state is changed here.
+  if (driver_.ButtonPressed(PSB_L3)) {
+    display.togglePage();
+  }
+  if (display.isMapPage() && driver_.ButtonPressed(PSB_SELECT)) {
+    display.toggleMapSlot();
+  }
 
   // A digital 0x41 frame contains no axis bytes; the unused bytes commonly
   // read 0xFF and must never be interpreted as full joystick deflection.
