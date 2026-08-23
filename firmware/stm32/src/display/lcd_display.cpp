@@ -197,6 +197,8 @@ void LcdDisplay::buildMapLines() {
     title = "LOADED";
   } else if (status.mode == 3U) {
     title = "DELETE?";
+  } else if (status.mode == 4U) {
+    title = "REPLAY READY";
   } else if (status.storeState == 0U) {
     title = "EMPTY";
   } else if (status.storeState == 1U) {
@@ -217,9 +219,15 @@ void LcdDisplay::buildMapLines() {
   if (status.mode == 1U) {
     snprintf(desired_[2], 21, "TR MARK SQ UNDO");
     snprintf(desired_[3], 21, "CIR SAVE X CANCEL");
+  } else if (status.mode == 2U) {
+    snprintf(desired_[2], 21, "START REPLAY");
+    snprintf(desired_[3], 21, "CIR LOAD L3 EXIT");
   } else if (status.mode == 3U) {
     snprintf(desired_[2], 21, "CIR YES");
     snprintf(desired_[3], 21, "SELH CANCEL L3 EXIT");
+  } else if (status.mode == 4U) {
+    snprintf(desired_[2], 21, "START CHECK NO MOTOR");
+    snprintf(desired_[3], 21, "X CANCEL L3 EXIT");
   } else if (status.storeState == 0U) {
     snprintf(desired_[2], 21, "START TEACH");
     snprintf(desired_[3], 21, "SEL MAP L3 EXIT");
