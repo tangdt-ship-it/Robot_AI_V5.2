@@ -82,6 +82,15 @@ class Ps2Controller {
   uint32_t lastFrameIntervalMs_ = 0;
   uint32_t goodFrameCount_ = 0;
   uint8_t configResult_ = 1;
+
+  // Map UI events use explicit controller-level edges instead of the PS2X
+  // ButtonPressed() helper. This prevents a stale helper edge from leaking a
+  // Map action across an L3 page transition.
+  bool previousMapL3_ = false;
+  bool previousMapSelect_ = false;
+  bool previousMapTriangle_ = false;
+  bool previousMapSquare_ = false;
+  bool previousMapCircle_ = false;
 };
 
 #endif
