@@ -4,21 +4,19 @@
 #include <string.h>
 
 // These objects are owned by main.cpp. Map page/slot presentation is kept on
-// STM32 so L3/SELECT never depend on ESP32 polling. Short Map actions are sent
-// upward as lightweight unsolicited RobotLink events; ESP32 can observe them
-// without owning the raw PS2 polling loop.
+// STM32 so L3/SELECT never depend on ESP32 polling. Map actions are sent
+// upward as lightweight unsolicited RobotLink events; ESP32 owns route/NVS.
 extern LcdDisplay display;
 extern HardwareSerial robotAiSerial;
 
 namespace {
 constexpr uint32_t kMapPageToggleGuardMs = 250U;
 constexpr uint8_t kMapNeutralFramesToArm = 2U;
+constexpr uint32_t kMapLongPressMs = 800U;
 
 void emitMapEvent(const char* action, uint8_t slot) {
   const uint8_t normalizedSlot = slot == 2U ? 2U : 1U;
   if (strcmp(action, "SLOT") == 0) {
-    // Slot-selection event has the compact canonical form
-    // <EVENT,MAP,SLOT,1|2>. Do not emit the duplicated SLOT token.
     robotAiSerial.print("<EVENT,MAP,SLOT,");
     robotAiSerial.print(normalizedSlot);
     robotAiSerial.print(">\r\n");
@@ -41,6 +39,15 @@ void Ps2Controller::begin() {
   lastPollMs_ = now;
 }
 
+void Ps2Controller::resetMapPressTracking() {
+  mapSelectPressActive_ = false;
+  mapSelectLongFired_ = false;
+  mapSelectStartedMs_ = 0U;
+  mapSquarePressActive_ = false;
+  mapSquareLongFired_ = false;
+  mapSquareStartedMs_ = 0U;
+}
+
 void Ps2Controller::reconnect(uint32_t nowMs) {
   configResult_ = driver_.config_gamepad(false, false);
   state_.receiverConnected = (configResult_ == 0);
@@ -58,6 +65,7 @@ void Ps2Controller::reconnect(uint32_t nowMs) {
   mapActionsArmed_ = false;
   mapNeutralReleaseFrames_ = 0U;
   lastMapPageToggleMs_ = 0U;
+  resetMapPressTracking();
 }
 
 int16_t Ps2Controller::processAxis(uint8_t raw, bool invert) {
@@ -112,11 +120,6 @@ void Ps2Controller::captureState(uint32_t nowMs) {
   state_.cross = driver_.Button(PSB_CROSS);
   state_.square = driver_.Button(PSB_SQUARE);
 
-  // Use explicit edges from the captured boolean state rather than the
-  // library ButtonPressed() helper for Map controls. In addition, Map actions
-  // are disarmed across every page boundary and require two fully-neutral
-  // fresh frames on the MAP page before they can fire. This prevents a stale
-  // or near-simultaneous transition from leaking across an L3 page change.
   if (!mapEdgesInitialized_) {
     previousMapL3_ = state_.l3;
     previousMapSelect_ = state_.select;
@@ -126,20 +129,21 @@ void Ps2Controller::captureState(uint32_t nowMs) {
     mapEdgesInitialized_ = true;
     mapActionsArmed_ = false;
     mapNeutralReleaseFrames_ = 0U;
+    resetMapPressTracking();
   } else {
     const bool l3Pressed = state_.l3 && !previousMapL3_;
     const bool selectPressed = state_.select && !previousMapSelect_;
+    const bool selectReleased = !state_.select && previousMapSelect_;
     const bool trianglePressed = state_.triangle && !previousMapTriangle_;
     const bool squarePressed = state_.square && !previousMapSquare_;
+    const bool squareReleased = !state_.square && previousMapSquare_;
     const bool circlePressed = state_.circle && !previousMapCircle_;
     const bool allMapButtonsReleased =
         !state_.l3 && !state_.select && !state_.triangle && !state_.square &&
         !state_.circle;
 
     // L3 remains 100% local to STM32. Any L3 rising edge creates a hard Map
-    // action barrier for the current frame. A small time guard rejects a
-    // mechanical/reception bounce that could otherwise immediately toggle the
-    // page back and make an outside-page button look like a Map action.
+    // action barrier for the current frame.
     if (l3Pressed) {
       if (lastMapPageToggleMs_ == 0U ||
           (nowMs - lastMapPageToggleMs_) >= kMapPageToggleGuardMs) {
@@ -148,39 +152,67 @@ void Ps2Controller::captureState(uint32_t nowMs) {
       }
       mapActionsArmed_ = false;
       mapNeutralReleaseFrames_ = 0U;
+      resetMapPressTracking();
     } else if (!display.isMapPage()) {
-      // ROBOT page is an unconditional sink: Map actions stay disarmed even if
-      // a button edge arrives immediately after leaving MAP.
       mapActionsArmed_ = false;
       mapNeutralReleaseFrames_ = 0U;
+      resetMapPressTracking();
     } else if (!mapActionsArmed_) {
-      // Entering MAP never arms on the same frame as L3. Wait until the user
-      // has released every Map-related button for two consecutive fresh PS2
-      // frames, then accept new presses from a clean baseline.
       if (allMapButtonsReleased) {
         if (mapNeutralReleaseFrames_ < kMapNeutralFramesToArm) {
           ++mapNeutralReleaseFrames_;
         }
         if (mapNeutralReleaseFrames_ >= kMapNeutralFramesToArm) {
           mapActionsArmed_ = true;
+          resetMapPressTracking();
         }
       } else {
         mapNeutralReleaseFrames_ = 0U;
       }
     } else {
+      // SELECT short toggles slot only on release. Holding it emits one
+      // SELECT_LONG and suppresses the short slot change on release.
       if (selectPressed) {
-        display.toggleMapSlot();
-        emitMapEvent("SLOT", display.mapSlot());
+        mapSelectPressActive_ = true;
+        mapSelectLongFired_ = false;
+        mapSelectStartedMs_ = nowMs;
       }
-      if (trianglePressed) {
-        emitMapEvent("TRIANGLE", display.mapSlot());
+      if (mapSelectPressActive_ && state_.select && !mapSelectLongFired_ &&
+          (nowMs - mapSelectStartedMs_) >= kMapLongPressMs) {
+        emitMapEvent("SELECT_LONG", display.mapSlot());
+        mapSelectLongFired_ = true;
       }
+      if (selectReleased && mapSelectPressActive_) {
+        if (!mapSelectLongFired_) {
+          display.toggleMapSlot();
+          emitMapEvent("SLOT", display.mapSlot());
+        }
+        mapSelectPressActive_ = false;
+        mapSelectLongFired_ = false;
+        mapSelectStartedMs_ = 0U;
+      }
+
+      // SQUARE short = Undo while teaching. SQUARE long = Delete request when
+      // idle/loaded. Exactly one semantic event is emitted for each press.
       if (squarePressed) {
-        emitMapEvent("SQUARE", display.mapSlot());
+        mapSquarePressActive_ = true;
+        mapSquareLongFired_ = false;
+        mapSquareStartedMs_ = nowMs;
       }
-      if (circlePressed) {
-        emitMapEvent("CIRCLE", display.mapSlot());
+      if (mapSquarePressActive_ && state_.square && !mapSquareLongFired_ &&
+          (nowMs - mapSquareStartedMs_) >= kMapLongPressMs) {
+        emitMapEvent("SQUARE_LONG", display.mapSlot());
+        mapSquareLongFired_ = true;
       }
+      if (squareReleased && mapSquarePressActive_) {
+        if (!mapSquareLongFired_) emitMapEvent("SQUARE", display.mapSlot());
+        mapSquarePressActive_ = false;
+        mapSquareLongFired_ = false;
+        mapSquareStartedMs_ = 0U;
+      }
+
+      if (trianglePressed) emitMapEvent("TRIANGLE", display.mapSlot());
+      if (circlePressed) emitMapEvent("CIRCLE", display.mapSlot());
     }
 
     previousMapL3_ = state_.l3;
@@ -268,8 +300,6 @@ bool Ps2Controller::buttonReleased(Ps2Button button) const {
 bool Ps2Controller::motionCommandActive() const {
   if (!state_.receiverConnected) return false;
   if (state_.up || state_.down || state_.left || state_.right) return true;
-  // Processed zero corresponds to the configured raw deadzone. The larger raw
-  // release threshold is retained as a documented safety margin in config.
   return state_.lx != 0 || state_.ly != 0;
 }
 
