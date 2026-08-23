@@ -149,8 +149,6 @@ void LcdDisplay::buildRobotLines() {
   snprintf(desired_[0], 21, "HDG:%4d.%1d PS2:%-4s",
            compassTenths / 10, abs(compassTenths % 10), data_.ps2Status);
   snprintf(desired_[1], 21, "SPD:%3d L:%3d R:%3d", data_.speed, data_.left, data_.right);
-  // Dedicated encoder validation row. Use 32-bit integer formatting because
-  // it is reliably supported by the STM32duino nano printf implementation.
   if (!data_.encoderReady) {
     snprintf(desired_[2], 21, "ENC:%-16.16s",
              data_.encoderHealth != nullptr ? data_.encoderHealth : "NOT_READY");
@@ -218,15 +216,15 @@ void LcdDisplay::buildMapLines() {
 
   if (status.mode == 1U) {
     snprintf(desired_[2], 21, "TR MARK SQ UNDO");
-    snprintf(desired_[3], 21, "CIR SAVE SELH CAN");
+    snprintf(desired_[3], 21, "CIR SAVE X CANCEL");
   } else if (status.mode == 3U) {
     snprintf(desired_[2], 21, "CIR YES");
     snprintf(desired_[3], 21, "SELH CANCEL L3 EXIT");
   } else if (status.storeState == 0U) {
-    snprintf(desired_[2], 21, "TR TEACH");
+    snprintf(desired_[2], 21, "START TEACH");
     snprintf(desired_[3], 21, "SEL MAP L3 EXIT");
   } else if (status.storeState == 1U) {
-    snprintf(desired_[2], 21, "TR TEACH CIR LOAD");
+    snprintf(desired_[2], 21, "START TEACH CIR LOAD");
     snprintf(desired_[3], 21, "SEL MAP SQH DEL L3");
   } else {
     snprintf(desired_[2], 21, "CHECK ESP32/NVS");
@@ -270,7 +268,6 @@ void LcdDisplay::update() {
     lastRenderMs_ = now;
     buildDesiredLines();
   }
-  // At most one character per pass keeps each low-priority LCD slice bounded.
   if ((now - lastCharacterMs_) >= 5U) {
     lastCharacterMs_ = now;
     (void)sendOneDirtyCharacter();
