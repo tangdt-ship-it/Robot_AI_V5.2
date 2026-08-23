@@ -42,11 +42,11 @@ Raw channels remain available for diagnostics. Camera frame is normal; no camera
 
 ## Current development branch
 
-`feature/map-replay-v1-turn`
+`feature/map-replay-v1-final-segment`
 
 Current commissioned repository head:
 
-`578d751efca50924135565b4f757d7327ce1f776`
+`6bde3f5a034fa83d8350da6e6f71025f3f3e563e`
 
 This branch contains the commissioned MAP Teach/Smart Waypoint work, Replay Phase A, B1 straight-segment motion, B2 turn-only implementation, and the MAP UI V2 parser regression fix.
 
@@ -206,8 +206,23 @@ B2 design:
   protocol session; B2 renegotiates `HELLO -> PING -> MODE,AI` before `TURN` and
   restores `MODE,MANUAL` after the turn
 
-WP3 was not run. Do not run B3 or full replay until a separate commissioning
-decision is made.
+## Replay B3 — final segment
+
+Status: `COMMISSIONED / PASS`
+
+MAP2 physical commissioning result:
+
+- runtime geometry `WP2 -> WP3 = 179.5 mm`; target = `179 mm`
+- `B3_START_GATE = PASS / OK`
+- worker transport precheck attempt `1/3 = PASS / OK`
+- `MOVE,FWD,179,10`; no turn command was issued
+- travel = `180.9 mm`; reported error = `1.9 mm`
+- `MODE,MANUAL` restore = `PASS`
+- `B3_DONE`, `CONTINUE=NO`, `TURN=0`, `MOTOR=0`
+- robot stopped at WP3; LCD final state = `MAP2 COMPLETE / WP:03/03`
+
+B1, B2 and B3 are commissioned on the MAP2 route. Full Replay (combined
+translation/turn/translation orchestration) is **NOT YET COMMISSIONED**.
 
 ---
 
