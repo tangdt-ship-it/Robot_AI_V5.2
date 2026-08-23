@@ -7,6 +7,8 @@
 #include <cstdint>
 
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 class Display;
 class MissionManager;
@@ -28,7 +30,9 @@ public:
     void HandleMapEvent(const char* action, uint8_t slot);
 
 private:
-    // Numeric values are mirrored by the STM32 LCD MAP,UI parser.
+    // Numeric values are mirrored by the STM32 LCD MAP,UI parser. Phase B1
+    // keeps the wire UI in READY/TEACH/LOADED/DELETE only; REPLAY_READY is an
+    // internal/log state until the LCD protocol is extended in a later phase.
     enum class Mode : uint8_t {
         READY = 0,
         TEACHING = 1,
@@ -63,11 +67,15 @@ private:
     void RequestDelete();
     void ConfirmDelete();
 
-    // Replay V1 is commissioned in safety gates. Phase A below validates a
-    // loaded route and the control/UI path without sending any motor command.
+    // Replay V1 is commissioned in safety gates. Phase A validates without
+    // motion. Phase B1 then permits exactly the first saved segment, with no
+    // automatic turn and no continuation to the next waypoint.
     bool ArmReplay();
     void CancelReplay();
     bool RunReplayDryRun();
+    bool StartReplayFirstSegment();
+    static void ReplayTaskEntry(void* context);
+    void RunReplayFirstSegment();
 
     void SetSelectedSlot(uint8_t slot);
     void Notify(const char* message, int duration_ms = 2500) const;
@@ -99,6 +107,9 @@ private:
     uint8_t corner_stable_samples_ = 0;
 
     bool replay_plan_valid_ = false;
+    std::atomic_bool replay_motion_running_{false};
+    std::atomic_bool replay_cancel_requested_{false};
+    TaskHandle_t replay_task_ = nullptr;
 
     esp_timer_handle_t auto_timer_ = nullptr;
     std::atomic_bool auto_timer_enabled_{false};
