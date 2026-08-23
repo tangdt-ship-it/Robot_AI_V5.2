@@ -13,6 +13,8 @@ class TeachRoute {
 public:
     TeachRoute(RobotUart* robot_uart, MissionManager* mission_manager);
 
+    // Kept only for source compatibility with the existing board constructor.
+    // MAP V1 no longer renders on the ESP32 TFT; the argument is ignored.
     void SetDisplay(Display* display);
     bool Begin();
     bool StartInputTask();
@@ -55,7 +57,6 @@ private:
 
     RobotUart* robot_uart_ = nullptr;
     MissionManager* mission_manager_ = nullptr;
-    Display* display_ = nullptr;
     RouteStore store_;
     RouteSlot selected_slot_ = RouteSlot::MAP_1;
     Mode mode_ = Mode::READY;
