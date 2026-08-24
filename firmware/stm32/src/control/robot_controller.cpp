@@ -49,6 +49,7 @@ bool RobotController::setSpeedSetting(int16_t speed) {
 }
 
 void RobotController::setBrakeEnabled(bool enabled) {
+  obstacleLimited_ = false;
   if (brakeEnabled_ == enabled) {
     if (enabled) motors_.brake();
     return;
@@ -366,6 +367,7 @@ void RobotController::applyMotorCommand() {
 
 void RobotController::stopImmediately() {
   targetLeft_ = targetRight_ = currentLeft_ = currentRight_ = 0;
+  obstacleLimited_ = false;
   state_ = RobotState::STOP;
   straightCommand_ = false;
   reversing_ = false;
@@ -953,6 +955,7 @@ void RobotController::updateControl() {
     return;
   }
   {
+    obstacleLimited_ = false;
     if (obstacleBrakeActive_ && ultrasonic_.isFresh() &&
         ultrasonic_.distanceCm() >= obstacleReleaseDistanceCm_) {
       obstacleBrakeActive_ = false;
