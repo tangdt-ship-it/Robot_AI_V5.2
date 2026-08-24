@@ -158,6 +158,16 @@ void RobotLinkServer::reportTurnResult(uint8_t code, float headingDeg,
 
 void RobotLinkServer::reportDistanceResult(uint8_t code, float targetMm,
                                            float travelledMm) {
+  // stopImmediately() clears LIMITED before update() observes the stop.
+  // Emit its asynchronous event once, immediately before the terminal result.
+  if (code == 3U && motionLeaseActive_ && lastObstacleFresh_ &&
+      lastObstacleMotorsStopped_) {
+    serial_.print("<EVENT,OBSTACLE,STOPPED,ZONE,");
+    serial_.print(ObstacleZoneName(lastObstacleZone_));
+    serial_.print(",DIST,");
+    serial_.print(lastObstacleDistanceCm_, 1);
+    serial_.print(">\r\n");
+  }
   motionLeaseActive_ = false;
   if (code == 1U) {
     serial_.print("<DONE,MOVE,TARGET,");
@@ -819,6 +829,12 @@ bool RobotLinkServer::acceptSequence(uint16_t sequence) {
 }
 
 void RobotLinkServer::update(const RobotTelemetry& telemetry) {
+  lastObstacleZone_ = telemetry.obstacleZone;
+  lastObstacleDistanceCm_ = telemetry.obstacleDistanceCm;
+  lastObstacleFresh_ = telemetry.ultrasonicFresh;
+  lastObstacleMotorsStopped_ =
+      telemetry.leftCommand == 0 && telemetry.rightCommand == 0;
+
   RobotLink::Frame frame;
   uint8_t budget = 64U;
   while (budget-- > 0U && serial_.available() > 0) {

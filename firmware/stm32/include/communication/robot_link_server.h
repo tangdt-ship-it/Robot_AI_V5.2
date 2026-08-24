@@ -180,6 +180,10 @@ class RobotLinkServer {
   uint32_t compassResetGeneration_ = 0;
   uint32_t compassResetStartedMs_ = 0;
   uint32_t lastObstacleZoneSequence_ = 0;
+  float lastObstacleDistanceCm_ = 0.0f;
+  uint8_t lastObstacleZone_ = 0;
+  bool lastObstacleFresh_ = false;
+  bool lastObstacleMotorsStopped_ = false;
   bool obstacleEventInitialized_ = false;
   bool encoderFaultReported_ = false;
 };
