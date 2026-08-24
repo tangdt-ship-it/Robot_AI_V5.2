@@ -282,7 +282,8 @@ void RobotController::applyMotorCommand() {
       right = constrain(limitedForward - turn, -255, 255);
       if (limitedForward == 0 && abs(turn) < OBSTACLE_MIN_FORWARD_COMMAND) {
         const bool aiWasDriving = aiMotionMode_ == AiMotionMode::PULSE ||
-                                  aiMotionMode_ == AiMotionMode::CONTINUOUS;
+                                  aiMotionMode_ == AiMotionMode::CONTINUOUS ||
+                                  aiMotionMode_ == AiMotionMode::DISTANCE;
         if (aiWasDriving) {
           aiMotionMode_ = AiMotionMode::NONE;
           aiMotionDeadlineMs_ = 0;
