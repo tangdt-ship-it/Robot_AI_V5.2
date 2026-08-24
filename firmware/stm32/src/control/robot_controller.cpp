@@ -560,7 +560,9 @@ void RobotController::updateAiDistance(uint32_t nowMs) {
   }
   applyMotorCommand();
   if (aiMotionMode_ != AiMotionMode::DISTANCE) {
-    finishAiDistance(AiDistanceResultCode::OBSTACLE);
+    finishAiDistance(ultrasonic_.isFresh()
+                         ? AiDistanceResultCode::OBSTACLE
+                         : AiDistanceResultCode::TIMEOUT);
   }
 }
 
