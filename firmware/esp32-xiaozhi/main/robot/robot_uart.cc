@@ -695,9 +695,6 @@ void RobotUart::HandleFrame(const char* frame) {
         // its heartbeat until DONE,TURN or ERR,TURN.
         if (obstacle_stopped && !turn_waiting_) {
             motion_lease_active_ = false;
-            if (distance_waiting_) {
-                xEventGroupSetBits(response_events_, kResponseDistanceError);
-            }
         }
         const bool urgent = strcmp(obstacle_zone, "BLOCKED") == 0 ||
                             strcmp(obstacle_zone, "EMERGENCY") == 0;
