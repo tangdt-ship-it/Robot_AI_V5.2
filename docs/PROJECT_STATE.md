@@ -42,11 +42,11 @@ Raw channels remain available for diagnostics. Camera frame is normal; no camera
 
 ## Current development branch
 
-`feature/map-replay-v1-final-segment`
+`feature/map-replay-v1-full`
 
 Current commissioned repository head:
 
-`6bde3f5a034fa83d8350da6e6f71025f3f3e563e`
+`2a198855b3b17dd3667adae07d24206614abd3c7`
 
 This branch contains the commissioned MAP Teach/Smart Waypoint work, Replay Phase A, B1 straight-segment motion, B2 turn-only implementation, and the MAP UI V2 parser regression fix.
 
@@ -221,8 +221,32 @@ MAP2 physical commissioning result:
 - `B3_DONE`, `CONTINUE=NO`, `TURN=0`, `MOTOR=0`
 - robot stopped at WP3; LCD final state = `MAP2 COMPLETE / WP:03/03`
 
-B1, B2 and B3 are commissioned on the MAP2 route. Full Replay (combined
-translation/turn/translation orchestration) is **NOT YET COMMISSIONED**.
+B1, B2 and B3 are commissioned on the MAP2 route.
+
+## MAP Full Replay V1
+
+Status: `COMMISSIONED / PASS`
+
+MAP2 full replay physical commissioning result:
+
+- `FULL_START_GATE = PASS / OK`; `MISSION=0`, `AI_HOLD=0`, `PS2_OVERRIDE=0`,
+  `STATE_VALID=1`, `MOVING=0`, `BRAKE=0`, `OBS_VALID=1`, `OBS_FRESH=1`,
+  `OBS_ECHO=1`, `OBS_ZONE=CLEAR`
+- Segment 1 `WP1 -> WP2`: target `771 mm`, speed `10`, travel `771.0 mm`,
+  error `0.0 mm`
+- Segment 1 diagnostic samples showed `L/R=10/10`, `BRAKE=0`, `PS2CMD=0`,
+  `OBS=CLEAR`, `LIMITED=0`, encoder health `OK`, and changing encoder ticks
+- Turn at WP2: `TURN,REL,RIGHT,6,10`; delta `-5.7 deg`, target `-6.7 deg`,
+  final `-4.5 deg`, error `-2.2 deg`
+- Segment 2 `WP2 -> WP3`: target `179 mm`, travel `179.5 mm`, error `0.5 mm`
+- `FULL_REPLAY=COMPLETE`, total target `950 mm`, total travel `951 mm`,
+  `MOTOR=0`; manual mode restore = `PASS`
+- WP3 was the final waypoint; no further segment or turn was run
+- ESP32 reset = `NO`; STM32 reset = `NO`; robot stopped at completion
+
+Diagnostic telemetry checkpoint:
+
+`2a198855b3b17dd3667adae07d24206614abd3c7`
 
 ---
 
