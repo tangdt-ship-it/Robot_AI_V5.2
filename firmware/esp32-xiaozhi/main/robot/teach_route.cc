@@ -92,6 +92,7 @@ bool TeachRoute::Begin() {
              static_cast<unsigned>(kMaxWaypointsPerMap), kReplayB1Speed);
     ESP_LOGI(kTag,
              "ROUTE,REPLAY_B1_OBS_POLICY=VALID_FRESH_CLEAR,ECHO0_CLEAR_ALLOWED=1");
+    ESP_LOGI(kTag, "ROUTE,REPLAY_RESUME_PERSIST=NO");
     ESP_LOGI(kTag,
              "ROUTE,MAP_UI_PROTO=3,V2_COMPAT=1,REPLAY_OP=ON,REPLAY_MODES=0-8,LCD_REPLAY_STATUS=ON");
 
