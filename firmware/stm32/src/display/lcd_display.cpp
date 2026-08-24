@@ -262,9 +262,16 @@ void LcdDisplay::buildMapLines() {
              static_cast<unsigned long>(status.replayTargetMm),
              static_cast<unsigned long>(status.replayTravelMm),
              static_cast<unsigned long>(status.replayErrorMm));
-    snprintf(desired_[2], 21, status.replayOperation == 2U
-             ? "TURN STOP" : "MOVE STOP");
-    snprintf(desired_[3], 21, "X CANCEL L3 EXIT");
+    if (status.replayOperation == 3U) {
+      snprintf(desired_[1], 21, "OBS REM:%lumm",
+               static_cast<unsigned long>(status.replayErrorMm));
+      snprintf(desired_[2], 21, "START RESUME");
+      snprintf(desired_[3], 21, "X CANCEL L3 EXIT");
+    } else {
+      snprintf(desired_[2], 21, status.replayOperation == 2U
+               ? "TURN STOP" : "MOVE STOP");
+      snprintf(desired_[3], 21, "X CANCEL L3 EXIT");
+    }
     return;
   }
   if (status.mode == 8U) {

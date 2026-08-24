@@ -71,6 +71,15 @@ struct RobotTurnResult {
 };
 
 struct RobotDistanceResult {
+    enum class Code : uint8_t {
+        NONE,
+        DONE,
+        TIMEOUT,
+        OBSTACLE,
+        ENCODER_FAULT,
+        LINK_ERROR,
+    };
+    Code code = Code::NONE;
     bool completed = false;
     float target_mm = 0.0f;
     float travelled_mm = 0.0f;

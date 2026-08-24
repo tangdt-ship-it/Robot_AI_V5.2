@@ -517,7 +517,7 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
       }
     }
     if (slot < 1U || slot > 2U || storeState > 3U || mode > 8U ||
-        replayOperation > 2U ||
+        replayOperation > 3U ||
         maxPoints == 0U || maxPoints > 128U || points > maxPoints ||
         (replayTotal > 0U && (replayTotal > maxPoints || replayWp > replayTotal))) {
       serial_.print("<ERR,MAP_UI>\r\n");

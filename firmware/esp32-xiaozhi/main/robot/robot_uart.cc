@@ -252,15 +252,21 @@ bool RobotUart::StartContinuousRotation(bool left, int speed,
 bool RobotUart::MoveDistance(bool forward, int distance_mm, int speed,
                              RobotDistanceResult& result,
                              uint32_t timeout_ms) {
+    result = {};
     distance_mm = std::max(1, std::min(distance_mm, 5000));
     char command[56];
     snprintf(command, sizeof(command), "MOVE,%s,%d,%d",
              forward ? "FWD" : "BACK", distance_mm, ClampSpeed(speed));
     xEventGroupClearBits(response_events_,
                          kResponseDistanceDone | kResponseDistanceError);
+    if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
+        distance_result_ = {};
+        xSemaphoreGive(state_mutex_);
+    }
     distance_waiting_ = true;
     const bool started = SendAndWait(command, kResponseAck, 700);
     if (!started) {
+        result.code = RobotDistanceResult::Code::LINK_ERROR;
         distance_waiting_ = false;
         return false;
     }
@@ -275,6 +281,18 @@ bool RobotUart::MoveDistance(bool forward, int distance_mm, int speed,
         // STM32 has already handed motor ownership to PS2; don't race the
         // operator with a follow-up STOP.
         if (!Ps2OverrideActive()) Stop(700);
+        if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
+            result = distance_result_;
+            xSemaphoreGive(state_mutex_);
+        }
+        if (result.target_mm <= 0.0f) {
+            result.target_mm = static_cast<float>(distance_mm);
+        }
+        if (result.code == RobotDistanceResult::Code::NONE) {
+            result.code = (bits & kResponseDistanceError) != 0
+                ? RobotDistanceResult::Code::LINK_ERROR
+                : RobotDistanceResult::Code::TIMEOUT;
+        }
         return false;
     }
     if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
@@ -596,6 +614,7 @@ void RobotUart::HandleFrame(const char* frame) {
                &distance_travelled) == 2) {
         if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
             distance_result_.completed = true;
+            distance_result_.code = RobotDistanceResult::Code::DONE;
             distance_result_.target_mm = distance_target;
             distance_result_.travelled_mm = distance_travelled;
             xSemaphoreGive(state_mutex_);
@@ -604,9 +623,19 @@ void RobotUart::HandleFrame(const char* frame) {
         xEventGroupSetBits(response_events_, kResponseDistanceDone);
         return;
     }
-    if (sscanf(frame, "ERR,MOVE,%*[^,],TRAVEL,%f", &distance_travelled) == 1) {
+    char distance_error[24] = {};
+    if (sscanf(frame, "ERR,MOVE,%23[^,],TRAVEL,%f", distance_error,
+               &distance_travelled) == 2) {
         if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
             distance_result_.completed = false;
+            distance_result_.code =
+                strcmp(distance_error, "OBSTACLE") == 0
+                    ? RobotDistanceResult::Code::OBSTACLE
+                    : strcmp(distance_error, "ENCODER_FAULT") == 0
+                          ? RobotDistanceResult::Code::ENCODER_FAULT
+                          : strcmp(distance_error, "TIMEOUT") == 0
+                                ? RobotDistanceResult::Code::TIMEOUT
+                                : RobotDistanceResult::Code::LINK_ERROR;
             distance_result_.travelled_mm = distance_travelled;
             xSemaphoreGive(state_mutex_);
         }
@@ -615,6 +644,18 @@ void RobotUart::HandleFrame(const char* frame) {
         return;
     }
     if (strncmp(frame, "ERR,MOVE,", 9) == 0) {
+        if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
+            distance_result_.completed = false;
+            distance_result_.code =
+                strstr(frame, "ENCODER_FAULT") != nullptr
+                    ? RobotDistanceResult::Code::ENCODER_FAULT
+                    : strstr(frame, "TIMEOUT") != nullptr
+                          ? RobotDistanceResult::Code::TIMEOUT
+                          : strstr(frame, "OBSTACLE") != nullptr
+                                ? RobotDistanceResult::Code::OBSTACLE
+                                : RobotDistanceResult::Code::LINK_ERROR;
+            xSemaphoreGive(state_mutex_);
+        }
         motion_lease_active_ = false;
         xEventGroupSetBits(response_events_, kResponseDistanceError);
         return;

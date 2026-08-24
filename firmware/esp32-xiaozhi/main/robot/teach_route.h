@@ -82,6 +82,7 @@ private:
     bool StartReplayTurnAtWp2();
     bool StartReplayFinalSegment();
     bool StartFullReplay();
+    bool AttemptResumeFullReplay();
     static void ReplayTaskEntry(void* context);
     static void ReplayTurnTaskEntry(void* context);
     static void ReplayFinalTaskEntry(void* context);
@@ -90,6 +91,7 @@ private:
     void RunReplayTurnAtWp2();
     void RunReplayFinalSegment();
     void RunFullReplay();
+    void ClearResumeContext();
     bool CheckReplaySafety(const char* stage, RobotState& state,
                            RobotObstacleStatus& obstacle,
                            const char*& reason) const;
@@ -135,7 +137,18 @@ private:
     float replay_bearing12_deg_ = 0.0f;
     float replay_bearing23_deg_ = 0.0f;
     float replay_turn_delta_deg_ = 0.0f;
-    uint8_t replay_operation_ = 0;  // 0 NONE, 1 MOVE, 2 TURN.
+    uint8_t replay_operation_ = 0;  // 0 NONE, 1 MOVE, 2 TURN, 3 HOLD.
+
+    // Volatile obstacle-interrupted MOVE context. Never persisted to NVS.
+    bool resume_valid_ = false;
+    uint16_t resume_wp_index_ = 0;
+    uint32_t resume_original_target_mm_ = 0;
+    uint32_t resume_completed_mm_ = 0;
+    uint32_t resume_remaining_mm_ = 0;
+    uint8_t resume_count_ = 0;
+    float resume_hold_x_mm_ = 0.0f;
+    float resume_hold_y_mm_ = 0.0f;
+    float resume_hold_heading_rad_ = 0.0f;
 
     esp_timer_handle_t auto_timer_ = nullptr;
     std::atomic_bool auto_timer_enabled_{false};

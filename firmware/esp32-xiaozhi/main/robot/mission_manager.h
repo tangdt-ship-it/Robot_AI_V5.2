@@ -164,6 +164,9 @@ public:
     // Read-only integration gate for Teach Route. It does not release the
     // commissioned AI obstacle hold and cannot cause motion.
     bool IsAiObstacleHoldActive() const;
+    // Replay resume may release only the latched AI obstacle hold, and only
+    // while no mission owns the robot. It never starts motion.
+    bool ReleaseAiObstacleHoldForReplay();
     std::string StatusJson() const;
     std::string HomeJson() const;
     std::string MapJson() const;

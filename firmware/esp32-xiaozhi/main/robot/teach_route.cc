@@ -200,6 +200,8 @@ void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
             RunReplayDryRun();
         } else if (mode_ == Mode::REPLAY_CHECKED) {
             StartFullReplay();
+        } else if (mode_ == Mode::REPLAY_HOLD && resume_valid_) {
+            AttemptResumeFullReplay();
         }
         return;
     }
@@ -711,6 +713,7 @@ bool TeachRoute::ArmReplay() {
         return false;
     }
 
+    ClearResumeContext();
     replay_plan_valid_ = false;
     replay_wp_index_ = 1U;
     replay_wp_total_ = loaded_route_.header.waypoint_count;
@@ -736,7 +739,9 @@ void TeachRoute::CancelReplay() {
         }
         return;
     }
-    if (mode_ != Mode::REPLAY_READY && !replay_plan_valid_) return;
+    if (mode_ != Mode::REPLAY_READY && mode_ != Mode::REPLAY_HOLD &&
+        !replay_plan_valid_) return;
+    ClearResumeContext();
     replay_plan_valid_ = false;
     odometry_valid_ = false;
     replay_wp_index_ = replay_wp_total_ = 0U;
@@ -1116,6 +1121,7 @@ bool TeachRoute::StartFullReplay() {
         UpdateMapStatus();
         return false;
     }
+    ClearResumeContext();
     replay_cancel_requested_.store(false);
     replay_motion_running_.store(true);
     replay_plan_valid_ = false;
@@ -1142,6 +1148,32 @@ bool TeachRoute::StartFullReplay() {
         UpdateMapStatus();
         return false;
     }
+    return true;
+}
+
+bool TeachRoute::AttemptResumeFullReplay() {
+    if (mode_ != Mode::REPLAY_HOLD || !resume_valid_ ||
+        replay_motion_running_.load() || robot_uart_ == nullptr ||
+        mission_manager_ == nullptr) {
+        return false;
+    }
+    ESP_LOGI(kTag,
+             "ROUTE,FULL_REPLAY=RESUME_REQUEST,WP=%u/%u,REMAIN_MM=%lu",
+             static_cast<unsigned>(resume_wp_index_),
+             static_cast<unsigned>(replay_wp_total_),
+             static_cast<unsigned long>(resume_remaining_mm_));
+    replay_cancel_requested_.store(false);
+    replay_motion_running_.store(true);
+    if (xTaskCreatePinnedToCore(FullReplayTaskEntry, "map_replay_resume",
+                                6144, this, 3, &replay_task_, 1) != pdPASS) {
+        replay_task_ = nullptr;
+        replay_motion_running_.store(false);
+        ESP_LOGW(kTag,
+                 "ROUTE,FULL_REPLAY=RESUME_STOP,REASON=TASK_CREATE,MOTOR=0");
+        UpdateMapStatus();
+        return false;
+    }
+    UpdateMapStatus();
     return true;
 }
 
@@ -1251,6 +1283,18 @@ void TeachRoute::RunReplayTurnAtWp2() {
              result.error_deg);
     Notify("B2 TURN DONE: STOPPED", 3500);
     UpdateMapStatus();
+}
+
+void TeachRoute::ClearResumeContext() {
+    resume_valid_ = false;
+    resume_wp_index_ = 0U;
+    resume_original_target_mm_ = 0U;
+    resume_completed_mm_ = 0U;
+    resume_remaining_mm_ = 0U;
+    resume_count_ = 0U;
+    resume_hold_x_mm_ = 0.0f;
+    resume_hold_y_mm_ = 0.0f;
+    resume_hold_heading_rad_ = 0.0f;
 }
 
 void TeachRoute::RunReplayFinalSegment() {
@@ -1408,7 +1452,169 @@ void TeachRoute::RunFullReplay() {
         return ai_mode;
     };
 
-    for (uint16_t index = 1U; index < count; ++index) {
+    auto hold_obstacle = [&](uint16_t index, uint32_t target_mm,
+                             const RobotDistanceResult& result,
+                             uint32_t prior_target, uint32_t prior_travel) {
+        if (resume_count_ >= 3U) {
+            replay_operation_ = 0U;
+            replay_motion_running_.store(false);
+            mode_ = Mode::REPLAY_HOLD;
+            ESP_LOGW(kTag,
+                     "ROUTE,FULL_REPLAY=HOLD,WP=%u/%u,REASON=RESUME_LIMIT,CONTINUE=NO,MOTOR=0",
+                     static_cast<unsigned>(index + 1U),
+                     static_cast<unsigned>(count));
+            UpdateMapStatus();
+            return;
+        }
+        RobotOdometry hold_pose;
+        if (!robot_uart_->GetOdometry(hold_pose, 700) || !hold_pose.valid) {
+            stop_hold("ODOMETRY");
+            return;
+        }
+        const uint32_t completed = static_cast<uint32_t>(std::max(
+            0.0f, std::min(static_cast<float>(target_mm), result.travelled_mm)));
+        const uint32_t remaining = target_mm > completed ? target_mm - completed : 0U;
+        resume_valid_ = remaining > 0U;
+        resume_wp_index_ = static_cast<uint16_t>(index + 1U);
+        resume_original_target_mm_ = target_mm;
+        resume_completed_mm_ = completed;
+        resume_remaining_mm_ = remaining;
+        resume_count_++;
+        resume_hold_x_mm_ = hold_pose.x_mm;
+        resume_hold_y_mm_ = hold_pose.y_mm;
+        resume_hold_heading_rad_ = hold_pose.heading_rad;
+        replay_wp_index_ = resume_wp_index_;
+        replay_wp_total_ = count;
+        replay_operation_ = 3U;
+        replay_target_mm_ = target_mm;
+        replay_travel_mm_ = completed;
+        replay_error_mm_ = remaining;
+        if (ai_mode && !robot_uart_->Ps2OverrideActive()) {
+            (void)robot_uart_->SetMode(false, 700);
+            ai_mode = false;
+        }
+        replay_motion_running_.store(false);
+        mode_ = Mode::REPLAY_HOLD;
+        ESP_LOGW(kTag,
+                 "ROUTE,FULL_REPLAY=HOLD,WP=%u/%u,OP=MOVE,REASON=OBSTACLE,TARGET_MM=%lu,TRAVEL_MM=%lu,REMAIN_MM=%lu,RESUMABLE=%u,HOLD_X_MM=%.1f,HOLD_Y_MM=%.1f,HOLD_H_RAD=%.3f,PRIOR_TARGET_MM=%lu,PRIOR_TRAVEL_MM=%lu,MOTOR=0",
+                 static_cast<unsigned>(resume_wp_index_),
+                 static_cast<unsigned>(count),
+                 static_cast<unsigned long>(target_mm),
+                 static_cast<unsigned long>(completed),
+                 static_cast<unsigned long>(remaining), resume_valid_ ? 1U : 0U,
+                 hold_pose.x_mm, hold_pose.y_mm, hold_pose.heading_rad,
+                 static_cast<unsigned long>(prior_target),
+                 static_cast<unsigned long>(prior_travel));
+        Notify(resume_valid_ ? "MAP HOLD: START RESUME" : "MAP HOLD: REPLAY STOPPED", 4000);
+        UpdateMapStatus();
+    };
+
+    uint16_t first_index = 1U;
+    if (resume_valid_) {
+        const uint16_t resume_index = resume_wp_index_;
+        const uint32_t original_target = resume_original_target_mm_;
+        const uint32_t completed_before = resume_completed_mm_;
+        const uint32_t remaining = resume_remaining_mm_;
+        RobotState resume_state;
+        RobotObstacleStatus resume_obstacle;
+        bool clear_samples = true;
+        ESP_LOGI(kTag,
+                 "ROUTE,FULL_REPLAY=RESUME_REQUEST,WP=%u/%u,REMAIN_MM=%lu",
+                 static_cast<unsigned>(resume_index),
+                 static_cast<unsigned>(count),
+                 static_cast<unsigned long>(remaining));
+        if (!robot_uart_->GetState(resume_state, kReplaySafetyRxTimeoutMs) ||
+            !resume_state.valid || resume_state.moving ||
+            resume_state.left != 0 || resume_state.right != 0 ||
+            resume_state.brake_enabled || robot_uart_->Ps2OverrideActive() ||
+            mission_manager_->IsActive()) {
+            stop_hold("RESUME_STATE");
+            return;
+        }
+        for (unsigned int sample = 1U; sample <= 3U; ++sample) {
+            if (!robot_uart_->GetObstacle(resume_obstacle,
+                                          kReplaySafetyRxTimeoutMs) ||
+                !resume_obstacle.valid || !resume_obstacle.fresh ||
+                strcmp(resume_obstacle.zone, "CLEAR") != 0) {
+                clear_samples = false;
+                ESP_LOGW(kTag,
+                         "ROUTE,RESUME_CLEAR,SAMPLE=%u/3,ZONE=%s,PASS=0",
+                         sample, resume_obstacle.zone[0] != '\0'
+                                    ? resume_obstacle.zone : "UNKNOWN");
+                break;
+            }
+            ESP_LOGI(kTag, "ROUTE,RESUME_CLEAR,SAMPLE=%u/3,ZONE=CLEAR",
+                     sample);
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (!clear_samples) {
+            stop_hold("RESUME_OBSTACLE");
+            return;
+        }
+        RobotOdometry current_pose;
+        if (!robot_uart_->GetOdometry(current_pose, 700) || !current_pose.valid) {
+            stop_hold("POSE_CHANGED");
+            return;
+        }
+        const float drift_mm = hypotf(current_pose.x_mm - resume_hold_x_mm_,
+                                      current_pose.y_mm - resume_hold_y_mm_);
+        const float drift_deg = fabsf(NormalizeTurnDelta(
+            (current_pose.heading_rad - resume_hold_heading_rad_) * 57.2957795f));
+        ESP_LOGI(kTag, "ROUTE,RESUME_POSE,DRIFT_MM=%.1f,DRIFT_DEG=%.1f,PASS=%u",
+                 drift_mm, drift_deg, (drift_mm <= 30.0f && drift_deg <= 5.0f) ? 1U : 0U);
+        if (drift_mm > 30.0f || drift_deg > 5.0f) {
+            stop_hold("POSE_CHANGED");
+            return;
+        }
+        if (!mission_manager_->ReleaseAiObstacleHoldForReplay()) {
+            stop_hold("MISSION_ACTIVE");
+            return;
+        }
+        RobotState gate_state;
+        RobotObstacleStatus gate_obstacle;
+        const char* gate_reason = "OK";
+        if (!CheckReplaySafety("FULL_RESUME_GATE", gate_state, gate_obstacle,
+                               gate_reason)) {
+            stop_hold(gate_reason);
+            return;
+        }
+        if (!ensure_ai_mode()) {
+            stop_hold("AI_MODE_SESSION");
+            return;
+        }
+        replay_operation_ = 1U;
+        mode_ = Mode::REPLAY_RUNNING;
+        RobotDistanceResult resume_result;
+        const bool resumed = robot_uart_->MoveDistance(
+            true, static_cast<int>(remaining), kReplayB1Speed, resume_result,
+            kReplayB1TimeoutMs);
+        if (resume_result.code == RobotDistanceResult::Code::OBSTACLE) {
+            hold_obstacle(static_cast<uint16_t>(resume_index - 1U),
+                          original_target, resume_result, original_target,
+                          completed_before);
+            return;
+        }
+        if (!resumed || !resume_result.completed) {
+            stop_hold(resume_result.code == RobotDistanceResult::Code::ENCODER_FAULT
+                          ? "ENCODER_FAULT"
+                          : resume_result.code == RobotDistanceResult::Code::TIMEOUT
+                                ? "TIMEOUT" : "MOVE_FAIL");
+            return;
+        }
+        total_target += original_target;
+        total_travel += completed_before +
+                        static_cast<uint32_t>(lroundf(resume_result.travelled_mm));
+        ESP_LOGI(kTag,
+                 "ROUTE,FULL_REPLAY=RESUME_MOVE_DONE,WP=%u/%u,RUN_MM=%.1f,SEG_TOTAL_MM=%lu",
+                 static_cast<unsigned>(resume_index), static_cast<unsigned>(count),
+                 resume_result.travelled_mm,
+                 static_cast<unsigned long>(completed_before +
+                     static_cast<uint32_t>(lroundf(resume_result.travelled_mm))));
+        ClearResumeContext();
+        first_index = resume_index;
+    }
+
+    for (uint16_t index = first_index; index < count; ++index) {
         if (replay_cancel_requested_.load()) {
             stop_hold("X_CANCEL");
             return;
@@ -1547,7 +1753,16 @@ void TeachRoute::RunFullReplay() {
             return;
         }
         if (!moved || !move_result.completed) {
-            stop_hold("MOVE_FAIL");
+            if (move_result.code == RobotDistanceResult::Code::OBSTACLE) {
+                hold_obstacle(index, replay_target_mm_, move_result,
+                              total_target, total_travel);
+            } else if (move_result.code == RobotDistanceResult::Code::ENCODER_FAULT) {
+                stop_hold("ENCODER_FAULT");
+            } else if (move_result.code == RobotDistanceResult::Code::TIMEOUT) {
+                stop_hold("TIMEOUT");
+            } else {
+                stop_hold("MOVE_FAIL");
+            }
             return;
         }
         replay_travel_mm_ = static_cast<uint32_t>(lroundf(move_result.travelled_mm));

@@ -45,7 +45,7 @@ struct LcdMapStatus {
   uint32_t replayTargetMm = 0;
   uint32_t replayTravelMm = 0;
   uint32_t replayErrorMm = 0;
-  uint8_t replayOperation = 0;  // 0 NONE, 1 MOVE, 2 TURN.
+  uint8_t replayOperation = 0;  // 0 NONE, 1 MOVE, 2 TURN, 3 RESUMABLE HOLD.
 };
 
 class LcdDisplay {

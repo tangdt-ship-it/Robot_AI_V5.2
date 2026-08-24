@@ -1056,6 +1056,16 @@ bool MissionManager::IsAiObstacleHoldActive() const {
     return ai_obstacle_hold_.load();
 }
 
+bool MissionManager::ReleaseAiObstacleHoldForReplay() {
+    if (IsActive()) return false;
+    if (!ai_obstacle_hold_.exchange(false)) return true;
+    ai_obstacle_hold_event_id_.store(0);
+    cancel_requested_.store(false);
+    ESP_LOGI("AI_OBS", "HOLD_CLEAR=MAP_REPLAY_RESUME");
+    ESP_LOGI("AI_OBS", "HOLD=0");
+    return true;
+}
+
 bool MissionManager::CancelRequested() {
     if (cancel_requested_.load()) return true;
     if (robot_uart_ != nullptr && robot_uart_->Ps2OverrideActive()) {
