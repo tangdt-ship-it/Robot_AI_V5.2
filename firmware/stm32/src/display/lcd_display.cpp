@@ -275,6 +275,14 @@ void LcdDisplay::buildMapLines() {
     return;
   }
   if (status.mode == 8U) {
+    if (status.replayOperation == 3U) {
+      snprintf(desired_[0], 21, "MAP%u TEST DONE", mapSlot_);
+      snprintf(desired_[1], 21, "D:%lumm STOPPED",
+               static_cast<unsigned long>(status.replayTargetMm));
+      snprintf(desired_[2], 21, "SHORT RANGE TEST");
+      snprintf(desired_[3], 21, "NO TURN / NEXT WP");
+      return;
+    }
     snprintf(desired_[0], 21, "MAP%u COMPLETE", mapSlot_);
     snprintf(desired_[1], 21, "WP:%02u/%02u ERR:%lumm",
              static_cast<unsigned>(status.replayWp),
