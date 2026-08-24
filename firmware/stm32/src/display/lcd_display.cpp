@@ -134,7 +134,8 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
                               uint32_t lengthMm, uint16_t replayWp,
                               uint16_t replayTotal, uint32_t replayTargetMm,
                               uint32_t replayTravelMm,
-                              uint32_t replayErrorMm) {
+                              uint32_t replayErrorMm,
+                              uint8_t replayOperation) {
   const uint8_t normalized = slot == 2U ? 2U : 1U;
   LcdMapStatus& status = mapStatus_[normalized - 1U];
   status.valid = true;
@@ -148,6 +149,7 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
   status.replayTargetMm = replayTargetMm;
   status.replayTravelMm = replayTravelMm;
   status.replayErrorMm = replayErrorMm;
+  status.replayOperation = replayOperation;
   if (mapSlot_ == normalized) forceRefresh();
 }
 
@@ -220,12 +222,25 @@ void LcdDisplay::buildMapLines() {
     return;
   }
   if (status.mode == 6U) {
-    if (status.replayWp == 3U) {
-      snprintf(desired_[0], 21, "MAP%u FINAL WP:03/03", mapSlot_);
+    if (status.replayOperation == 1U) {
+      snprintf(desired_[0], 21, "MAP%u RUN WP:%02u/%02u", mapSlot_,
+               static_cast<unsigned>(status.replayWp),
+               static_cast<unsigned>(status.replayTotal));
       snprintf(desired_[1], 21, "T:%lumm V:%lumm",
                static_cast<unsigned long>(status.replayTargetMm),
                static_cast<unsigned long>(status.replayTravelMm));
       snprintf(desired_[2], 21, "STRAIGHT FINAL");
+      snprintf(desired_[3], 21, "X STOP R3 BRAKE");
+      return;
+    }
+    if (status.replayOperation == 2U) {
+      snprintf(desired_[0], 21, "MAP%u TURN WP:%02u/%02u", mapSlot_,
+               static_cast<unsigned>(status.replayWp),
+               static_cast<unsigned>(status.replayTotal));
+      snprintf(desired_[1], 21, "A:%lddeg E:%lddeg",
+               static_cast<long>(status.replayTargetMm),
+               static_cast<long>(status.replayErrorMm));
+      snprintf(desired_[2], 21, "CLOSED LOOP");
       snprintf(desired_[3], 21, "X STOP R3 BRAKE");
       return;
     }
@@ -247,26 +262,19 @@ void LcdDisplay::buildMapLines() {
              static_cast<unsigned long>(status.replayTargetMm),
              static_cast<unsigned long>(status.replayTravelMm),
              static_cast<unsigned long>(status.replayErrorMm));
-    snprintf(desired_[2], 21, "SAFETY STOPPED");
+    snprintf(desired_[2], 21, status.replayOperation == 2U
+             ? "TURN STOP" : "MOVE STOP");
     snprintf(desired_[3], 21, "X CANCEL L3 EXIT");
     return;
   }
   if (status.mode == 8U) {
-    if (status.replayWp == 3U) {
-      snprintf(desired_[0], 21, "MAP%u COMPLETE", mapSlot_);
-      snprintf(desired_[1], 21, "WP:03/03 ERR:%lumm",
-               static_cast<unsigned long>(status.replayErrorMm));
-      snprintf(desired_[2], 21, "ROUTE FINISHED");
-      snprintf(desired_[3], 21, "STOPPED");
-      return;
-    }
-    snprintf(desired_[0], 21, "MAP%u TURN DONE", mapSlot_);
-    snprintf(desired_[1], 21, "WP:%02u/%02u E:%lumm",
+    snprintf(desired_[0], 21, "MAP%u COMPLETE", mapSlot_);
+    snprintf(desired_[1], 21, "WP:%02u/%02u ERR:%lumm",
              static_cast<unsigned>(status.replayWp),
              static_cast<unsigned>(status.replayTotal),
              static_cast<unsigned long>(status.replayErrorMm));
-    snprintf(desired_[2], 21, "STOPPED NO CONTINUE");
-    snprintf(desired_[3], 21, "X EXIT");
+    snprintf(desired_[2], 21, "ROUTE FINISHED");
+    snprintf(desired_[3], 21, "STOPPED");
     return;
   }
 

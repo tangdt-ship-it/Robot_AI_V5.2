@@ -487,16 +487,26 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     unsigned long replayTargetMm = 0;
     unsigned long replayTravelMm = 0;
     unsigned long replayErrorMm = 0;
+    unsigned int replayOperation = 0;
     char trailing = '\0';
     const int fields = sscanf(
-        frame, "MAP,UI,%u,%u,%u,%u,%u,%lu,%u,%u,%lu,%lu,%lu%c", &slot,
+        frame, "MAP,UI,%u,%u,%u,%u,%u,%lu,%u,%u,%lu,%lu,%lu,%u%c", &slot,
         &storeState, &mode, &points, &maxPoints, &lengthMm, &replayWp,
         &replayTotal, &replayTargetMm, &replayTravelMm, &replayErrorMm,
-        &trailing);
-    const bool v2 = fields == 11;
-    if (!v2) {
+        &replayOperation, &trailing);
+    const bool v3 = fields == 12;
+    if (!v3) {
       replayWp = replayTotal = 0;
       replayTargetMm = replayTravelMm = replayErrorMm = 0;
+      replayOperation = 0;
+      const int v2Fields = sscanf(
+          frame, "MAP,UI,%u,%u,%u,%u,%u,%lu,%u,%u,%lu,%lu,%lu%c", &slot,
+          &storeState, &mode, &points, &maxPoints, &lengthMm, &replayWp,
+          &replayTotal, &replayTargetMm, &replayTravelMm, &replayErrorMm,
+          &trailing);
+      if (v2Fields == 11) {
+        // V2 has no operation field; preserve compatibility.
+      } else {
       const int v1Fields = sscanf(frame, "MAP,UI,%u,%u,%u,%u,%u,%lu%c",
                                   &slot, &storeState, &mode, &points,
                                   &maxPoints, &lengthMm, &trailing);
@@ -504,8 +514,10 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
         serial_.print("<ERR,MAP_UI>\r\n");
         return;
       }
+      }
     }
     if (slot < 1U || slot > 2U || storeState > 3U || mode > 8U ||
+        replayOperation > 2U ||
         maxPoints == 0U || maxPoints > 128U || points > maxPoints ||
         (replayTotal > 0U && (replayTotal > maxPoints || replayWp > replayTotal))) {
       serial_.print("<ERR,MAP_UI>\r\n");
@@ -521,7 +533,8 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
                          static_cast<uint16_t>(replayTotal),
                          static_cast<uint32_t>(replayTargetMm),
                          static_cast<uint32_t>(replayTravelMm),
-                         static_cast<uint32_t>(replayErrorMm));
+                         static_cast<uint32_t>(replayErrorMm),
+                         static_cast<uint8_t>(replayOperation));
     return;
   }
 

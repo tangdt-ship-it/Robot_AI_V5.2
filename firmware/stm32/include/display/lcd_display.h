@@ -45,6 +45,7 @@ struct LcdMapStatus {
   uint32_t replayTargetMm = 0;
   uint32_t replayTravelMm = 0;
   uint32_t replayErrorMm = 0;
+  uint8_t replayOperation = 0;  // 0 NONE, 1 MOVE, 2 TURN.
 };
 
 class LcdDisplay {
@@ -75,7 +76,8 @@ class LcdDisplay {
                     uint32_t lengthMm, uint16_t replayWp = 0,
                     uint16_t replayTotal = 0, uint32_t replayTargetMm = 0,
                     uint32_t replayTravelMm = 0,
-                    uint32_t replayErrorMm = 0);
+                    uint32_t replayErrorMm = 0,
+                    uint8_t replayOperation = 0);
 
  private:
   class SoftI2C {
