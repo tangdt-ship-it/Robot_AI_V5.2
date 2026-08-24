@@ -936,6 +936,30 @@ void RobotLinkServer::update(const RobotTelemetry& telemetry) {
     serial_.print(telemetry.aiDistanceTargetMm, 1);
     serial_.print(",TRAVEL,");
     serial_.print(telemetry.aiDistanceTravelledMm, 1);
+    serial_.print(",L,");
+    serial_.print(telemetry.leftCommand);
+    serial_.print(",R,");
+    serial_.print(telemetry.rightCommand);
+    serial_.print(",LT,");
+    serial_.print(static_cast<long>(telemetry.leftEncoderTicks));
+    serial_.print(",RT,");
+    serial_.print(static_cast<long>(telemetry.rightEncoderTicks));
+    serial_.print(",LV,");
+    serial_.print(telemetry.leftVelocityMmS, 1);
+    serial_.print(",RV,");
+    serial_.print(telemetry.rightVelocityMmS, 1);
+    serial_.print(",ENC,");
+    serial_.print(EncoderHealthName(telemetry.encoderHealth));
+    serial_.print(",BRAKE,");
+    serial_.print(telemetry.brakeEnabled ? 1 : 0);
+    serial_.print(",RAMP,");
+    serial_.print(telemetry.rampEnabled ? 1 : 0);
+    serial_.print(",PS2CMD,");
+    serial_.print(telemetry.ps2CommandActive ? 1 : 0);
+    serial_.print(",OBS,");
+    serial_.print(ObstacleZoneName(telemetry.obstacleZone));
+    serial_.print(",LIMITED,");
+    serial_.print(telemetry.obstacleLimited ? 1 : 0);
     serial_.print(">\r\n");
   }
   if (connected() != linkReported_) {
