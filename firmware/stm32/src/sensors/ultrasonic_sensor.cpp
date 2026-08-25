@@ -41,21 +41,32 @@ void UltrasonicSensor::updateChannelZone(uint8_t i,float d){
   if(d>=release&&++c.fartherConfirmations>=3){c.zone=n;c.fartherConfirmations=0;++zoneSequence_;}
 }
 void UltrasonicSensor::acceptPulse(uint8_t i,uint32_t pulse,uint32_t now){
-  Channel& c=channels_[i]; const float d=pulse*0.01715f;if(d<ULTRASONIC_MIN_CM||d>ULTRASONIC_MAX_CM){acceptTimeout(i,now);return;}
-  c.echoValid=true;c.lastMeasurementMs=now;++c.measurementSequence;c.rawDistanceCm=d;c.history[c.historyIndex]=d;c.historyIndex=(c.historyIndex+1)%5;if(c.historyCount<5)c.historyCount++;
+  Channel& c=channels_[i]; const float d=pulse*0.01715f;if(d<ULTRASONIC_MIN_CM||d>ULTRASONIC_MAX_CM){
+    c.echoValid=false; ++c.invalidCount; c.health=SensorHealth::INVALID;
+    acceptTimeout(i,now); c.health=SensorHealth::INVALID; return;
+  }
+  c.echoValid=true;c.health=SensorHealth::HEALTHY;c.lastValidEchoMs=now;
+  c.consecutiveTimeouts=0;c.lastMeasurementMs=now;++c.measurementSequence;c.rawDistanceCm=d;c.history[c.historyIndex]=d;c.historyIndex=(c.historyIndex+1)%5;if(c.historyCount<5)c.historyCount++;
   const float med=medianHistory(c);if(!c.filterReady){c.filteredDistanceCm=d;c.filterReady=true;}else{const float target=d<c.filteredDistanceCm?d:med;const float alpha=target<c.filteredDistanceCm?0.72f:0.24f;c.filteredDistanceCm+=alpha*(target-c.filteredDistanceCm);}
   static uint32_t prevMs[2]={};static float prevD[2]={};if(prevMs[i]&&now>prevMs[i]){const float rate=(prevD[i]-c.filteredDistanceCm)/(float)(now-prevMs[i])*1000.0f;c.approachRateCmS=constrain(0.30f*rate+0.70f*c.approachRateCmS,-250.0f,250.0f);}prevMs[i]=now;prevD[i]=c.filteredDistanceCm;updateChannelZone(i,c.filteredDistanceCm);
 }
 void UltrasonicSensor::acceptTimeout(uint8_t i,uint32_t now){
-  Channel& c=channels_[i];c.echoValid=false;c.lastMeasurementMs=now;++c.measurementSequence;++c.failureCount;c.rawDistanceCm=ULTRASONIC_MAX_CM;
-  if(!c.filterReady){c.filteredDistanceCm=ULTRASONIC_MAX_CM;c.filterReady=true;}else{c.history[c.historyIndex]=ULTRASONIC_MAX_CM;c.historyIndex=(c.historyIndex+1)%5;if(c.historyCount<5)c.historyCount++;c.filteredDistanceCm+=0.24f*(medianHistory(c)-c.filteredDistanceCm);c.approachRateCmS*=0.70f;}updateChannelZone(i,c.filteredDistanceCm);
+  Channel& c=channels_[i];c.echoValid=false;c.health=SensorHealth::TIMEOUT;c.lastMeasurementMs=now;++c.measurementSequence;++c.failureCount;++c.consecutiveTimeouts;c.rawDistanceCm=ULTRASONIC_MAX_CM;
+  if(!c.filterReady){c.filteredDistanceCm=ULTRASONIC_MAX_CM;c.filterReady=true;}else{c.history[c.historyIndex]=ULTRASONIC_MAX_CM;c.historyIndex=(c.historyIndex+1)%5;if(c.historyCount<5)c.historyCount++;c.filteredDistanceCm+=0.24f*(medianHistory(c)-c.filteredDistanceCm);c.approachRateCmS*=0.70f;}c.zone=ObstacleZone::UNKNOWN;
 }
 void UltrasonicSensor::recomputeObstacleModel(uint32_t now){
-  auto fill=[now](const Channel& c,UltrasonicReading& o){o.distanceCm=c.filteredDistanceCm;o.rawDistanceCm=c.rawDistanceCm;o.valid=c.filterReady;o.echoValid=c.echoValid;o.fresh=c.measurementSequence&&now-c.lastMeasurementMs<=ULTRASONIC_FRESH_MS;o.lastUpdateMs=c.lastMeasurementMs;o.ageMs=c.measurementSequence?now-c.lastMeasurementMs:0;o.rateCmS=c.approachRateCmS;o.zone=c.zone;o.failureCount=c.failureCount;};
+  auto fill=[now](const Channel& c,UltrasonicReading& o){o.distanceCm=c.filteredDistanceCm;o.rawDistanceCm=c.rawDistanceCm;o.valid=c.filterReady;o.echoValid=c.echoValid;o.fresh=c.measurementSequence&&now-c.lastMeasurementMs<=ULTRASONIC_FRESH_MS;o.lastUpdateMs=c.lastMeasurementMs;o.ageMs=c.measurementSequence?now-c.lastMeasurementMs:0;o.rateCmS=c.approachRateCmS;o.zone=c.zone;o.failureCount=c.failureCount;o.health=c.health;if(c.measurementSequence && !o.fresh)o.health=SensorHealth::STALE;};
   // Mount-left looks right; mount-right looks left.
   fill(channels_[RIGHT_MOUNT],frontLeft_);fill(channels_[LEFT_MOUNT],frontRight_);
   const bool l=frontLeft_.valid&&frontLeft_.fresh,r=frontRight_.valid&&frontRight_.fresh;overallFresh_=l&&r;overallEchoValid_=l&&r&&frontLeft_.echoValid&&frontRight_.echoValid;
-  if(!l||!r){overallZone_=ObstacleZone::UNKNOWN;suggestion_=AvoidanceDirection::STOP;return;}
+  if(!frontLeft_.valid || !frontRight_.valid) overallHealth_=SensorHealth::UNKNOWN;
+  else if(!frontLeft_.fresh || !frontRight_.fresh) overallHealth_=SensorHealth::STALE;
+  else if(!frontLeft_.echoValid && !frontRight_.echoValid) overallHealth_=SensorHealth::DISCONNECTED_OR_FAULT;
+  else if(!frontLeft_.echoValid || !frontRight_.echoValid) overallHealth_=SensorHealth::DEGRADED;
+  else if(frontLeft_.health==SensorHealth::INVALID || frontRight_.health==SensorHealth::INVALID) overallHealth_=SensorHealth::INVALID;
+  else overallHealth_=SensorHealth::HEALTHY;
+  // A failed/unknown channel can never produce a CLEAR decision.
+  if(!l||!r||!healthy()){overallZone_=ObstacleZone::UNKNOWN;suggestion_=AvoidanceDirection::STOP;return;}
   nearestDistanceCm_=min(frontLeft_.distanceCm,frontRight_.distanceCm);nearestRawDistanceCm_=min(frontLeft_.rawDistanceCm,frontRight_.rawDistanceCm);nearestRateCmS_=max(frontLeft_.rateCmS,frontRight_.rateCmS);
   if(frontLeft_.zone==ObstacleZone::EMERGENCY||frontRight_.zone==ObstacleZone::EMERGENCY)overallZone_=ObstacleZone::EMERGENCY;else if(frontLeft_.zone==ObstacleZone::BLOCKED||frontRight_.zone==ObstacleZone::BLOCKED)overallZone_=ObstacleZone::BLOCKED;else if(frontLeft_.zone==ObstacleZone::CAUTION||frontRight_.zone==ObstacleZone::CAUTION)overallZone_=ObstacleZone::CAUTION;else overallZone_=ObstacleZone::CLEAR;
   const float delta=frontLeft_.distanceCm-frontRight_.distanceCm;if(overallZone_>=ObstacleZone::EMERGENCY||fabsf(delta)<=AVOID_SIDE_HYSTERESIS_CM)suggestion_=AvoidanceDirection::STOP;else suggestion_=delta<0?AvoidanceDirection::RIGHT:AvoidanceDirection::LEFT;
@@ -68,6 +79,7 @@ void UltrasonicSensor::update(){
 }
 bool UltrasonicSensor::hardBlocked()const{return overallZone_==ObstacleZone::BLOCKED||overallZone_==ObstacleZone::EMERGENCY;}
 float UltrasonicSensor::stoppingDistanceCm(int16_t cmd)const{const float speed=abs(cmd)*OBSTACLE_STOP_PER_COMMAND_CM;const float approach=max(0.0f,nearestRateCmS_)*OBSTACLE_APPROACH_LOOKAHEAD_S;return constrain(OBSTACLE_STOP_BASE_CM+speed+approach,OBSTACLE_EMERGENCY_CM,OBSTACLE_CAUTION_CM);}
-int16_t UltrasonicSensor::limitForwardCommand(int16_t cmd)const{if(cmd<=0)return cmd;if(!overallFresh_)return 0;if(nearestDistanceCm_<=stoppingDistanceCm(cmd)||hardBlocked())return 0;if(nearestDistanceCm_>=stoppingDistanceCm(cmd)+OBSTACLE_SLOW_BAND_CM)return cmd;int16_t limited=(int16_t)lroundf(cmd*constrain((nearestDistanceCm_-stoppingDistanceCm(cmd))/OBSTACLE_SLOW_BAND_CM,0.0f,1.0f));if(limited>0&&limited<OBSTACLE_MIN_FORWARD_COMMAND)limited=OBSTACLE_MIN_FORWARD_COMMAND;return min(cmd,limited);}
+int16_t UltrasonicSensor::limitForwardCommand(int16_t cmd)const{if(cmd<=0)return cmd;if(!overallFresh_||!healthy())return 0;if(nearestDistanceCm_<=stoppingDistanceCm(cmd)||hardBlocked())return 0;if(nearestDistanceCm_>=stoppingDistanceCm(cmd)+OBSTACLE_SLOW_BAND_CM)return cmd;int16_t limited=(int16_t)lroundf(cmd*constrain((nearestDistanceCm_-stoppingDistanceCm(cmd))/OBSTACLE_SLOW_BAND_CM,0.0f,1.0f));if(limited>0&&limited<OBSTACLE_MIN_FORWARD_COMMAND)limited=OBSTACLE_MIN_FORWARD_COMMAND;return min(cmd,limited);}
 const char* UltrasonicSensor::zoneText(ObstacleZone z){switch(z){case ObstacleZone::CLEAR:return "CLEAR";case ObstacleZone::CAUTION:return "CAUTION";case ObstacleZone::BLOCKED:return "BLOCKED";case ObstacleZone::EMERGENCY:return "EMERGENCY";default:return "UNKNOWN";}}
+const char* UltrasonicSensor::healthText(SensorHealth h){switch(h){case SensorHealth::HEALTHY:return "HEALTHY";case SensorHealth::STALE:return "STALE";case SensorHealth::TIMEOUT:return "TIMEOUT";case SensorHealth::INVALID:return "INVALID";case SensorHealth::DISCONNECTED_OR_FAULT:return "DISCONNECTED_OR_FAULT";case SensorHealth::DEGRADED:return "DEGRADED";default:return "UNKNOWN";}}
 const char* UltrasonicSensor::avoidanceText(AvoidanceDirection d){switch(d){case AvoidanceDirection::LEFT:return "LEFT";case AvoidanceDirection::RIGHT:return "RIGHT";case AvoidanceDirection::STOP:return "STOP";default:return "NONE";}}

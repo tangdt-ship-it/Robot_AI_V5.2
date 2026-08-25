@@ -13,6 +13,13 @@ enum class EncoderHealth : uint8_t {
   BOTH_STALL = 5,
 };
 
+enum class EncoderResetReason : uint8_t {
+  UNKNOWN,
+  BOOT,
+  PS2_R2,
+  ROBOTLINK,
+};
+
 struct WheelOdometryData {
   int64_t leftTicks = 0;
   int64_t rightTicks = 0;
@@ -43,7 +50,7 @@ class WheelOdometry {
   void reset();
   // Zero the two wheel encoder readouts without changing the navigation pose,
   // fused-heading reference, or accumulated centre travel.
-  void resetWheelCounts();
+  void resetWheelCounts(EncoderResetReason reason = EncoderResetReason::UNKNOWN);
   const WheelOdometryData& data() const { return data_; }
 
   bool ready() const { return initialized_; }
@@ -55,6 +62,9 @@ class WheelOdometry {
   }
   EncoderHealth health() const { return health_; }
   const char* healthText() const;
+  uint32_t resetGeneration() const { return resetGeneration_; }
+  EncoderResetReason lastResetReason() const { return lastResetReason_; }
+  static const char* resetReasonText(EncoderResetReason reason);
 
  private:
   static int32_t counterDelta(uint32_t current, uint32_t previous);
@@ -76,6 +86,8 @@ class WheelOdometry {
   EncoderHealth health_ = EncoderHealth::DISABLED;
   float pendingTravelMm_ = 0.0f;
   WheelOdometryData data_;
+  uint32_t resetGeneration_ = 0;
+  EncoderResetReason lastResetReason_ = EncoderResetReason::UNKNOWN;
 };
 
 #endif

@@ -244,6 +244,7 @@ void loop() {
   telemetry.rightCommand = motors.rightSpeed();
   telemetry.speedSetting = robot.speedSetting();
   telemetry.robotState = static_cast<uint8_t>(robot.state());
+  telemetry.motionOwner = static_cast<uint8_t>(robot.motionOwner());
   telemetry.ps2Status = static_cast<uint8_t>(ps2.receiverStatus(millis()));
   telemetry.ps2Connected = ps2.state().receiverConnected;
   telemetry.ps2Fresh = !ps2.frameTimedOut(millis());
@@ -301,6 +302,7 @@ void loop() {
   telemetry.obstacleDistanceCm = ultrasonic.distanceCm();
   telemetry.obstacleApproachRateCmS = ultrasonic.approachRateCmS();
   telemetry.obstacleZone = static_cast<uint8_t>(ultrasonic.zone());
+  telemetry.obstacleHealth = static_cast<uint8_t>(ultrasonic.health());
   telemetry.obstacleZoneSequence = ultrasonic.zoneSequence();
   telemetry.obstacleBlocked = ultrasonic.hardBlocked();
   telemetry.obstacleLimited = robot.obstacleLimited();
@@ -310,9 +312,14 @@ void loop() {
   telemetry.frontRightRateCmS = ultrasonic.frontRight().rateCmS;
   telemetry.frontLeftZone = static_cast<uint8_t>(ultrasonic.frontLeftZone());
   telemetry.frontRightZone = static_cast<uint8_t>(ultrasonic.frontRightZone());
+  telemetry.frontLeftHealth = static_cast<uint8_t>(ultrasonic.frontLeft().health);
+  telemetry.frontRightHealth = static_cast<uint8_t>(ultrasonic.frontRight().health);
+  telemetry.frontLeftAgeMs = ultrasonic.frontLeft().ageMs;
+  telemetry.frontRightAgeMs = ultrasonic.frontRight().ageMs;
   telemetry.obstacleSuggestion = static_cast<uint8_t>(ultrasonic.suggestedAvoidance());
   telemetry.frontLeftFailureCount = ultrasonic.frontLeft().failureCount;
   telemetry.frontRightFailureCount = ultrasonic.frontRight().failureCount;
+  telemetry.encoderResetGeneration = wheelOdometry.resetGeneration();
   robotLink.update(telemetry);
   // DONE,STOP means the requested electrical stop/brake is already applied.
   static bool stopCompletionPending = false;
@@ -395,8 +402,21 @@ void loop() {
         applied = true;
         break;
       case RobotLinkConfigType::RESET_ENCODERS:
-        wheelOdometry.resetWheelCounts();
-        applied = true;
+        // A counter reset during an operation is an unresolved odometry
+        // boundary.  Stop first and require the caller to establish a new
+        // segment; never silently continue with mixed generations.
+        if (robot.aiMotionActive() || motors.leftSpeed() != 0 ||
+            motors.rightSpeed() != 0) {
+          robot.stopImmediately();
+          robotDebug.print("ENCODER,RESET_REJECTED=IN_MOTION,GEN=");
+          robotDebug.println(wheelOdometry.resetGeneration());
+          applied = false;
+        } else {
+          wheelOdometry.resetWheelCounts(EncoderResetReason::ROBOTLINK);
+          robotDebug.print("ENCODER,RESET=ROBOTLINK,GEN=");
+          robotDebug.println(wheelOdometry.resetGeneration());
+          applied = true;
+        }
         break;
       case RobotLinkConfigType::NONE:
         break;

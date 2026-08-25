@@ -48,6 +48,7 @@ struct RobotObstacleStatus {
     bool valid = false;
     bool fresh = false;
     bool echo_valid = false;
+    char health[24] = "UNKNOWN";
     float distance_cm = 0.0f;
     float approach_rate_cm_s = 0.0f;
     char zone[12] = {};
@@ -56,6 +57,11 @@ struct RobotObstacleStatus {
     float front_right_distance_cm = 0.0f;
     char front_left_zone[12] = {};
     char front_right_zone[12] = {};
+    char front_left_health[24] = "UNKNOWN";
+    char front_right_health[24] = "UNKNOWN";
+    uint32_t front_left_age_ms = 0;
+    uint32_t front_right_age_ms = 0;
+    uint32_t encoder_reset_generation = 0;
     char suggested_avoidance[8] = {};
     float RobotLeftDistanceCm() const { return front_right_distance_cm; }
     float RobotRightDistanceCm() const { return front_left_distance_cm; }
@@ -93,6 +99,7 @@ struct RobotOdometry {
     float heading_rad = 0.0f;
     int64_t left_ticks = 0;
     int64_t right_ticks = 0;
+    uint32_t reset_generation = 0;
 };
 
 struct RobotEncoderStatus {

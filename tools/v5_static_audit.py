@@ -36,8 +36,13 @@ odom = text("firmware/stm32/src/encoders/wheel_odometry.cpp")
 server = text("firmware/stm32/src/communication/robot_link_server.cpp")
 ini = text("firmware/stm32/platformio.ini")
 ruart = text("firmware/esp32-xiaozhi/main/robot/robot_uart.cc")
+ruart_h = text("firmware/esp32-xiaozhi/main/robot/robot_uart.h")
 mission = text("firmware/esp32-xiaozhi/main/robot/mission_manager.cc")
 mission_h = text("firmware/esp32-xiaozhi/main/robot/mission_manager.h")
+kconfig = text("firmware/esp32-xiaozhi/main/Kconfig.projbuild")
+defaults = text("firmware/esp32-xiaozhi/sdkconfig.robot_ai.defaults")
+obstacle_assist = text("firmware/esp32-xiaozhi/main/robot/obstacle_assist.cc")
+teach_route = text("firmware/esp32-xiaozhi/main/robot/teach_route.cc")
 board = text("firmware/esp32-xiaozhi/main/boards/bread-compact-wifi-s3cam/compact_wifi_board_s3cam.cc")
 cmake = text("firmware/esp32-xiaozhi/main/CMakeLists.txt")
 
@@ -61,6 +66,29 @@ require("SyncPoseFromOdometry" in mission and
         "MissionManager is not using STM32 odometry")
 require("compass_plus_time_dead_reckoning" not in mission,
         "old compass/time dead reckoning remains")
+require("SensorHealth" in cfg or "SensorHealth" in text("firmware/stm32/include/sensors/ultrasonic_sensor.h"),
+        "sensor health classification missing")
+require("!overallFresh_||!healthy()" in text("firmware/stm32/src/sensors/ultrasonic_sensor.cpp"),
+        "forward motion is not fail-closed on sensor health")
+require("MotionOwner" in text("firmware/stm32/include/control/robot_controller.h") and
+        "motionOwner_" in text("firmware/stm32/src/control/robot_controller.cpp"),
+        "motion ownership gate missing")
+require("resetGeneration" in text("firmware/stm32/include/encoders/wheel_odometry.h") and
+        "RESET_BOUNDARY_UNRESOLVED" in teach_route,
+        "encoder reset generation/resume boundary handling missing")
+require("compare_exchange_strong" in obstacle_assist and
+        "ActiveGuard" in obstacle_assist,
+        "obstacle AI cooldown cleanup guard missing")
+require("SHORT_SAFETY_TEST" in teach_route and "FULL_PRODUCTION" in teach_route and
+        "ROBOT_V5_FULL_REPLAY_PRODUCTION 0" in teach_route,
+        "explicit replay mode/default production gate missing")
+require("CONFIG_AUTOMATIC_DETOUR 0" in mission and
+        "AUTO_DETOUR_DISABLED" in mission and
+        'config AUTOMATIC_DETOUR' in kconfig and
+        "CONFIG_AUTOMATIC_DETOUR=n" in defaults,
+        "automatic detour default-off gate missing")
+require((ROOT / "tools/v5_host_selftest.py").is_file(),
+        "missing V5 host safety self-test")
 require("MissionType::RETURN_HOME" in mission and "RunReturnHome" in mission,
         "RETURN_HOME mission missing")
 require("Breadcrumb" in mission_h and "breadcrumbs_" in mission,

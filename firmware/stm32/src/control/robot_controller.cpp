@@ -11,12 +11,25 @@ RobotController::RobotController(MotorController& motors, Ps2Controller& ps2,
       heading_(heading), ultrasonic_(ultrasonic), odometry_(odometry),
       imu_(imu), fusion_(fusion), debug_(debugStream) {}
 
+const char* RobotController::motionOwnerText(MotionOwner owner) {
+  switch (owner) {
+    case MotionOwner::MCP: return "MCP";
+    case MotionOwner::MISSION: return "MISSION";
+    case MotionOwner::REPLAY: return "REPLAY";
+    case MotionOwner::DIAGNOSTIC: return "DIAGNOSTIC";
+    case MotionOwner::PS2: return "PS2";
+    case MotionOwner::NONE: return "NONE";
+  }
+  return "NONE";
+}
+
 void RobotController::begin() {
   speedSetting_ = SPEED_DEFAULT;
   heading_.begin();
   state_ = RobotState::STOP;
   targetLeft_ = targetRight_ = currentLeft_ = currentRight_ = 0;
   stopPwmLatched_ = true;
+  motionOwner_ = MotionOwner::NONE;
   lastControlMs_ = millis();
   motors_.stop();
   compass_.setRobotMoving(false);
@@ -121,10 +134,13 @@ void RobotController::handleFunctionButtons() {
   }
   compassResetHeld_ = l2Down;
   if (ps2_.buttonPressed(Ps2Button::R2)) {
-    odometry_.resetWheelCounts();
+    // Counter zeroing is a generation boundary.  Replay must never combine
+    // samples from before and after this operation into one segment.
+    odometry_.resetWheelCounts(EncoderResetReason::PS2_R2);
     display_.forceRefresh();
 #if ROBOT_DEBUG
-    debug_.println("ENCODER,RESET=R2,L=0,R=0");
+    debug_.print("ENCODER,RESET=PS2_R2,GEN=");
+    debug_.println(odometry_.resetGeneration());
 #endif
   }
   if (ps2_.buttonPressed(Ps2Button::START))
@@ -155,6 +171,11 @@ void RobotController::setMotionCommand(int16_t left, int16_t right,
                                        bool reversing) {
   targetLeft_ = constrain(left, -255, 255);
   targetRight_ = constrain(right, -255, 255);
+  if (state == RobotState::JOYSTICK_DRIVE || state == RobotState::FORWARD ||
+      state == RobotState::BACKWARD || state == RobotState::TURN_LEFT ||
+      state == RobotState::TURN_RIGHT) {
+    motionOwner_ = MotionOwner::PS2;
+  }
   if (targetLeft_ != 0 || targetRight_ != 0) stopPwmLatched_ = false;
   const bool newHeadingSession =
       headingCandidate && (!straightCommand_ || reversing_ != reversing ||
@@ -382,6 +403,7 @@ void RobotController::stopImmediately() {
   aiTurnPulseDriving_ = false;
   aiTurnPulseUntilMs_ = 0;
   aiTurnCoastUntilMs_ = 0;
+  motionOwner_ = MotionOwner::NONE;
   aiTurnYawRateDegS_ = 0.0f;
   const bool lockBrake = !freeStop_ &&
                          (brakeEnabled_ || obstacleBrakeActive_);
@@ -395,7 +417,8 @@ void RobotController::stopImmediately() {
 }
 
 bool RobotController::canStartAiMotion(uint32_t nowMs) const {
-  return !brakeEnabled_ &&
+  return !brakeEnabled_ && aiMotionMode_ == AiMotionMode::NONE &&
+         (motionOwner_ == MotionOwner::NONE || motionOwner_ == MotionOwner::MCP) &&
          (ps2_.frameTimedOut(nowMs) || !ps2_.motionCommandActive());
 }
 
@@ -404,6 +427,7 @@ bool RobotController::startAiMotion(int16_t left, int16_t right,
                                     uint32_t timeoutMs) {
   const uint32_t now = millis();
   if (!canStartAiMotion(now)) return false;
+  motionOwner_ = MotionOwner::MCP;
   timeoutMs = constrain(timeoutMs, 50U, ROBOT_AI_MOTION_PULSE_MS);
   aiMotionMode_ = AiMotionMode::PULSE;
   aiMotionDeadlineMs_ = now + timeoutMs;
@@ -416,6 +440,7 @@ bool RobotController::startAiContinuous(int16_t left, int16_t right,
                                         bool headingHold, bool reversing) {
   const uint32_t now = millis();
   if (!canStartAiMotion(now)) return false;
+  motionOwner_ = MotionOwner::MCP;
   aiMotionMode_ = AiMotionMode::CONTINUOUS;
   aiMotionDeadlineMs_ = 0;
   setMotionCommand(left, right, RobotState::AI_MODE, headingHold, reversing);
@@ -430,6 +455,7 @@ bool RobotController::startAiDistance(bool forward, uint32_t distanceMm,
       distanceMm == 0U || distanceMm > ROBOT_AI_DISTANCE_MAX_MM) {
     return false;
   }
+  motionOwner_ = MotionOwner::MCP;
   aiMotionMode_ = AiMotionMode::DISTANCE;
   aiMotionDeadlineMs_ = now + ROBOT_AI_DISTANCE_TIMEOUT_MS;
   aiDistanceStartMm_ = odometry_.data().distanceMm;
@@ -503,6 +529,7 @@ bool RobotController::startAiTurnAbsolute(float targetHeading,
                                           int16_t maxSpeed) {
   const uint32_t now = millis();
   if (!canStartAiMotion(now) || !headingAvailable()) return false;
+  motionOwner_ = MotionOwner::MCP;
   aiMotionMode_ = AiMotionMode::TURN;
   aiMotionDeadlineMs_ = now + TURN_TIMEOUT_MS;
   aiTurnTargetDeg_ = CompassController::normalize(targetHeading);
@@ -789,12 +816,15 @@ void RobotController::emitDiagnostics(uint32_t nowMs) {
     debug_.print(UltrasonicSensor::zoneText(ultrasonic_.zone()));
     debug_.print(",VALID="); debug_.print(ultrasonic_.echoValid() ? 1 : 0);
     debug_.print(",FRESH="); debug_.print(ultrasonic_.isFresh() ? 1 : 0);
+    debug_.print(",HEALTH="); debug_.print(UltrasonicSensor::healthText(ultrasonic_.health()));
     debug_.print(",RATE="); debug_.print(ultrasonic_.approachRateCmS(), 1);
     debug_.print(",LIMITED="); debug_.println(obstacleLimited_ ? 1 : 0);
     debug_.print("ULTRA2,L="); debug_.print(ultrasonic_.frontLeftDistanceCm(), 1);
     debug_.print(",R="); debug_.print(ultrasonic_.frontRightDistanceCm(), 1);
     debug_.print(",LZ="); debug_.print(UltrasonicSensor::zoneText(ultrasonic_.frontLeftZone()));
     debug_.print(",RZ="); debug_.print(UltrasonicSensor::zoneText(ultrasonic_.frontRightZone()));
+    debug_.print(",LH="); debug_.print(UltrasonicSensor::healthText(ultrasonic_.frontLeft().health));
+    debug_.print(",RH="); debug_.print(UltrasonicSensor::healthText(ultrasonic_.frontRight().health));
     debug_.print(",ZONE="); debug_.print(UltrasonicSensor::zoneText(ultrasonic_.overallZone()));
     debug_.print(",SUG="); debug_.println(UltrasonicSensor::avoidanceText(ultrasonic_.suggestedAvoidance()));
     return;

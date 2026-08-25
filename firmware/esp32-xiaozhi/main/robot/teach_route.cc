@@ -1,4 +1,4 @@
-#include "teach_route.h"
+﻿#include "teach_route.h"
 
 #include "application.h"
 #include "mission_manager.h"
@@ -43,7 +43,15 @@ constexpr uint32_t kReplayB1TimeoutMs = 20000U;
 constexpr float kReplayB3MinSegmentMm = 20.0f;
 constexpr float kReplayB3MaxSegmentMm = 500.0f;
 constexpr uint32_t kReplayB3TimeoutMs = 20000U;
-constexpr bool kReplayHrShortTest = true;
+enum class ReplayMode : uint8_t { SHORT_SAFETY_TEST, FULL_PRODUCTION };
+#ifndef ROBOT_V5_FULL_REPLAY_PRODUCTION
+#define ROBOT_V5_FULL_REPLAY_PRODUCTION 0
+#endif
+// The full route engine is compiled and tested behind an explicit gate, but
+// the safe one-segment test is the alpha default until HIL commissioning.
+constexpr ReplayMode kReplayMode = ROBOT_V5_FULL_REPLAY_PRODUCTION
+                                        ? ReplayMode::FULL_PRODUCTION
+                                        : ReplayMode::SHORT_SAFETY_TEST;
 constexpr uint32_t kReplayHrShortMaxMm = 150U;
 
 float NormalizeTurnDelta(float delta_deg) {
@@ -52,7 +60,6 @@ float NormalizeTurnDelta(float delta_deg) {
     return delta_deg;
 }
 }
-
 TeachRoute::TeachRoute(RobotUart* robot_uart, MissionManager* mission_manager)
     : robot_uart_(robot_uart), mission_manager_(mission_manager) {}
 
@@ -96,8 +103,11 @@ bool TeachRoute::Begin() {
              "ROUTE,REPLAY_B1_OBS_POLICY=VALID_FRESH_CLEAR,ECHO0_CLEAR_ALLOWED=1");
     ESP_LOGI(kTag, "ROUTE,REPLAY_RESUME_PERSIST=NO");
     ESP_LOGI(kTag,
-             "ROUTE,REPLAY_HR_TEST=SHORT_RANGE,MAX_MM=%lu,TURN=OFF,NEXT_WP=OFF,AUTO_RESUME=OFF",
-             static_cast<unsigned long>(kReplayHrShortMaxMm));
+             "ROUTE,REPLAY_MODE=%s,MAX_SHORT_MM=%lu,FULL_DEFAULT=%u,AUTO_RESUME=OFF",
+             kReplayMode == ReplayMode::SHORT_SAFETY_TEST
+                 ? "SHORT_SAFETY_TEST" : "FULL_PRODUCTION",
+             static_cast<unsigned long>(kReplayHrShortMaxMm),
+             ROBOT_V5_FULL_REPLAY_PRODUCTION ? 1U : 0U);
     ESP_LOGI(kTag,
              "ROUTE,MAP_UI_PROTO=3,V2_COMPAT=1,REPLAY_OP=ON,REPLAY_MODES=0-8,LCD_REPLAY_STATUS=ON");
 
@@ -892,6 +902,9 @@ bool TeachRoute::CheckReplaySafety(const char* stage, RobotState& state,
         reason = "OBS_RX"; pass = false;
     } else if (!obstacle.valid) { reason = "OBS_INVALID"; pass = false; }
     else if (!obstacle.fresh) { reason = "OBS_STALE"; pass = false; }
+    else if (strcmp(obstacle.health, "HEALTHY") != 0) {
+        reason = "SENSOR_HEALTH"; pass = false;
+    }
     else if (strcmp(obstacle.zone, "CAUTION") == 0) {
         reason = "CAUTION"; pass = false;
     } else if (strcmp(obstacle.zone, "BLOCKED") == 0) {
@@ -902,12 +915,13 @@ bool TeachRoute::CheckReplaySafety(const char* stage, RobotState& state,
         reason = "OBS_INVALID"; pass = false;
     }
     ESP_LOGI(kTag,
-             "ROUTE,REPLAY=SAFETY_CHECK,STAGE=%s,PASS=%u,REASON=%s,MISSION=%u,AI_HOLD=%u,PS2_OVERRIDE=%u,STATE_VALID=%u,MOVING=%u,BRAKE=%u,OBS_VALID=%u,OBS_FRESH=%u,OBS_ECHO=%u,OBS_DIST_CM=%.1f,OBS_ZONE=%s",
+             "ROUTE,REPLAY=SAFETY_CHECK,STAGE=%s,PASS=%u,REASON=%s,MISSION=%u,AI_HOLD=%u,PS2_OVERRIDE=%u,STATE_VALID=%u,MOVING=%u,BRAKE=%u,OBS_VALID=%u,OBS_FRESH=%u,OBS_ECHO=%u,OBS_HEALTH=%s,OBS_DIST_CM=%.1f,OBS_ZONE=%s",
              stage != nullptr ? stage : "UNKNOWN", pass ? 1U : 0U, reason,
              mission ? 1U : 0U, ai_hold ? 1U : 0U, ps2 ? 1U : 0U,
              state.valid ? 1U : 0U, state.moving ? 1U : 0U,
              state.brake_enabled ? 1U : 0U, obstacle.valid ? 1U : 0U,
              obstacle.fresh ? 1U : 0U, obstacle.echo_valid ? 1U : 0U,
+             obstacle.health[0] != '\0' ? obstacle.health : "UNKNOWN",
              obstacle.distance_cm,
              obstacle.zone[0] != '\0' ? obstacle.zone : "UNKNOWN");
     return pass;
@@ -1156,7 +1170,7 @@ bool TeachRoute::StartFullReplay() {
              "ROUTE,FULL_REPLAY=START,SLOT=%u,POINTS=%u,SEGMENTS=%u,MOTOR=0",
              static_cast<unsigned>(selected_slot_), static_cast<unsigned>(count),
              static_cast<unsigned>(count - 1U));
-    if (kReplayHrShortTest) {
+    if ((kReplayMode == ReplayMode::SHORT_SAFETY_TEST)) {
         ESP_LOGI(kTag,
                  "ROUTE,HR_SHORT=START,MAX_MM=%lu,TURN=OFF,NEXT_WP=OFF",
                  static_cast<unsigned long>(kReplayHrShortMaxMm));
@@ -1320,6 +1334,7 @@ void TeachRoute::ClearResumeContext() {
     resume_hold_x_mm_ = 0.0f;
     resume_hold_y_mm_ = 0.0f;
     resume_hold_heading_rad_ = 0.0f;
+    resume_reset_generation_ = 0;
 }
 
 void TeachRoute::RunReplayFinalSegment() {
@@ -1508,6 +1523,7 @@ void TeachRoute::RunFullReplay() {
         resume_hold_x_mm_ = hold_pose.x_mm;
         resume_hold_y_mm_ = hold_pose.y_mm;
         resume_hold_heading_rad_ = hold_pose.heading_rad;
+        resume_reset_generation_ = hold_pose.reset_generation;
         replay_wp_index_ = resume_wp_index_;
         replay_wp_total_ = count;
         replay_operation_ = 3U;
@@ -1581,6 +1597,14 @@ void TeachRoute::RunFullReplay() {
             stop_hold("POSE_CHANGED");
             return;
         }
+        if (current_pose.reset_generation != resume_reset_generation_) {
+            ESP_LOGW(kTag,
+                     "ROUTE,RESET_BOUNDARY_UNRESOLVED,HOLD_GEN=%lu,CURRENT_GEN=%lu,RESUME=0",
+                     static_cast<unsigned long>(resume_reset_generation_),
+                     static_cast<unsigned long>(current_pose.reset_generation));
+            stop_hold("RESET_BOUNDARY_UNRESOLVED");
+            return;
+        }
         const float drift_mm = hypotf(current_pose.x_mm - resume_hold_x_mm_,
                                       current_pose.y_mm - resume_hold_y_mm_);
         const float drift_deg = fabsf(NormalizeTurnDelta(
@@ -1635,7 +1659,7 @@ void TeachRoute::RunFullReplay() {
                  resume_result.travelled_mm,
                  static_cast<unsigned long>(completed_before +
                      static_cast<uint32_t>(lroundf(resume_result.travelled_mm))));
-        if (kReplayHrShortTest) {
+        if ((kReplayMode == ReplayMode::SHORT_SAFETY_TEST)) {
             if (ai_mode && !robot_uart_->Ps2OverrideActive()) {
                 (void)robot_uart_->SetMode(false, 700);
             }
@@ -1674,7 +1698,7 @@ void TeachRoute::RunFullReplay() {
         const float dx = static_cast<float>(point.x_mm - prior.x_mm);
         const float dy = static_cast<float>(point.y_mm - prior.y_mm);
         const float distance = sqrtf(dx * dx + dy * dy);
-        const uint32_t test_target_mm = kReplayHrShortTest && index == 1U
+        const uint32_t test_target_mm = (kReplayMode == ReplayMode::SHORT_SAFETY_TEST) && index == 1U
             ? std::min(static_cast<uint32_t>(lroundf(distance)),
                        kReplayHrShortMaxMm)
             : static_cast<uint32_t>(lroundf(distance));
@@ -1828,7 +1852,7 @@ void TeachRoute::RunFullReplay() {
                  static_cast<unsigned>(index + 1U), static_cast<unsigned>(count),
                  move_result.target_mm, move_result.travelled_mm,
                  fabsf(move_result.travelled_mm - move_result.target_mm));
-        if (kReplayHrShortTest && index == 1U) {
+        if ((kReplayMode == ReplayMode::SHORT_SAFETY_TEST) && index == 1U) {
             if (ai_mode && !robot_uart_->Ps2OverrideActive()) {
                 (void)robot_uart_->SetMode(false, 700);
             }

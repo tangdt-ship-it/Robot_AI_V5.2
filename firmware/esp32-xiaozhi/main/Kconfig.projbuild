@@ -963,6 +963,14 @@ menu "TAIJIPAI_S3_CONFIG"
 endmenu
 
 menu "Robot AI Obstacle Avoidance"
+    config AUTOMATIC_DETOUR
+        bool "Enable automatic obstacle detour"
+        default n
+        help
+            When disabled, autonomous missions stop and report the obstacle
+            instead of driving around it. The explicit BYPASS_ONCE commissioning
+            command remains separately controlled and bounded.
+
     config OBSTACLE_SHADOW_MODE
         bool "Obstacle Avoidance Shadow Mode"
         default n

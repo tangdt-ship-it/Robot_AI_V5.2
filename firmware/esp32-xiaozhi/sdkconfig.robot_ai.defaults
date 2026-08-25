@@ -2,8 +2,9 @@
 CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_CAM=y
 CONFIG_LCD_ST7789_240X240=y
 
-# Production autonomous obstacle avoidance. STM32 still owns motor safety,
-# HC-SR04 braking, PS2 override and command-link timeout.
+# Automatic detour is deliberately disabled until physical commissioning.
+# STM32 still owns motor safety, HC-SR04 braking, PS2 override and timeout.
+CONFIG_AUTOMATIC_DETOUR=n
 # CONFIG_OBSTACLE_SHADOW_MODE is not set
 
 # Vietnamese UI, OTA locale and server/device language metadata.

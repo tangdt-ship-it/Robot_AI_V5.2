@@ -943,15 +943,39 @@ void RobotUart::HandleFrame(const char* frame) {
     char front_left_zone[12] = {};
     char front_right_zone[12] = {};
     char suggested[8] = {};
-    if (sscanf(frame,
-               "VALUE,OBSTACLE,FRESH,%d,ECHO,%d,DIST,%f,RATE,%f,ZONE,%11[^,],LIMIT,%d,LEFT,%f,RIGHT,%f,LZ,%11[^,],RZ,%11[^,],NEAREST,%*f,SUG,%7s",
-               &fresh, &echo_valid, &float_value,
-               &obstacle_distance, obstacle_zone, &limited, &front_left,
-               &front_right, front_left_zone, front_right_zone, suggested) >= 6) {
+    char obstacle_health[24] = {};
+    char front_left_health[24] = {};
+    char front_right_health[24] = {};
+    unsigned long front_left_age = 0;
+    unsigned long front_right_age = 0;
+    unsigned long reset_generation = 0;
+    int obstacle_fields = sscanf(
+        frame,
+        "VALUE,OBSTACLE,FRESH,%d,ECHO,%d,HEALTH,%23[^,],DIST,%f,RATE,%f,ZONE,%11[^,],LIMIT,%d,LEFT,%f,RIGHT,%f,LZ,%11[^,],RZ,%11[^,],LH,%23[^,],RH,%23[^,],LAGE,%lu,RAGE,%lu,NEAREST,%*f,SUG,%7[^,],LF,%*u,RF,%*u,RESET_GEN,%lu",
+        &fresh, &echo_valid, obstacle_health, &float_value,
+        &obstacle_distance, obstacle_zone, &limited, &front_left,
+        &front_right, front_left_zone, front_right_zone, front_left_health,
+        front_right_health, &front_left_age, &front_right_age, suggested,
+        &reset_generation);
+    if (obstacle_fields < 6) {
+        // V4.2 compatibility: old STM32 builds did not expose health fields.
+        obstacle_fields = sscanf(
+            frame,
+            "VALUE,OBSTACLE,FRESH,%d,ECHO,%d,DIST,%f,RATE,%f,ZONE,%11[^,],LIMIT,%d,LEFT,%f,RIGHT,%f,LZ,%11[^,],RZ,%11[^,],NEAREST,%*f,SUG,%7[^,]",
+            &fresh, &echo_valid, &float_value, &obstacle_distance,
+            obstacle_zone, &limited, &front_left, &front_right,
+            front_left_zone, front_right_zone, suggested);
+        snprintf(obstacle_health, sizeof(obstacle_health), "%s",
+                 (fresh && echo_valid) ? "HEALTHY" : "UNKNOWN");
+    }
+    if (obstacle_fields >= 6) {
         if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
             obstacle_status_.valid = true;
             obstacle_status_.fresh = fresh != 0;
             obstacle_status_.echo_valid = echo_valid != 0;
+            strncpy(obstacle_status_.health, obstacle_health,
+                    sizeof(obstacle_status_.health) - 1);
+            obstacle_status_.health[sizeof(obstacle_status_.health) - 1] = '\0';
             obstacle_status_.distance_cm = float_value;
             obstacle_status_.approach_rate_cm_s = obstacle_distance;
             strncpy(obstacle_status_.zone, obstacle_zone,
@@ -964,6 +988,21 @@ void RobotUart::HandleFrame(const char* frame) {
                     sizeof(obstacle_status_.front_left_zone) - 1);
             strncpy(obstacle_status_.front_right_zone, front_right_zone,
                     sizeof(obstacle_status_.front_right_zone) - 1);
+            if (front_left_health[0] != '\0') {
+                strncpy(obstacle_status_.front_left_health, front_left_health,
+                        sizeof(obstacle_status_.front_left_health) - 1);
+                obstacle_status_.front_left_health[
+                    sizeof(obstacle_status_.front_left_health) - 1] = '\0';
+            }
+            if (front_right_health[0] != '\0') {
+                strncpy(obstacle_status_.front_right_health, front_right_health,
+                        sizeof(obstacle_status_.front_right_health) - 1);
+                obstacle_status_.front_right_health[
+                    sizeof(obstacle_status_.front_right_health) - 1] = '\0';
+            }
+            obstacle_status_.front_left_age_ms = static_cast<uint32_t>(front_left_age);
+            obstacle_status_.front_right_age_ms = static_cast<uint32_t>(front_right_age);
+            obstacle_status_.encoder_reset_generation = static_cast<uint32_t>(reset_generation);
             strncpy(obstacle_status_.suggested_avoidance, suggested,
                     sizeof(obstacle_status_.suggested_avoidance) - 1);
             xSemaphoreGive(state_mutex_);
@@ -977,10 +1016,21 @@ void RobotUart::HandleFrame(const char* frame) {
     char odometry_heading_text[24] = {};
     char left_ticks_text[24] = {};
     char right_ticks_text[24] = {};
-    if (sscanf(frame,
-               "VALUE,ODOMETRY,DIST,%23[^,],X,%23[^,],Y,%23[^,],H,%23[^,],LT,%23[^,],RT,%23s",
-               odometry_distance_text, odometry_x_text, odometry_y_text,
-               odometry_heading_text, left_ticks_text, right_ticks_text) == 6) {
+    unsigned long odometry_reset_generation = 0;
+    int odometry_fields = sscanf(
+        frame,
+        "VALUE,ODOMETRY,DIST,%23[^,],X,%23[^,],Y,%23[^,],H,%23[^,],LT,%23[^,],RT,%23[^,],RESET_GEN,%lu",
+        odometry_distance_text, odometry_x_text, odometry_y_text,
+        odometry_heading_text, left_ticks_text, right_ticks_text,
+        &odometry_reset_generation);
+    if (odometry_fields != 7) {
+        odometry_fields = sscanf(
+            frame,
+            "VALUE,ODOMETRY,DIST,%23[^,],X,%23[^,],Y,%23[^,],H,%23[^,],LT,%23[^,],RT,%23s",
+            odometry_distance_text, odometry_x_text, odometry_y_text,
+            odometry_heading_text, left_ticks_text, right_ticks_text);
+    }
+    if (odometry_fields >= 6) {
         if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
             odometry_.valid = true;
             odometry_.distance_mm = strtof(odometry_distance_text, nullptr);
@@ -989,6 +1039,7 @@ void RobotUart::HandleFrame(const char* frame) {
             odometry_.heading_rad = strtof(odometry_heading_text, nullptr);
             odometry_.left_ticks = strtoll(left_ticks_text, nullptr, 10);
             odometry_.right_ticks = strtoll(right_ticks_text, nullptr, 10);
+            odometry_.reset_generation = static_cast<uint32_t>(odometry_reset_generation);
             xSemaphoreGive(state_mutex_);
         }
         xEventGroupSetBits(response_events_, kResponseOdometry);

@@ -10,6 +10,7 @@ struct RobotTelemetry {
   int16_t rightCommand = 0;
   int16_t speedSetting = 0;
   uint8_t robotState = 0;
+  uint8_t motionOwner = 0;
   uint8_t ps2Status = 0;
   bool ps2Connected = false;
   bool ps2Fresh = false;
@@ -66,6 +67,7 @@ struct RobotTelemetry {
   float obstacleDistanceCm = 0.0f;
   float obstacleApproachRateCmS = 0.0f;
   uint8_t obstacleZone = 0;
+  uint8_t obstacleHealth = 0;
   uint32_t obstacleZoneSequence = 0;
   bool obstacleBlocked = false;
   bool obstacleLimited = false;
@@ -75,9 +77,14 @@ struct RobotTelemetry {
   float frontRightRateCmS = 0.0f;
   uint8_t frontLeftZone = 0;
   uint8_t frontRightZone = 0;
+  uint8_t frontLeftHealth = 0;
+  uint8_t frontRightHealth = 0;
+  uint32_t frontLeftAgeMs = 0;
+  uint32_t frontRightAgeMs = 0;
   uint8_t obstacleSuggestion = 3;
   uint32_t frontLeftFailureCount = 0;
   uint32_t frontRightFailureCount = 0;
+  uint32_t encoderResetGeneration = 0;
 };
 
 enum class RobotLinkMotion : uint8_t {

@@ -1,5 +1,6 @@
 **/.pio/
 **/build/
+/.build-esp32*/
 **/__pycache__/
 *.pyc
 .vscode/.browse_c_cpp.db*

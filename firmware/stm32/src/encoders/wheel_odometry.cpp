@@ -169,9 +169,11 @@ void WheelOdometry::reset() {
   leftCommandStartMs_ = rightCommandStartMs_ = 0;
   leftLastMotionMs_ = rightLastMotionMs_ = lastUpdateMs_;
   if (initialized_) health_ = EncoderHealth::OK;
+  ++resetGeneration_;
+  lastResetReason_ = EncoderResetReason::BOOT;
 }
 
-void WheelOdometry::resetWheelCounts() {
+void WheelOdometry::resetWheelCounts(EncoderResetReason reason) {
   if (!initialized_) return;
 
   // Rebase the hardware counters and software totals together. Navigation
@@ -193,6 +195,18 @@ void WheelOdometry::resetWheelCounts() {
   leftCommandStartMs_ = rightCommandStartMs_ = 0;
   leftLastMotionMs_ = rightLastMotionMs_ = nowMs;
   health_ = EncoderHealth::OK;
+  ++resetGeneration_;
+  lastResetReason_ = reason;
+}
+
+const char* WheelOdometry::resetReasonText(EncoderResetReason reason) {
+  switch (reason) {
+    case EncoderResetReason::BOOT: return "BOOT";
+    case EncoderResetReason::PS2_R2: return "PS2_R2";
+    case EncoderResetReason::ROBOTLINK: return "ROBOTLINK";
+    case EncoderResetReason::UNKNOWN: return "UNKNOWN";
+  }
+  return "UNKNOWN";
 }
 
 const char* WheelOdometry::healthText() const {

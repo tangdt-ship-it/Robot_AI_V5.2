@@ -33,8 +33,13 @@ void ObstacleAssist::OnStopped(void* context, const RobotObstacleStatus& event,
     if (self == nullptr || !was_motion_active || self->camera_ == nullptr ||
         strcmp(event.zone, "CLEAR") == 0) return;
     const uint32_t now = NowMs();
-    if (self->active_.exchange(true) ||
-        (strcmp(self->last_zone_, event.zone) == 0 && now - self->last_event_ms_ < 10000)) return;
+    // Check cooldown before acquiring active_.  The previous exchange-first
+    // order left active_ latched forever when a repeated-zone event arrived
+    // inside the cooldown window.
+    if (strcmp(self->last_zone_, event.zone) == 0 &&
+        now - self->last_event_ms_ < 10000U) return;
+    bool expected = false;
+    if (!self->active_.compare_exchange_strong(expected, true)) return;
     self->last_event_ms_ = now;
     snprintf(self->last_zone_, sizeof(self->last_zone_), "%s", event.zone);
     ESP_LOGI(kTag, "OBSTACLE_EVENT=STOPPED,ZONE=%s", event.zone);
@@ -108,6 +113,10 @@ bool ObstacleAssist::Parse(const std::string& text, Result& result) {
 }
 
 void ObstacleAssist::Run(RobotObstacleStatus event) {
+    struct ActiveGuard {
+        std::atomic_bool* active;
+        ~ActiveGuard() { if (active != nullptr) active->store(false); }
+    } active_guard{&active_};
     ESP_LOGI(kTag, "EVENT=DETECTED");
     RobotState state;
     const bool stopped = uart_ != nullptr && uart_->GetState(state, 700) && !state.moving && state.left == 0 && state.right == 0;
@@ -120,7 +129,11 @@ void ObstacleAssist::Run(RobotObstacleStatus event) {
     Application::GetInstance().Schedule([] { Board::GetInstance().GetDisplay()->ShowNotification("OBSTACLE DETECTED"); });
     Mem("BEFORE");
     bool acquired = camera_->TryAcquireVision(50);
-    if (!acquired) { ESP_LOGI(kTag, "STATE=WAIT_CAMERA"); acquired = camera_->TryAcquireVision(30000); }
+    if (!acquired) {
+        // Vision is advisory.  Never hold the worker for a long acquisition
+        // wait, and never let it delay the independent STM32 STOP path.
+        ESP_LOGI(kTag, "STATE=WAIT_CAMERA,NON_BLOCKING=1");
+    }
     if (!acquired) { ESP_LOGE(kTag, "FAIL_STAGE=CAMERA_BUSY FINAL=WAIT"); return; }
     struct Release { Camera* c; ~Release() { c->ReleaseVision(); } } release{camera_};
     Result result;

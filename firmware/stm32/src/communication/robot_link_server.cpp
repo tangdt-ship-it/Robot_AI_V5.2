@@ -11,6 +11,13 @@ const char* ObstacleZoneName(uint8_t zone) {
   return zone < 5U ? names[zone] : names[0];
 }
 
+const char* SensorHealthName(uint8_t health) {
+  static const char* const names[] = {"UNKNOWN", "HEALTHY", "STALE",
+                                      "TIMEOUT", "INVALID",
+                                      "DISCONNECTED_OR_FAULT", "DEGRADED"};
+  return health < 7U ? names[health] : names[0];
+}
+
 const char* EncoderHealthName(uint8_t health) {
   static const char* const names[] = {
       "DISABLED", "OK", "INIT_FAILED", "LEFT_STALL", "RIGHT_STALL",
@@ -362,6 +369,8 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     serial_.print(static_cast<long>(telemetry.leftEncoderTicks));
     serial_.print(",RT,");
     serial_.print(static_cast<long>(telemetry.rightEncoderTicks));
+    serial_.print(",RESET_GEN,");
+    serial_.print(telemetry.encoderResetGeneration);
     serial_.print(">\r\n");
     return;
   }
@@ -430,6 +439,8 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     serial_.print(telemetry.ultrasonicFresh ? 1 : 0);
     serial_.print(",ECHO,");
     serial_.print(telemetry.ultrasonicEchoValid ? 1 : 0);
+    serial_.print(",HEALTH,");
+    serial_.print(SensorHealthName(telemetry.obstacleHealth));
     serial_.print(",DIST,");
     serial_.print(telemetry.obstacleDistanceCm, 1);
     serial_.print(",RATE,");
@@ -446,6 +457,14 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     serial_.print(ObstacleZoneName(telemetry.frontLeftZone));
     serial_.print(",RZ,");
     serial_.print(ObstacleZoneName(telemetry.frontRightZone));
+    serial_.print(",LH,");
+    serial_.print(SensorHealthName(telemetry.frontLeftHealth));
+    serial_.print(",RH,");
+    serial_.print(SensorHealthName(telemetry.frontRightHealth));
+    serial_.print(",LAGE,");
+    serial_.print(telemetry.frontLeftAgeMs);
+    serial_.print(",RAGE,");
+    serial_.print(telemetry.frontRightAgeMs);
     serial_.print(",NEAREST,");
     serial_.print(telemetry.obstacleDistanceCm, 1);
     serial_.print(",SUG,");
@@ -455,6 +474,8 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     serial_.print(telemetry.frontLeftFailureCount);
     serial_.print(",RF,");
     serial_.print(telemetry.frontRightFailureCount);
+    serial_.print(",RESET_GEN,");
+    serial_.print(telemetry.encoderResetGeneration);
     serial_.print(">\r\n");
     return;
   }

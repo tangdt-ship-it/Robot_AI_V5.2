@@ -317,3 +317,17 @@ V5.0 may be tagged production only when:
 - documentation matches the actual firmware behavior.
 
 Until then, the branch remains `5.0.0-alpha.x` and Full Replay/automatic detour remain locked.
+
+## 10. Alpha implementation record
+
+Implemented in the current alpha branch and host-tested:
+
+- independent STM32 fail-closed ultrasonic health classification (`UNKNOWN`, `HEALTHY`, `STALE`, `TIMEOUT`, `INVALID`, `DISCONNECTED_OR_FAULT`, `DEGRADED`);
+- idempotent STM32 STOP path, motion-owner gate and RobotLink health/age telemetry;
+- encoder reset generation/reason logging and replay resume rejection at an unresolved reset boundary;
+- obstacle AI cooldown acquired after cooldown validation with cleanup on every worker exit;
+- explicit `SHORT_SAFETY_TEST`/`FULL_PRODUCTION` replay mode, with production mode disabled by default;
+- explicit `CONFIG_AUTOMATIC_DETOUR=n` commissioning gate; autonomous navigation stops at an obstacle while it is disabled;
+- deterministic host regression suite in `tools/v5_host_selftest.py`.
+
+Still requiring hardware/HIL validation: STOP latency, physical left/right mapping, encoder/heading calibration, Full Replay commissioning, automatic detour/rejoin, camera marker decoding and both clean firmware builds. These are not reported as PASS by the alpha branch.

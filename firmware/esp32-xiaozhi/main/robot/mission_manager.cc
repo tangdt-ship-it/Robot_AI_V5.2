@@ -14,10 +14,14 @@
 
 #include "cJSON.h"
 
-// Autonomous obstacle avoidance is the production default. HC-SR04 emergency
-// braking and the STM32 command-link fail-safe remain active independently.
+// STM32 emergency braking and command-link fail-safe remain active
+// independently. ESP32 automatic detour is a commissioning flag and defaults
+// off so an autonomous mission stops at an obstacle until HIL validation.
 #ifndef CONFIG_OBSTACLE_SHADOW_MODE
 #define CONFIG_OBSTACLE_SHADOW_MODE 0
+#endif
+#ifndef CONFIG_AUTOMATIC_DETOUR
+#define CONFIG_AUTOMATIC_DETOUR 0
 #endif
 
 namespace {
@@ -1461,6 +1465,12 @@ bool MissionManager::ScanDirection(float heading_deg, MissionState state,
 }
 
 bool MissionManager::AvoidObstacle() {
+    if (CONFIG_AUTOMATIC_DETOUR == 0) {
+        ESP_LOGW(kTag,
+                 "AUTO_DETOUR_DISABLED obstacle remains latched; stopping");
+        SetFailure("automatic_detour_disabled");
+        return false;
+    }
     if (ai_obstacle_hold_.load()) return false;
     float base_heading = 0.0f;
     {

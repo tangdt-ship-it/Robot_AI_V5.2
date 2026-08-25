@@ -149,6 +149,7 @@ private:
     float resume_hold_x_mm_ = 0.0f;
     float resume_hold_y_mm_ = 0.0f;
     float resume_hold_heading_rad_ = 0.0f;
+    uint32_t resume_reset_generation_ = 0;
 
     esp_timer_handle_t auto_timer_ = nullptr;
     std::atomic_bool auto_timer_enabled_{false};

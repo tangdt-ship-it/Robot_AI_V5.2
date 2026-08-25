@@ -3,11 +3,23 @@
 #include <Arduino.h>
 enum class ObstacleZone : uint8_t { UNKNOWN, CLEAR, CAUTION, BLOCKED, EMERGENCY };
 enum class AvoidanceDirection : uint8_t { NONE, LEFT, RIGHT, STOP };
+// Health is deliberately separate from ObstacleZone.  A timeout is not an
+// empty corridor: it is an absence of evidence and must fail closed.
+enum class SensorHealth : uint8_t {
+  UNKNOWN,
+  HEALTHY,
+  STALE,
+  TIMEOUT,
+  INVALID,
+  DISCONNECTED_OR_FAULT,
+  DEGRADED,
+};
 struct UltrasonicReading {
   float distanceCm=0, rawDistanceCm=0, rateCmS=0;
   bool valid=false, fresh=false, echoValid=false;
   uint32_t lastUpdateMs=0, ageMs=0, failureCount=0;
   ObstacleZone zone=ObstacleZone::UNKNOWN;
+  SensorHealth health=SensorHealth::UNKNOWN;
 };
 class UltrasonicSensor {
  public:
@@ -15,6 +27,8 @@ class UltrasonicSensor {
   bool hasMeasurement() const { return measurementSequence_ != 0U; }
   bool echoValid() const { return overallEchoValid_; }
   bool isFresh() const { return overallFresh_; }
+  bool healthy() const { return overallHealth_ == SensorHealth::HEALTHY; }
+  SensorHealth health() const { return overallHealth_; }
   float distanceCm() const { return nearestDistanceCm_; }
   float rawDistanceCm() const { return nearestRawDistanceCm_; }
   float approachRateCmS() const { return nearestRateCmS_; }
@@ -32,6 +46,7 @@ class UltrasonicSensor {
   AvoidanceDirection suggestedAvoidance() const { return suggestion_; }
   static const char* avoidanceText(AvoidanceDirection direction);
   static const char* zoneText(ObstacleZone zone);
+  static const char* healthText(SensorHealth health);
   float stoppingDistanceCm(int16_t forwardCommand) const;
   int16_t limitForwardCommand(int16_t forwardCommand) const;
  private:
@@ -44,6 +59,8 @@ class UltrasonicSensor {
     float history[5]={}; uint8_t historyCount=0, historyIndex=0;
     float rawDistanceCm=0, filteredDistanceCm=0, approachRateCmS=0;
     bool filterReady=false, echoValid=false; ObstacleZone zone=ObstacleZone::UNKNOWN;
+    SensorHealth health=SensorHealth::UNKNOWN;
+    uint32_t lastValidEchoMs=0, consecutiveTimeouts=0, invalidCount=0;
     uint8_t closerConfirmations=0, fartherConfirmations=0;
   } channels_[2];
   static UltrasonicSensor* instance_;
@@ -53,7 +70,8 @@ class UltrasonicSensor {
   float medianHistory(const Channel& channel) const; bool channelFresh(const Channel& channel,uint32_t nowMs) const;
   void recomputeObstacleModel(uint32_t nowMs);
   UltrasonicReading frontLeft_,frontRight_; float nearestDistanceCm_=0,nearestRawDistanceCm_=0,nearestRateCmS_=0;
-  bool overallEchoValid_=false,overallFresh_=false; ObstacleZone overallZone_=ObstacleZone::UNKNOWN;
+  bool overallEchoValid_=false,overallFresh_=false; SensorHealth overallHealth_=SensorHealth::UNKNOWN;
+  ObstacleZone overallZone_=ObstacleZone::UNKNOWN;
   AvoidanceDirection suggestion_=AvoidanceDirection::STOP; uint8_t activeChannel_=0xFF,nextChannel_=0;
   uint32_t nextTriggerAllowedMs_=0,measurementSequence_=0,zoneSequence_=0;
 };

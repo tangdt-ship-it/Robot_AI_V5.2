@@ -25,6 +25,7 @@ enum class RobotState : uint8_t {
 };
 
 enum class AiMotionMode : uint8_t { NONE, PULSE, CONTINUOUS, TURN, DISTANCE };
+enum class MotionOwner : uint8_t { NONE, MCP, MISSION, REPLAY, DIAGNOSTIC, PS2 };
 
 enum class AiTurnResultCode : uint8_t {
   NONE, DONE, TIMEOUT, COMPASS_LOST, MOTION_FAULT, OBSTACLE
@@ -93,6 +94,8 @@ class RobotController {
   int16_t aiTurnSpeed() const { return aiTurnCommandSpeed_; }
   bool obstacleLimited() const { return obstacleLimited_; }
   bool encoderFault() const { return odometry_.stallFault(); }
+  MotionOwner motionOwner() const { return motionOwner_; }
+  static const char* motionOwnerText(MotionOwner owner);
 
  private:
   void setMotionCommand(int16_t left, int16_t right, RobotState state,
@@ -178,6 +181,7 @@ class RobotController {
   bool aiDistanceForward_ = true;
   bool aiDistanceResultPending_ = false;
   AiDistanceResult aiDistanceResult_;
+  MotionOwner motionOwner_ = MotionOwner::NONE;
 };
 
 #endif

@@ -25,6 +25,17 @@ Tài liệu phạm vi, kiến trúc, giai đoạn phát triển và cổng kiể
 
 Full Replay production và automatic detour bị khóa mặc định cho đến khi các cổng an toàn tương ứng đạt trên robot thật.
 
+## Feature flags alpha
+
+Automatic detour is explicitly disabled by default. Autonomous navigation
+stops at an obstacle and reports `automatic_detour_disabled` until physical
+commissioning enables `CONFIG_AUTOMATIC_DETOUR=y`.
+
+- `MANUAL_PS2`, Teach Route, Replay dry-run và `SHORT_SAFETY_TEST`: enabled.
+- `ROBOT_V5_FULL_REPLAY_PRODUCTION`: `0` mặc định; chỉ bật sau HIL commissioning.
+- Automatic detour, automatic reverse và automatic resume sau AI: disabled.
+- Physical left/right sensor wiring vẫn cần xác minh; phần mềm dùng một mapping robot-frame canonical và fail-closed khi health chưa xác nhận.
+
 ## Kiến trúc giữ nguyên
 
 ```text
@@ -86,6 +97,8 @@ Target: ESP32-S3, board `bread-compact-wifi-s3cam`, locale `vi-VN`, flash 16 MB.
 python tools\v4_protocol_selftest.py
 python tools\v4_2_localization_selftest.py
 python tools\v4_2_static_audit.py
+python tools\v5_host_selftest.py
+python tools\v5_static_audit.py
 ```
 
 `v5_static_audit.py` kiểm tra phiên bản alpha V5.0 và toàn bộ guardrail kiến trúc kế thừa. Các audit V4.x được giữ lại để kiểm tra checkpoint cũ; lỗi phiên bản của audit V4.x không được coi là lỗi thuật toán robot trên nhánh V5.0.
