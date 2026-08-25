@@ -1,27 +1,37 @@
-# Robot_AI_V4.2
+# Robot_AI_V5.0
 
-Robot_AI_V4.2 là bản nâng cấp ổn định hóa chuyển động/định vị cho robot vi sai hai bánh dùng **STM32F103VET6 + ESP32-S3 N16R8/CAM + Xiaozhi**.
+Robot_AI_V5.0 là nhánh phát triển kế thừa firmware Robot_AI_V4.2/V4.3 cho robot vi sai hai bánh dùng STM32F103VET6 và ESP32-S3 N16R8/CAM.
 
-## Điểm mới chính so với V4.1
+## Trạng thái
 
-- tích hợp **MPU6050** vào STM32 qua Soft-I2C riêng `PC8=SCL`, `PB5=SDA`, địa chỉ `0x68`;
-- hỗ trợ đúng cách lắp IMU **mặt linh kiện úp xuống, connector về sau, 2 lỗ bắt vít về trước**;
-- tự hiệu chuẩn gyro khi boot, có `stm32_imu_probe`;
-- heading fusion: **Encoder + Gyro Z + Compass**, có degraded mode;
-- odometry STM32 dùng fused heading để tích phân `X/Y/theta`;
-- ESP32 MissionManager bỏ ước lượng vị trí bằng thời gian, dùng `GET,ODOMETRY` thực từ STM32;
-- breadcrumb + HOME + mission **RETURN_HOME**;
-- thêm MCP: `get_odometry`, `get_imu_status`, `get_fusion_status`, `set_home`, `get_home`, `return_home`;
-- RobotLink V3 giữ CRC/sequence cho command và bổ sung query `GET,IMU`, `GET,FUSION`;
-- giữ nguyên nguyên tắc: **STM32 là motor/safety authority**, PS2 và HC-SR04 có quyền cao hơn AI.
+- Phiên bản: `5.0.0-alpha.0`
+- Nhánh: `develop/robot-ai-v5.0`
+- Điểm kế thừa: `ea85c29904984c822dab0b53e152ab7e88ed0b81`
+- Trạng thái phát hành: DEVELOPMENT / NOT PRODUCTION
 
-## Kiến trúc
+V5.0 giữ nguyên phần cứng, pinout và các chức năng V4.x đã được commissioning. Nhánh này sẽ sửa các đường điều khiển chưa đủ an toàn trước khi mở Full Replay và tự né vật cản.
+
+Tài liệu phạm vi, kiến trúc, giai đoạn phát triển và cổng kiểm thử: [docs/ROBOT_AI_V5_0_PROJECT.md](docs/ROBOT_AI_V5_0_PROJECT.md).
+
+## Thứ tự phát triển bắt buộc
+
+1. STOP độc lập và sensor health.
+2. AI cooldown và vòng đời obstacle event.
+3. HOLD/RESUME theo quãng đường tích lũy.
+4. Xác minh robot-left/robot-right bằng thử nghiệm vật lý.
+5. Full Replay toàn tuyến.
+6. Tự né có giới hạn và quay lại tuyến.
+7. Tối ưu chuyển động, nhiều route, mission giọng nói, preflight và black-box log.
+
+Full Replay production và automatic detour bị khóa mặc định cho đến khi các cổng an toàn tương ứng đạt trên robot thật.
+
+## Kiến trúc giữ nguyên
 
 ```text
-Xiaozhi / Voice / Camera / MissionManager / Return Home
+Xiaozhi / Voice / Camera / Mission / Teach / Replay
                          ESP32-S3
                             |
-                   RobotLink V3 UART 115200
+                   RobotLink UART 115200
                             |
                             v
                        STM32F103VE
@@ -31,16 +41,18 @@ Xiaozhi / Voice / Camera / MissionManager / Return Home
         |                   |                   |
         +-----------> Heading Fusion <-----------+
                             |
-                       Fused heading
+                 Odometry + Motion Control
                             |
-                 Odometry X/Y/theta + Motion
-                            |
-                    Safety / PS2 / SR04
+             Safety / PS2 / Front HC-SR04
                             |
                           Motors
 ```
 
+STM32 luôn là motor/safety authority. Camera, cloud và AI chỉ được đề xuất hành vi; chúng không được vượt qua sensor veto hoặc STOP.
+
 ## Build STM32
+
+Tên PlatformIO environment được giữ nguyên để không làm hỏng quy trình V4.x:
 
 ```powershell
 cd firmware\stm32
@@ -48,7 +60,7 @@ pio run -e stm32_robot_v4_2
 pio run -e stm32_robot_v4_2 -t upload
 ```
 
-Kiểm tra MPU6050 riêng trước khi production:
+Kiểm tra MPU6050:
 
 ```powershell
 pio run -e stm32_imu_probe
@@ -59,8 +71,6 @@ Debug UART3: `PB10 TX`, baud `115200`.
 
 ## Build ESP32-S3
 
-Mở ESP-IDF terminal:
-
 ```powershell
 cd firmware\esp32-xiaozhi
 idf.py fullclean
@@ -68,9 +78,9 @@ idf.py build
 idf.py -p COMx flash monitor
 ```
 
-Target cố định: ESP32-S3, board `bread-compact-wifi-s3cam`, `vi-VN`, partition 16 MB.
+Target: ESP32-S3, board `bread-compact-wifi-s3cam`, locale `vi-VN`, flash 16 MB.
 
-## Host self-test
+## Kiểm thử host kế thừa
 
 ```powershell
 python tools\v4_protocol_selftest.py
@@ -78,6 +88,13 @@ python tools\v4_2_localization_selftest.py
 python tools\v4_2_static_audit.py
 ```
 
-## Quan trọng trước khi chạy Return Home
+Các static audit V4.x hiện còn chứa điều kiện phiên bản cố định. Chúng phải được chuyển thành audit nhận biết phiên bản ở Stage 0; không được coi lỗi tên phiên bản là lỗi thuật toán robot.
 
-Return Home của V4.2 là **odometry/breadcrumb**, chưa phải SLAM. Phải hiệu chuẩn encoder và kiểm tra heading fusion trước. Sai số bánh xe/trượt nền vẫn tích lũy theo quãng đường. Xem `docs/V4_2_VALIDATION_CHECKLIST.md`.
+## Cảnh báo vận hành
+
+- Đây chưa phải firmware V5.0 production.
+- Không bật Full Replay bằng cách chỉ đổi cờ giới hạn 150 mm.
+- Không bật AI auto-drive hoặc auto-resume trước khi Stage 1–6 đạt.
+- Voice STOP không thay thế nút STOP/PS2 vật lý.
+- Hai cảm biến trước không bảo vệ phía sau, hai bên hoặc cạnh vực.
+- HOME và Replay vẫn dựa trên odometry/heading fusion, chưa phải SLAM định vị tuyệt đối.
