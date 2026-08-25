@@ -251,6 +251,104 @@ class ReplayModel:
             self.owner = "NONE"
 
 
+class CorrelatedMotion:
+    """Wire-level SID/OP contract: equality only, never ordering."""
+
+    def __init__(self) -> None:
+        self.session = 0
+        self.next_operation = 1
+        self.waiting: tuple[int, int] | None = None
+        self.ack = False
+        self.terminal = False
+
+    def negotiate(self) -> int:
+        self.waiting = None
+        self.ack = self.terminal = False
+        self.session += 1
+        if self.session == 0:
+            self.session = 1
+        return self.session
+
+    def begin(self) -> tuple[int, int] | None:
+        if self.session == 0 or self.waiting is not None:
+            return None
+        operation = self.next_operation
+        self.next_operation += 1
+        if operation == 0:
+            operation = self.next_operation
+            self.next_operation += 1
+        self.waiting = (self.session, operation)
+        self.ack = self.terminal = False
+        return self.waiting
+
+    def receive_ack(self, sid: int | None, op: int | None) -> bool:
+        if (sid, op) != self.waiting or sid in {None, 0} or op in {None, 0}:
+            return False
+        self.ack = True
+        return True
+
+    def receive_terminal(self, sid: int | None, op: int | None) -> bool:
+        if (sid, op) != self.waiting or sid in {None, 0} or op in {None, 0}:
+            return False
+        if self.terminal:
+            return False
+        self.terminal = True
+        return True
+
+    def link_loss(self) -> None:
+        self.waiting = None
+        self.ack = self.terminal = False
+
+
+class BlackBox:
+    def __init__(self, capacity: int = 4) -> None:
+        self.capacity = capacity
+        self.events: list[tuple[int, str]] = []
+        self.sequence = 0
+
+    def record(self, name: str) -> None:
+        self.sequence += 1
+        self.events.append((self.sequence, name))
+        if len(self.events) > self.capacity:
+            self.events.pop(0)
+
+
+class Diagnostic(Enum):
+    OK = auto()
+    NO_PROGRESS = auto()
+    JUMP = auto()
+    MISMATCH = auto()
+    ODOM_UNRELIABLE = auto()
+    HEADING_UNRELIABLE = auto()
+    RESET_BOUNDARY = auto()
+    UNCALIBRATED = auto()
+    UNAVAILABLE = auto()
+
+
+def diagnose(*, available: bool = True, encoder: bool = True,
+             odometry: bool = True, heading: bool = True, reset: bool = False,
+             expects_progress: bool = False, encoder_delta: float = 1,
+             odometry_delta: float = 1, calibrated: bool = False,
+             max_jump: float = 0, max_mismatch: float = 0) -> Diagnostic:
+    if not available:
+        return Diagnostic.UNAVAILABLE
+    if reset:
+        return Diagnostic.RESET_BOUNDARY
+    if not encoder or not odometry:
+        return Diagnostic.ODOM_UNRELIABLE
+    if not heading:
+        return Diagnostic.HEADING_UNRELIABLE
+    if expects_progress and abs(encoder_delta) < 0.01:
+        return Diagnostic.NO_PROGRESS
+    if not calibrated or max_jump <= 0 or max_mismatch <= 0:
+        return Diagnostic.UNCALIBRATED
+    if abs(encoder_delta) > max_jump:
+        return Diagnostic.JUMP
+    if abs(encoder_delta - odometry_delta) > max_mismatch:
+        return Diagnostic.MISMATCH
+    return Diagnostic.OK
+
+
 class V5SafetySelfTest(unittest.TestCase):
     def test_sensor_timeout_is_not_clear_and_stops_forward_motion(self) -> None:
         left, right = Sensor(), Sensor()
@@ -413,6 +511,95 @@ class V5SafetySelfTest(unittest.TestCase):
         self.assertEqual(gates["camera"], Gate.WARN)
         self.assertTrue(all(gate is Gate.PASS for name, gate in gates.items()
                             if name != "camera"))
+
+    def test_correlation_requires_negotiated_nonzero_session(self) -> None:
+        motion = CorrelatedMotion()
+        self.assertIsNone(motion.begin())
+        self.assertEqual(motion.negotiate(), 1)
+        self.assertEqual(motion.begin(), (1, 1))
+
+    def test_legacy_ack_is_rejected_in_strict_motion(self) -> None:
+        motion = CorrelatedMotion()
+        motion.negotiate(); motion.begin()
+        self.assertFalse(motion.receive_ack(None, None))
+        self.assertFalse(motion.ack)
+
+    def test_zero_id_ack_is_rejected(self) -> None:
+        motion = CorrelatedMotion()
+        motion.negotiate(); motion.begin()
+        self.assertFalse(motion.receive_ack(0, 1))
+        self.assertFalse(motion.receive_ack(1, 0))
+
+    def test_ack_requires_exact_session_and_operation_equality(self) -> None:
+        motion = CorrelatedMotion()
+        motion.negotiate(); motion.begin()
+        self.assertFalse(motion.receive_ack(2, 1))
+        self.assertFalse(motion.receive_ack(1, 2))
+        self.assertTrue(motion.receive_ack(1, 1))
+
+    def test_stale_terminal_cannot_finish_current_operation(self) -> None:
+        motion = CorrelatedMotion()
+        motion.negotiate(); first = motion.begin()
+        self.assertTrue(motion.receive_terminal(*(first or (0, 0))))
+        motion.link_loss(); motion.negotiate(); current = motion.begin()
+        self.assertFalse(motion.receive_terminal(*(first or (0, 0))))
+        self.assertTrue(motion.receive_terminal(*(current or (0, 0))))
+
+    def test_duplicate_ack_is_idempotent(self) -> None:
+        motion = CorrelatedMotion()
+        motion.negotiate(); expected = motion.begin()
+        self.assertTrue(motion.receive_ack(*(expected or (0, 0))))
+        self.assertTrue(motion.receive_ack(*(expected or (0, 0))))
+        self.assertTrue(motion.ack)
+
+    def test_duplicate_terminal_is_idempotent(self) -> None:
+        motion = CorrelatedMotion()
+        motion.negotiate(); expected = motion.begin()
+        self.assertTrue(motion.receive_terminal(*(expected or (0, 0))))
+        self.assertFalse(motion.receive_terminal(*(expected or (0, 0))))
+
+    def test_session_change_invalidates_pending_without_auto_resume(self) -> None:
+        motion = CorrelatedMotion()
+        motion.negotiate(); motion.begin(); motion.link_loss()
+        self.assertIsNone(motion.waiting)
+        self.assertFalse(motion.ack)
+        self.assertFalse(motion.terminal)
+
+    def test_blackbox_is_bounded_and_keeps_latest_events(self) -> None:
+        box = BlackBox(3)
+        for event in ("PREFLIGHT", "ACK", "RESULT", "STOP"):
+            box.record(event)
+        self.assertEqual(box.events, [(2, "ACK"), (3, "RESULT"), (4, "STOP")])
+
+    def test_blackbox_sequence_is_monotonic_without_dynamic_growth_contract(self) -> None:
+        box = BlackBox(2)
+        box.record("LEASE"); box.record("RELEASE")
+        self.assertEqual([item[0] for item in box.events], [1, 2])
+
+    def test_diagnostic_unavailable_and_reset_are_telemetry_only_classes(self) -> None:
+        self.assertEqual(diagnose(available=False), Diagnostic.UNAVAILABLE)
+        self.assertEqual(diagnose(reset=True), Diagnostic.RESET_BOUNDARY)
+
+    def test_diagnostic_no_progress_precedes_uncalibrated_thresholds(self) -> None:
+        self.assertEqual(diagnose(expects_progress=True, encoder_delta=0),
+                         Diagnostic.NO_PROGRESS)
+
+    def test_diagnostic_requires_calibration_for_jump_and_mismatch_claims(self) -> None:
+        self.assertEqual(diagnose(encoder_delta=200), Diagnostic.UNCALIBRATED)
+
+    def test_diagnostic_detects_jump_when_calibrated(self) -> None:
+        self.assertEqual(diagnose(calibrated=True, encoder_delta=101,
+                                 max_jump=100, max_mismatch=20), Diagnostic.JUMP)
+
+    def test_diagnostic_detects_encoder_odometry_mismatch_when_calibrated(self) -> None:
+        self.assertEqual(diagnose(calibrated=True, encoder_delta=40,
+                                 odometry_delta=1, max_jump=100,
+                                 max_mismatch=20), Diagnostic.MISMATCH)
+
+    def test_diagnostic_ok_only_with_available_reliable_calibrated_data(self) -> None:
+        self.assertEqual(diagnose(calibrated=True, encoder_delta=10,
+                                 odometry_delta=12, max_jump=100,
+                                 max_mismatch=20), Diagnostic.OK)
 
 
 if __name__ == "__main__":

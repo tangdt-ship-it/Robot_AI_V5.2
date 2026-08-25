@@ -116,6 +116,28 @@ require('default_envs = stm32_robot_v4_2' in ini and
         "V4.2 STM32 production/IMU probe environments missing")
 require('HELLO,PROTO,3' in ruart and 'Crc16Ccitt' in ruart,
         "RobotLink V3 CRC/handshake missing")
+blackbox_h = text("firmware/esp32-xiaozhi/main/robot/safety_blackbox.h")
+blackbox = text("firmware/esp32-xiaozhi/main/robot/safety_blackbox.cc")
+require("SID,%lu,OP,%lu" in ruart and "BeginMotionCorrelation" in ruart and
+        "MatchMotionCorrelation" in ruart and "ACK_STALE" in ruart,
+        "ESP32 strict SID/OP correlation is missing")
+require("sessionId" in server and "operationId" in server and
+        "PrintCorrelation" in server and "PROGRESS,MOVE" in server,
+        "STM32 SID/OP echo for ACK/progress/terminal is missing")
+require("activeMotionSessionId_" in text("firmware/stm32/include/communication/robot_link_server.h"),
+        "STM32 active operation correlation storage missing")
+require("kCapacity = 48" in blackbox_h and "std::array" in blackbox_h and
+        "CopyRecent" in blackbox_h and "portENTER_CRITICAL" in blackbox,
+        "bounded RAM-only safety black-box missing")
+require("MotionDiagnostic" in blackbox_h and "UNCALIBRATED" in blackbox and
+        "ClassifyMotionDiagnostic" in blackbox,
+        "telemetry-only motion diagnostic classifier missing")
+require('"robot/safety_blackbox.cc"' in cmake,
+        "ESP32 safety black-box source is not built")
+require((ROOT / "docs/ROBOT_AI_V5_HIL_PLAN.md").is_file(),
+        "missing Alpha.3 HIL plan")
+require("Ran 36 tests" not in text("tools/v5_host_selftest.py"),
+        "host self-test must not hard-code a claimed test result")
 require('Robot_AI_V4.2 supports ESP32-S3 only' in cmake,
         "V4.2 ESP32 target guard missing")
 

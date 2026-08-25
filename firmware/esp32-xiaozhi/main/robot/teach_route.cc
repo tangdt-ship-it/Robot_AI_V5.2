@@ -3,6 +3,7 @@
 #include "application.h"
 #include "mission_manager.h"
 #include "robot_uart.h"
+#include "safety_blackbox.h"
 
 #include <cmath>
 #include <cstdio>
@@ -904,6 +905,9 @@ bool TeachRoute::RunReplayDryRun() {
 bool TeachRoute::CheckReplaySafety(const char* stage, RobotState& state,
                                    RobotObstacleStatus& obstacle,
                                    const char*& reason, bool require_turn) {
+    GetSafetyBlackBox().Record(SafetyEventType::PREFLIGHT_BEGIN,
+                               robot_uart_ != nullptr ? robot_uart_->MotionSessionId() : 0,
+                               0, stage);
     state = {};
     obstacle = {};
     reason = "OK";
@@ -1024,6 +1028,10 @@ bool TeachRoute::CheckReplaySafety(const char* stage, RobotState& state,
              obstacle.distance_cm,
              obstacle.zone[0] != '\0' ? obstacle.zone : "UNKNOWN",
              static_cast<unsigned long>(odometry.reset_generation));
+    GetSafetyBlackBox().Record(pass ? SafetyEventType::PREFLIGHT_PASS
+                                    : SafetyEventType::PREFLIGHT_FAIL,
+                               robot_uart_ != nullptr ? robot_uart_->MotionSessionId() : 0,
+                               0, reason, odometry.reset_generation);
     return pass;
 }
 
@@ -1576,6 +1584,8 @@ void TeachRoute::RunFullReplay() {
         replay_operation_ = 0U;
         replay_motion_running_.store(false);
         mode_ = Mode::REPLAY_HOLD;
+        GetSafetyBlackBox().Record(SafetyEventType::HOLD,
+                                   robot_uart_->MotionSessionId(), 0, reason);
         ESP_LOGW(kTag,
                  "ROUTE,FULL_REPLAY=STOP,TERMINAL=%s,WP=%u/%u,REASON=%s,CONTINUE=NO,MOTOR=0",
                  ReplayTerminalStatus(reason),
@@ -1589,7 +1599,14 @@ void TeachRoute::RunFullReplay() {
         if (ai_mode) return true;
         ai_mode = robot_uart_->SetMode(true, 700);
         if (ai_mode) {
+            GetSafetyBlackBox().Record(SafetyEventType::OWNER_ACQUIRE,
+                                       robot_uart_->MotionSessionId(), 0,
+                                       "REPLAY");
             ESP_LOGI(kTag, "ROUTE,FULL_REPLAY=SESSION,PASS=1,MODE=AI");
+        } else {
+            GetSafetyBlackBox().Record(SafetyEventType::OWNER_REJECT,
+                                       robot_uart_->MotionSessionId(), 0,
+                                       "AI_MODE");
         }
         return ai_mode;
     };
@@ -1617,6 +1634,10 @@ void TeachRoute::RunFullReplay() {
             0.0f, std::min(static_cast<float>(target_mm), result.travelled_mm)));
         const uint32_t remaining = target_mm > completed ? target_mm - completed : 0U;
         resume_valid_ = remaining > 0U;
+        GetSafetyBlackBox().Record(SafetyEventType::HOLD,
+                                   robot_uart_->MotionSessionId(),
+                                   result.operation_id, "OBSTACLE",
+                                   hold_pose.reset_generation, 0, index);
         resume_wp_index_ = static_cast<uint16_t>(index + 1U);
         resume_original_target_mm_ = target_mm;
         resume_completed_mm_ = completed;
@@ -1700,6 +1721,9 @@ void TeachRoute::RunFullReplay() {
             return;
         }
         if (current_pose.reset_generation != resume_reset_generation_) {
+            GetSafetyBlackBox().Record(SafetyEventType::RESET_BOUNDARY,
+                                       robot_uart_->MotionSessionId(), 0,
+                                       "RESUME_RESET", current_pose.reset_generation);
             ESP_LOGW(kTag,
                      "ROUTE,RESET_BOUNDARY_UNRESOLVED,HOLD_GEN=%lu,CURRENT_GEN=%lu,RESUME=0",
                      static_cast<unsigned long>(resume_reset_generation_),
@@ -1729,6 +1753,9 @@ void TeachRoute::RunFullReplay() {
             stop_hold(gate_reason);
             return;
         }
+        GetSafetyBlackBox().Record(SafetyEventType::RESUME,
+                                   robot_uart_->MotionSessionId(), 0,
+                                   "MANUAL");
         if (!ensure_ai_mode()) {
             stop_hold("AI_MODE_SESSION");
             return;

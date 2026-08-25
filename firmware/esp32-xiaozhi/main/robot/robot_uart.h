@@ -72,6 +72,8 @@ struct RobotObstacleStatus {
 
 struct RobotTurnResult {
     bool completed = false;
+    uint32_t session_id = 0;
+    uint32_t operation_id = 0;
     float heading_deg = 0.0f;
     float target_deg = 0.0f;
     float error_deg = 0.0f;
@@ -88,6 +90,8 @@ struct RobotDistanceResult {
     };
     Code code = Code::NONE;
     bool completed = false;
+    uint32_t session_id = 0;
+    uint32_t operation_id = 0;
     float target_mm = 0.0f;
     float travelled_mm = 0.0f;
 };
@@ -200,6 +204,7 @@ public:
     bool IsConnected() const;
     bool MotionLeaseActive() const { return motion_lease_active_; }
     bool SessionReady() const { return protocol_compatible_ && IsConnected(); }
+    uint32_t MotionSessionId() const { return motion_session_id_; }
 
 private:
     friend class TeachRoute;
@@ -232,6 +237,11 @@ private:
     bool SendFrame(const char* body);
     bool SendAndWait(const char* body, EventBits_t expected,
                      uint32_t timeout_ms);
+    bool BeginMotionCorrelation(uint32_t& session_id, uint32_t& operation_id);
+    void EndMotionCorrelation();
+    void InvalidateMotionCorrelation(const char* reason);
+    bool MatchMotionCorrelation(uint32_t session_id,
+                                uint32_t operation_id) const;
     static int ClampSpeed(int speed);
 
     SemaphoreHandle_t transaction_mutex_ = nullptr;
@@ -263,6 +273,13 @@ private:
     volatile bool motion_lease_active_ = false;
     volatile bool turn_waiting_ = false;
     volatile bool distance_waiting_ = false;
+    volatile bool motion_ack_waiting_ = false;
+    volatile bool motion_correlation_active_ = false;
+    volatile uint32_t motion_session_id_ = 0;
+    volatile uint32_t next_operation_id_ = 1;
+    volatile uint32_t waiting_session_id_ = 0;
+    volatile uint32_t waiting_operation_id_ = 0;
+    volatile uint32_t terminal_operation_id_ = 0;
     std::atomic_bool ps2_override_active_{false};
     ObstacleStoppedCallback obstacle_stopped_callback_ = nullptr;
     void* obstacle_stopped_context_ = nullptr;

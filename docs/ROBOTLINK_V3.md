@@ -32,3 +32,32 @@ GET,HEADING
 `GET,HEADING` trả fused heading. `GET,COMPASS_STATUS` vẫn là trạng thái riêng của Compass.
 
 Motion heartbeat: ~200 ms; motion lease timeout 700 ms; AI session timeout 30 s.
+
+## Alpha.3 motion correlation
+
+Finite `MOVE` and `TURN` requests emitted by the V5 replay path carry a
+non-zero session/operation pair:
+
+```text
+MOVE,FWD,500,20,SID,7,OP,31
+<ACK,MOVE,FWD,500,MM,20,SID,7,OP,31>
+<PROGRESS,MOVE,...,SID,7,OP,31>
+<DONE,MOVE,TARGET,500,TRAVEL,499,SID,7,OP,31>
+
+TURN,REL,LEFT,90,20,SID,7,OP,32
+<ACK,TURN,REL,LEFT,90,SID,7,OP,32>
+<PROGRESS,TURN,...,SID,7,OP,32>
+<DONE,TURN,H,...,TGT,...,ERR,...,SID,7,OP,32>
+```
+
+The ESP32 accepts an ACK, NACK, progress or terminal frame for an active
+finite operation only when both `SID` and `OP` are non-zero and exactly equal
+to the pending pair. IDs are never ordered or compared by age. Missing, zero,
+old or mismatched IDs are logged as stale and cannot complete a replay step.
+Duplicate terminal frames are idempotent.
+
+`HELLO`/`PING`, an STM32 boot indication, link loss, STOP, cancellation or a
+new session invalidates the pending pair. A new manual replay request must pass
+preflight again; there is no automatic resumption. Legacy frames remain
+parseable for compatibility, but are deliberately uncorrelated and therefore
+fail closed for strict Full Replay.

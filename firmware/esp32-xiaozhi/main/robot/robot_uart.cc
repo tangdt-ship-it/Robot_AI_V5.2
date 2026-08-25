@@ -1,5 +1,6 @@
 #include "robot_uart.h"
 #include "application.h"
+#include "safety_blackbox.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -30,6 +31,21 @@ uint16_t Crc16Ccitt(const char* data, size_t length) {
         }
     }
     return crc;
+}
+
+bool ParseCorrelation(const char* frame, uint32_t& session_id,
+                      uint32_t& operation_id) {
+    session_id = 0;
+    operation_id = 0;
+    const char* marker = frame != nullptr ? strstr(frame, ",SID,") : nullptr;
+    if (marker == nullptr) return false;
+    unsigned long sid = 0;
+    unsigned long op = 0;
+    if (sscanf(marker, ",SID,%lu,OP,%lu", &sid, &op) != 2 || sid == 0UL ||
+        op == 0UL) return false;
+    session_id = static_cast<uint32_t>(sid);
+    operation_id = static_cast<uint32_t>(op);
+    return true;
 }
 }  // namespace
 
@@ -180,6 +196,7 @@ bool RobotUart::Ping(uint32_t timeout_ms) {
 }
 
 bool RobotUart::CheckProtocol(uint32_t timeout_ms) {
+    InvalidateMotionCorrelation("NEGOTIATE");
     protocol_compatible_ = false;
     if (!SendAndWait("HELLO,PROTO,3", kResponseHello, timeout_ms)) {
         return false;
@@ -188,7 +205,57 @@ bool RobotUart::CheckProtocol(uint32_t timeout_ms) {
     // any MODE or motion command may reach the STM32.
     const bool negotiated = Ping(timeout_ms);
     protocol_compatible_ = negotiated;
+    if (negotiated) {
+        ++motion_session_id_;
+        if (motion_session_id_ == 0U) ++motion_session_id_;
+        GetSafetyBlackBox().Record(SafetyEventType::SESSION_CHANGE,
+                                   motion_session_id_, 0, "HELLO");
+    }
     return negotiated;
+}
+
+bool RobotUart::BeginMotionCorrelation(uint32_t& session_id,
+                                       uint32_t& operation_id) {
+    if (!SessionReady() || motion_session_id_ == 0U ||
+        motion_correlation_active_) {
+        return false;
+    }
+    session_id = motion_session_id_;
+    operation_id = next_operation_id_++;
+    if (operation_id == 0U) operation_id = next_operation_id_++;
+    waiting_session_id_ = session_id;
+    waiting_operation_id_ = operation_id;
+    terminal_operation_id_ = 0;
+    motion_correlation_active_ = true;
+    motion_ack_waiting_ = true;
+    GetSafetyBlackBox().Record(SafetyEventType::COMMAND_SEND, session_id,
+                               operation_id, "MOTION");
+    return true;
+}
+
+void RobotUart::EndMotionCorrelation() {
+    motion_ack_waiting_ = false;
+    motion_correlation_active_ = false;
+    waiting_session_id_ = 0;
+    waiting_operation_id_ = 0;
+    terminal_operation_id_ = 0;
+}
+
+void RobotUart::InvalidateMotionCorrelation(const char* reason) {
+    const uint32_t session_id = waiting_session_id_;
+    const uint32_t operation_id = waiting_operation_id_;
+    EndMotionCorrelation();
+    if (session_id != 0U || operation_id != 0U) {
+        GetSafetyBlackBox().Record(SafetyEventType::SESSION_CHANGE, session_id,
+                                   operation_id, reason);
+    }
+}
+
+bool RobotUart::MatchMotionCorrelation(uint32_t session_id,
+                                       uint32_t operation_id) const {
+    return motion_correlation_active_ && session_id != 0U &&
+           operation_id != 0U && session_id == waiting_session_id_ &&
+           operation_id == waiting_operation_id_;
 }
 
 bool RobotUart::SetMode(bool ai_mode, uint32_t timeout_ms) {
@@ -254,9 +321,17 @@ bool RobotUart::MoveDistance(bool forward, int distance_mm, int speed,
                              uint32_t timeout_ms) {
     result = {};
     distance_mm = std::max(1, std::min(distance_mm, 5000));
-    char command[56];
-    snprintf(command, sizeof(command), "MOVE,%s,%d,%d",
-             forward ? "FWD" : "BACK", distance_mm, ClampSpeed(speed));
+    uint32_t session_id = 0;
+    uint32_t operation_id = 0;
+    if (!BeginMotionCorrelation(session_id, operation_id)) {
+        result.code = RobotDistanceResult::Code::LINK_ERROR;
+        return false;
+    }
+    char command[96];
+    snprintf(command, sizeof(command), "MOVE,%s,%d,%d,SID,%lu,OP,%lu",
+             forward ? "FWD" : "BACK", distance_mm, ClampSpeed(speed),
+             static_cast<unsigned long>(session_id),
+             static_cast<unsigned long>(operation_id));
     xEventGroupClearBits(response_events_,
                          kResponseDistanceDone | kResponseDistanceError);
     if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
@@ -265,12 +340,16 @@ bool RobotUart::MoveDistance(bool forward, int distance_mm, int speed,
     }
     distance_waiting_ = true;
     const bool started = SendAndWait(command, kResponseAck, 700);
+    motion_ack_waiting_ = false;
     if (!started) {
         result.code = RobotDistanceResult::Code::LINK_ERROR;
         distance_waiting_ = false;
+        EndMotionCorrelation();
         return false;
     }
     motion_lease_active_ = true;
+    GetSafetyBlackBox().Record(SafetyEventType::LEASE_ACQUIRE, session_id,
+                               operation_id, "MOVE");
     const EventBits_t bits = xEventGroupWaitBits(
         response_events_, kResponseDistanceDone | kResponseDistanceError,
         pdTRUE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
@@ -293,30 +372,45 @@ bool RobotUart::MoveDistance(bool forward, int distance_mm, int speed,
                 ? RobotDistanceResult::Code::LINK_ERROR
                 : RobotDistanceResult::Code::TIMEOUT;
         }
+        EndMotionCorrelation();
         return false;
     }
-    if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+    if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) != pdTRUE) {
+        EndMotionCorrelation();
+        return false;
+    }
     result = distance_result_;
     xSemaphoreGive(state_mutex_);
-    return result.completed;
+    const bool completed = result.completed;
+    EndMotionCorrelation();
+    return completed;
 }
 
 bool RobotUart::TurnRelative(bool left, int angle_deg, int speed,
                              RobotTurnResult& result,
                              uint32_t timeout_ms) {
     angle_deg = std::max(1, std::min(angle_deg, 180));
-    char command[64];
-    snprintf(command, sizeof(command), "TURN,REL,%s,%d,%d",
-             left ? "LEFT" : "RIGHT", angle_deg, ClampSpeed(speed));
+    uint32_t session_id = 0;
+    uint32_t operation_id = 0;
+    if (!BeginMotionCorrelation(session_id, operation_id)) return false;
+    char command[96];
+    snprintf(command, sizeof(command), "TURN,REL,%s,%d,%d,SID,%lu,OP,%lu",
+             left ? "LEFT" : "RIGHT", angle_deg, ClampSpeed(speed),
+             static_cast<unsigned long>(session_id),
+             static_cast<unsigned long>(operation_id));
     xEventGroupClearBits(response_events_,
                          kResponseTurnDone | kResponseTurnError);
     turn_waiting_ = true;
     const bool started = SendAndWait(command, kResponseAck, 700);
+    motion_ack_waiting_ = false;
     if (!started) {
         turn_waiting_ = false;
+        EndMotionCorrelation();
         return false;
     }
     motion_lease_active_ = true;
+    GetSafetyBlackBox().Record(SafetyEventType::LEASE_ACQUIRE, session_id,
+                               operation_id, "TURN");
     const EventBits_t bits = xEventGroupWaitBits(
         response_events_, kResponseTurnDone | kResponseTurnError, pdTRUE,
         pdFALSE, pdMS_TO_TICKS(timeout_ms));
@@ -325,30 +419,45 @@ bool RobotUart::TurnRelative(bool left, int angle_deg, int speed,
     if ((bits & kResponseTurnDone) == 0 ||
         (bits & kResponseTurnError) != 0) {
         if (!Ps2OverrideActive()) Stop(700);
+        EndMotionCorrelation();
         return false;
     }
-    if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+    if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) != pdTRUE) {
+        EndMotionCorrelation();
+        return false;
+    }
     result = turn_result_;
     xSemaphoreGive(state_mutex_);
-    return result.completed;
+    const bool completed = result.completed;
+    EndMotionCorrelation();
+    return completed;
 }
 
 bool RobotUart::TurnAbsolute(int heading_deg, int speed,
                              RobotTurnResult& result,
                              uint32_t timeout_ms) {
     heading_deg = std::max(-180, std::min(heading_deg, 180));
-    char command[56];
-    snprintf(command, sizeof(command), "TURN,ABS,%d,%d", heading_deg,
-             ClampSpeed(speed));
+    uint32_t session_id = 0;
+    uint32_t operation_id = 0;
+    if (!BeginMotionCorrelation(session_id, operation_id)) return false;
+    char command[96];
+    snprintf(command, sizeof(command), "TURN,ABS,%d,%d,SID,%lu,OP,%lu",
+             heading_deg, ClampSpeed(speed),
+             static_cast<unsigned long>(session_id),
+             static_cast<unsigned long>(operation_id));
     xEventGroupClearBits(response_events_,
                          kResponseTurnDone | kResponseTurnError);
     turn_waiting_ = true;
     const bool started = SendAndWait(command, kResponseAck, 700);
+    motion_ack_waiting_ = false;
     if (!started) {
         turn_waiting_ = false;
+        EndMotionCorrelation();
         return false;
     }
     motion_lease_active_ = true;
+    GetSafetyBlackBox().Record(SafetyEventType::LEASE_ACQUIRE, session_id,
+                               operation_id, "TURN");
     const EventBits_t bits = xEventGroupWaitBits(
         response_events_, kResponseTurnDone | kResponseTurnError, pdTRUE,
         pdFALSE, pdMS_TO_TICKS(timeout_ms));
@@ -357,16 +466,25 @@ bool RobotUart::TurnAbsolute(int heading_deg, int speed,
     if ((bits & kResponseTurnDone) == 0 ||
         (bits & kResponseTurnError) != 0) {
         if (!Ps2OverrideActive()) Stop(700);
+        EndMotionCorrelation();
         return false;
     }
-    if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+    if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) != pdTRUE) {
+        EndMotionCorrelation();
+        return false;
+    }
     result = turn_result_;
     xSemaphoreGive(state_mutex_);
-    return result.completed;
+    const bool completed = result.completed;
+    EndMotionCorrelation();
+    return completed;
 }
 
 bool RobotUart::Stop(uint32_t timeout_ms) {
     motion_lease_active_ = false;
+    GetSafetyBlackBox().Record(SafetyEventType::STOP, waiting_session_id_,
+                               waiting_operation_id_, "STOP");
+    InvalidateMotionCorrelation("STOP");
     return SendAndWait("STOP", kResponseStopDone, timeout_ms);
 }
 
@@ -572,6 +690,10 @@ void RobotUart::HandleFrame(const char* frame) {
     if (strncmp(frame, "BOOT,STM32,ROBOT_AI,PROTO,3", sizeof("BOOT,STM32,ROBOT_AI,PROTO,3") - 1U) == 0) {
         protocol_compatible_ = false;
         motion_lease_active_ = false;
+        GetSafetyBlackBox().Record(SafetyEventType::LINK_LOSS,
+                                   waiting_session_id_, waiting_operation_id_,
+                                   "STM32_BOOT");
+        InvalidateMotionCorrelation("STM32_BOOT");
         if (turn_waiting_) xEventGroupSetBits(response_events_, kResponseTurnError);
         if (distance_waiting_) xEventGroupSetBits(response_events_, kResponseDistanceError);
         ESP_LOGW(kTag, "ROBOT_SESSION=INVALIDATED,REASON=STM32_BOOT");
@@ -601,6 +723,19 @@ void RobotUart::HandleFrame(const char* frame) {
     }
 
     if (strncmp(frame, "ACK,", 4) == 0) {
+        uint32_t session_id = 0;
+        uint32_t operation_id = 0;
+        const bool correlated = ParseCorrelation(frame, session_id, operation_id);
+        if (motion_ack_waiting_) {
+            if (!correlated || !MatchMotionCorrelation(session_id, operation_id)) {
+                GetSafetyBlackBox().Record(SafetyEventType::ACK_STALE, session_id,
+                                           operation_id,
+                                           correlated ? "MISMATCH" : "MISSING");
+                return;
+            }
+            GetSafetyBlackBox().Record(SafetyEventType::ACK_ACCEPT, session_id,
+                                       operation_id, "MOTION");
+        }
         xEventGroupSetBits(response_events_, kResponseAck);
         return;
     }
@@ -610,15 +745,33 @@ void RobotUart::HandleFrame(const char* frame) {
     }
     float distance_target = 0.0f;
     float distance_travelled = 0.0f;
+    uint32_t session_id = 0;
+    uint32_t operation_id = 0;
+    const bool correlated = ParseCorrelation(frame, session_id, operation_id);
+    const auto accept_terminal = [&]() {
+        if (!turn_waiting_ && !distance_waiting_) return true;
+        if (correlated && MatchMotionCorrelation(session_id, operation_id) &&
+            terminal_operation_id_ != operation_id) return true;
+        GetSafetyBlackBox().Record(SafetyEventType::RESULT_STALE, session_id,
+                                   operation_id,
+                                   correlated ? "MISMATCH" : "MISSING");
+        return false;
+    };
     if (sscanf(frame, "DONE,MOVE,TARGET,%f,TRAVEL,%f", &distance_target,
                &distance_travelled) == 2) {
+        if (!accept_terminal()) return;
         if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
             distance_result_.completed = true;
             distance_result_.code = RobotDistanceResult::Code::DONE;
+            distance_result_.session_id = session_id;
+            distance_result_.operation_id = operation_id;
             distance_result_.target_mm = distance_target;
             distance_result_.travelled_mm = distance_travelled;
             xSemaphoreGive(state_mutex_);
         }
+        if (correlated) terminal_operation_id_ = operation_id;
+        GetSafetyBlackBox().Record(SafetyEventType::RESULT_ACCEPT, session_id,
+                                   operation_id, "MOVE_DONE");
         motion_lease_active_ = false;
         xEventGroupSetBits(response_events_, kResponseDistanceDone);
         return;
@@ -626,8 +779,11 @@ void RobotUart::HandleFrame(const char* frame) {
     char distance_error[24] = {};
     if (sscanf(frame, "ERR,MOVE,%23[^,],TRAVEL,%f", distance_error,
                &distance_travelled) == 2) {
+        if (!accept_terminal()) return;
         if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
             distance_result_.completed = false;
+            distance_result_.session_id = session_id;
+            distance_result_.operation_id = operation_id;
             distance_result_.code =
                 strcmp(distance_error, "OBSTACLE") == 0
                     ? RobotDistanceResult::Code::OBSTACLE
@@ -639,13 +795,19 @@ void RobotUart::HandleFrame(const char* frame) {
             distance_result_.travelled_mm = distance_travelled;
             xSemaphoreGive(state_mutex_);
         }
+        if (correlated) terminal_operation_id_ = operation_id;
+        GetSafetyBlackBox().Record(SafetyEventType::RESULT_ACCEPT, session_id,
+                                   operation_id, "MOVE_ERR");
         motion_lease_active_ = false;
         xEventGroupSetBits(response_events_, kResponseDistanceError);
         return;
     }
     if (strncmp(frame, "ERR,MOVE,", 9) == 0) {
+        if (!accept_terminal()) return;
         if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
             distance_result_.completed = false;
+            distance_result_.session_id = session_id;
+            distance_result_.operation_id = operation_id;
             distance_result_.code =
                 strstr(frame, "ENCODER_FAULT") != nullptr
                     ? RobotDistanceResult::Code::ENCODER_FAULT
@@ -656,6 +818,9 @@ void RobotUart::HandleFrame(const char* frame) {
                                 : RobotDistanceResult::Code::LINK_ERROR;
             xSemaphoreGive(state_mutex_);
         }
+        if (correlated) terminal_operation_id_ = operation_id;
+        GetSafetyBlackBox().Record(SafetyEventType::RESULT_ACCEPT, session_id,
+                                   operation_id, "MOVE_ERR");
         motion_lease_active_ = false;
         xEventGroupSetBits(response_events_, kResponseDistanceError);
         return;
@@ -665,18 +830,39 @@ void RobotUart::HandleFrame(const char* frame) {
     float turn_error = 0.0f;
     if (sscanf(frame, "DONE,TURN,H,%f,TGT,%f,ERR,%f", &turn_heading,
                &turn_target, &turn_error) == 3) {
+        if (!accept_terminal()) return;
         if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
             turn_result_.completed = true;
+            turn_result_.session_id = session_id;
+            turn_result_.operation_id = operation_id;
             turn_result_.heading_deg = turn_heading;
             turn_result_.target_deg = turn_target;
             turn_result_.error_deg = turn_error;
             xSemaphoreGive(state_mutex_);
         }
+        if (correlated) terminal_operation_id_ = operation_id;
+        GetSafetyBlackBox().Record(SafetyEventType::RESULT_ACCEPT, session_id,
+                                   operation_id, "TURN_DONE");
         motion_lease_active_ = false;
         xEventGroupSetBits(response_events_, kResponseTurnDone);
         return;
     }
-    if (strncmp(frame, "PROGRESS,TURN,", 14) == 0) return;
+    if (strncmp(frame, "PROGRESS,TURN,", 14) == 0) {
+        if (turn_waiting_ &&
+            (!correlated || !MatchMotionCorrelation(session_id, operation_id))) {
+            GetSafetyBlackBox().Record(SafetyEventType::RESULT_STALE, session_id,
+                                       operation_id, "PROGRESS");
+        }
+        return;
+    }
+    if (strncmp(frame, "PROGRESS,MOVE,", 14) == 0) {
+        if (distance_waiting_ &&
+            (!correlated || !MatchMotionCorrelation(session_id, operation_id))) {
+            GetSafetyBlackBox().Record(SafetyEventType::RESULT_STALE, session_id,
+                                       operation_id, "PROGRESS");
+        }
+        return;
+    }
     char obstacle_zone[12] = {};
     float obstacle_distance = 0.0f;
     const bool obstacle_detected =
@@ -764,9 +950,13 @@ void RobotUart::HandleFrame(const char* frame) {
         return;
     }
     if (strncmp(frame, "ERR,TURN,", 9) == 0 ||
-        (turn_waiting_ && (strcmp(frame, "ERR,COMPASS,LOST") == 0 ||
-                           strcmp(frame, "ERR,HEADING,LOST") == 0))) {
+        (turn_waiting_ && (strncmp(frame, "ERR,COMPASS,LOST", 16) == 0 ||
+                           strncmp(frame, "ERR,HEADING,LOST", 16) == 0))) {
+        if (!accept_terminal()) return;
         motion_lease_active_ = false;
+        if (correlated) terminal_operation_id_ = operation_id;
+        GetSafetyBlackBox().Record(SafetyEventType::RESULT_ACCEPT, session_id,
+                                   operation_id, "TURN_ERR");
         xEventGroupSetBits(response_events_, kResponseTurnError);
         return;
     }
@@ -776,6 +966,15 @@ void RobotUart::HandleFrame(const char* frame) {
     }
     if (strncmp(frame, "NACK,", 5) == 0 ||
         strncmp(frame, "ERR,", 4) == 0) {
+        if (motion_ack_waiting_) {
+            if (!correlated || !MatchMotionCorrelation(session_id, operation_id)) {
+                GetSafetyBlackBox().Record(SafetyEventType::ACK_STALE, session_id,
+                                           operation_id, "NACK_STALE");
+                return;
+            }
+            GetSafetyBlackBox().Record(SafetyEventType::ACK_ACCEPT, session_id,
+                                       operation_id, "NACK");
+        }
         xEventGroupSetBits(response_events_, kResponseNack);
         return;
     }

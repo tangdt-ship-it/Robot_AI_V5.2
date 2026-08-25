@@ -4,7 +4,7 @@
 
 - Product: Robot_AI_V5.0
 - Development branch: `develop/robot-ai-v5.0`
-- Version state: `5.0.0-alpha.0`
+- Version state: `5.0.0-alpha.3`
 - Inherited source checkpoint: `ea85c29904984c822dab0b53e152ab7e88ed0b81`
 - Source branch: `feature/map-replay-v1-hold-resume`
 - Hardware compatibility: unchanged from Robot_AI_V4.2/V4.3
@@ -362,3 +362,27 @@ Still requiring hardware/HIL validation: STOP latency, physical left/right mappi
 - The code and host tests do not prove hardware health, STOP latency, physical
   sensor side mapping, wheel calibration, fused-heading calibration, Full
   Production route execution, or link-loss behavior on a moving robot.
+
+## 12. Alpha.3 implementation record
+
+### IMPLEMENTED_AND_HOST_TESTED
+
+- Finite RobotLink MOVE/TURN requests carry a non-zero `(SID, OP)` pair, and
+  the STM32 echoes it on ACK, NACK/reject, progress and terminal result frames.
+  The ESP32 uses equality only; missing, zero, stale or mismatched pairs cannot
+  advance strict replay, while duplicate terminals are idempotent.
+- Negotiation, STM32 boot, link loss, STOP and cancellation invalidate pending
+  operations. Replay does not auto-resume across that boundary and must pass a
+  new preflight.
+- ESP32 has a fixed 48-entry RAM-only, no-secret, non-persistent safety
+  black-box plus a telemetry-only motion diagnostic classifier. Uncalibrated
+  and unavailable classifications do not create a new automatic action.
+- Host safety coverage is 36 deterministic tests. `docs/ROBOT_AI_V5_HIL_PLAN.md`
+  defines H0/H1/H2 observation and evidence steps without a control script.
+
+### IMPLEMENTED_HARDWARE_VALIDATION_REQUIRED
+
+- Alpha.3 builds and host tests demonstrate code contracts only. Real serial
+  traces, sensor fidelity, actuator behavior, STOP latency and all HIL phases
+  remain manual operator work; no flash, reset or robot movement is performed
+  by this repository task.

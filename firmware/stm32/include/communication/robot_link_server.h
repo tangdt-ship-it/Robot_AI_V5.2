@@ -105,6 +105,8 @@ struct RobotLinkMotionRequest {
   uint32_t distanceMm = 0;
   bool continuous = false;
   bool deferredAck = false;
+  uint32_t sessionId = 0;
+  uint32_t operationId = 0;
 };
 
 enum class RobotLinkConfigType : uint8_t {
@@ -171,6 +173,8 @@ class RobotLinkServer {
   bool stopAckPending_ = false;
   bool motionLeaseActive_ = false;
   bool turnLeaseActive_ = false;
+  uint32_t activeMotionSessionId_ = 0;
+  uint32_t activeMotionOperationId_ = 0;
   uint32_t lastTurnProgressMs_ = 0;
   bool configRequestReady_ = false;
   bool configRequestInFlight_ = false;

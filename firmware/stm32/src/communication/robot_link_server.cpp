@@ -54,6 +54,15 @@ bool RequiresIntegrity(const char* frame) {
          strcmp(frame, "ENCODER,RESET") == 0 ||
          strcmp(frame, "HB") == 0 || strcmp(frame, "KEEPALIVE") == 0;
 }
+
+void PrintCorrelation(HardwareSerial& serial, uint32_t sessionId,
+                      uint32_t operationId) {
+  if (sessionId == 0U || operationId == 0U) return;
+  serial.print(",SID,");
+  serial.print(sessionId);
+  serial.print(",OP,");
+  serial.print(operationId);
+}
 }  // namespace
 
 void RobotLinkServer::begin(uint32_t baud) {
@@ -91,9 +100,13 @@ void RobotLinkServer::completeMotionRequest(
     // A failure here is therefore a race/runtime reject (for example PS2
     // becoming active between validation and execution). Do not mislabel it
     // as COMPASS_LOST or PS2_OVERRIDE without evidence.
-    serial_.print("<ERR,MOTION_REJECTED>\r\n");
+    serial_.print("<ERR,MOTION_REJECTED");
+    PrintCorrelation(serial_, request.sessionId, request.operationId);
+    serial_.print(">\r\n");
     return;
   }
+  activeMotionSessionId_ = request.sessionId;
+  activeMotionOperationId_ = request.operationId;
   motionLeaseActive_ = true;
   lastMotionHeartbeatMs_ = millis();
   lastSessionActivityMs_ = lastMotionHeartbeatMs_;
@@ -108,7 +121,9 @@ void RobotLinkServer::completeMotionRequest(
     }
     serial_.print(",");
     serial_.print(request.speed);
-    serial_.print(",CONT>\r\n");
+    serial_.print(",CONT");
+    PrintCorrelation(serial_, request.sessionId, request.operationId);
+    serial_.print(">\r\n");
     return;
   }
   if (request.distanceMm != 0U) {
@@ -117,6 +132,7 @@ void RobotLinkServer::completeMotionRequest(
     serial_.print(request.distanceMm);
     serial_.print(",MM,");
     serial_.print(request.speed);
+    PrintCorrelation(serial_, request.sessionId, request.operationId);
     serial_.print(">\r\n");
     return;
   }
@@ -132,13 +148,20 @@ void RobotLinkServer::completeMotionRequest(
     serial_.print(",");
     serial_.print(request.angleDeg);
   }
+  PrintCorrelation(serial_, request.sessionId, request.operationId);
   serial_.print(">\r\n");
 }
 
 void RobotLinkServer::completeStopRequest() {
   motionLeaseActive_ = false;
-  if (turnLeaseActive_) serial_.print("<ERR,TURN,CANCELLED>\r\n");
+  if (turnLeaseActive_) {
+    serial_.print("<ERR,TURN,CANCELLED");
+    PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
+    serial_.print(">\r\n");
+  }
   turnLeaseActive_ = false;
+  activeMotionSessionId_ = 0;
+  activeMotionOperationId_ = 0;
   if (stopAckPending_) {
     stopAckPending_ = false;
     serial_.print("<ACK,STOP>\r\n");
@@ -157,16 +180,27 @@ void RobotLinkServer::reportTurnResult(uint8_t code, float headingDeg,
     serial_.print(targetDeg, 1);
     serial_.print(",ERR,");
     serial_.print(errorDeg, 1);
+    PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
     serial_.print(">\r\n");
   } else if (code == 2U) {
-    serial_.print("<ERR,TURN,TIMEOUT>\r\n");
+    serial_.print("<ERR,TURN,TIMEOUT");
+    PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
+    serial_.print(">\r\n");
   } else if (code == 3U) {
-    serial_.print("<ERR,HEADING,LOST>\r\n");
+    serial_.print("<ERR,HEADING,LOST");
+    PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
+    serial_.print(">\r\n");
   } else if (code == 4U) {
-    serial_.print("<ERR,TURN,MOTION_FAULT>\r\n");
+    serial_.print("<ERR,TURN,MOTION_FAULT");
+    PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
+    serial_.print(">\r\n");
   } else if (code == 5U) {
-    serial_.print("<ERR,TURN,OBSTACLE>\r\n");
+    serial_.print("<ERR,TURN,OBSTACLE");
+    PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
+    serial_.print(">\r\n");
   }
+  activeMotionSessionId_ = 0;
+  activeMotionOperationId_ = 0;
 }
 
 void RobotLinkServer::reportDistanceResult(uint8_t code, float targetMm,
@@ -187,20 +221,26 @@ void RobotLinkServer::reportDistanceResult(uint8_t code, float targetMm,
     serial_.print(targetMm, 1);
     serial_.print(",TRAVEL,");
     serial_.print(travelledMm, 1);
+    PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
     serial_.print(">\r\n");
   } else if (code == 2U) {
     serial_.print("<ERR,MOVE,TIMEOUT,TRAVEL,");
     serial_.print(travelledMm, 1);
+    PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
     serial_.print(">\r\n");
   } else if (code == 3U) {
     serial_.print("<ERR,MOVE,OBSTACLE,TRAVEL,");
     serial_.print(travelledMm, 1);
+    PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
     serial_.print(">\r\n");
   } else if (code == 4U) {
     serial_.print("<ERR,MOVE,ENCODER_FAULT,TRAVEL,");
     serial_.print(travelledMm, 1);
+    PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
     serial_.print(">\r\n");
   }
+  activeMotionSessionId_ = 0;
+  activeMotionOperationId_ = 0;
 }
 
 bool RobotLinkServer::takeConfigRequest(RobotLinkConfigRequest& request) {
@@ -653,7 +693,44 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
   char trailingMotion = '\0';
   bool continuous = false;
   bool deferredAck = false;
-  if (sscanf(frame, "MOVE,FWD,%d,%d%c", &angle, &speed,
+  unsigned long sessionId = 0;
+  unsigned long operationId = 0;
+  bool correlatedMotion = false;
+  const auto rejectMotion = [&](const char* reason, bool nack = false) {
+    serial_.print(nack ? "<NACK," : "<ERR,");
+    serial_.print(reason);
+    if (correlatedMotion) {
+      PrintCorrelation(serial_, static_cast<uint32_t>(sessionId),
+                       static_cast<uint32_t>(operationId));
+    }
+    serial_.print(">\r\n");
+  };
+  if (sscanf(frame, "MOVE,FWD,%d,%d,SID,%lu,OP,%lu%c", &angle, &speed,
+                    &sessionId, &operationId, &trailingMotion) == 4) {
+    motion = RobotLinkMotion::FORWARD;
+    deferredAck = true;
+    correlatedMotion = true;
+  } else if (sscanf(frame, "MOVE,BACK,%d,%d,SID,%lu,OP,%lu%c", &angle,
+                    &speed, &sessionId, &operationId, &trailingMotion) == 4) {
+    motion = RobotLinkMotion::BACKWARD;
+    deferredAck = true;
+    correlatedMotion = true;
+  } else if (sscanf(frame, "TURN,REL,LEFT,%d,%d,SID,%lu,OP,%lu%c", &angle,
+                    &speed, &sessionId, &operationId, &trailingMotion) == 4) {
+    motion = RobotLinkMotion::TURN_REL_LEFT;
+    deferredAck = true;
+    correlatedMotion = true;
+  } else if (sscanf(frame, "TURN,REL,RIGHT,%d,%d,SID,%lu,OP,%lu%c", &angle,
+                    &speed, &sessionId, &operationId, &trailingMotion) == 4) {
+    motion = RobotLinkMotion::TURN_REL_RIGHT;
+    deferredAck = true;
+    correlatedMotion = true;
+  } else if (sscanf(frame, "TURN,ABS,%d,%d,SID,%lu,OP,%lu%c", &angle,
+                    &speed, &sessionId, &operationId, &trailingMotion) == 4) {
+    motion = RobotLinkMotion::TURN_ABSOLUTE;
+    deferredAck = true;
+    correlatedMotion = true;
+  } else if (sscanf(frame, "MOVE,FWD,%d,%d%c", &angle, &speed,
                     &trailingMotion) == 2) {
     motion = RobotLinkMotion::FORWARD;
     deferredAck = true;
@@ -707,42 +784,50 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     ack = "<ACK,RIGHT>\r\n";
   }
   if (motion != RobotLinkMotion::NONE) {
+    if (correlatedMotion && (sessionId == 0UL || operationId == 0UL)) {
+      rejectMotion("OP_INVALID");
+      return;
+    }
     if (!motionSessionReady_) {
-      serial_.print("<ERR,SESSION_NOT_READY>\r\n");
+      rejectMotion("SESSION_NOT_READY");
       return;
     }
     if (!aiMode_) {
-      serial_.print("<NACK,MODE>\r\n");
+      rejectMotion("MODE", true);
       return;
     }
     if (telemetry.ps2CommandActive) {
-      serial_.print("<ERR,PS2_OVERRIDE>\r\n");
+      rejectMotion("PS2_OVERRIDE");
       return;
     }
     if (telemetry.brakeEnabled) {
-      serial_.print("<ERR,BRAKE,LOCKED>\r\n");
+      rejectMotion("BRAKE,LOCKED");
       return;
     }
     if (motion == RobotLinkMotion::FORWARD && telemetry.obstacleBlocked) {
       serial_.print("<ERR,OBSTACLE,DIST,");
       serial_.print(telemetry.obstacleDistanceCm, 1);
+      if (correlatedMotion) {
+        PrintCorrelation(serial_, static_cast<uint32_t>(sessionId),
+                         static_cast<uint32_t>(operationId));
+      }
       serial_.print(">\r\n");
       return;
     }
     if (deferredAck && (motionRequestInFlight_ || motionLeaseActive_)) {
-      serial_.print("<ERR,BUSY>\r\n");
+      rejectMotion("BUSY");
       return;
     }
     if (deferredAck &&
         (speed < ROBOT_AI_SPEED_MIN || speed > ROBOT_AI_SPEED_MAX)) {
-      serial_.print("<ERR,INVALID_SPEED>\r\n");
+      rejectMotion("INVALID_SPEED");
       return;
     }
     const bool turn = motion == RobotLinkMotion::TURN_REL_LEFT ||
                       motion == RobotLinkMotion::TURN_REL_RIGHT ||
                       motion == RobotLinkMotion::TURN_ABSOLUTE;
     if (turn && !telemetry.headingReady) {
-      serial_.print("<ERR,HEADING,LOST>\r\n");
+      rejectMotion("HEADING,LOST");
       return;
     }
     const bool distanceMove = deferredAck && !continuous &&
@@ -750,26 +835,26 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
                                motion == RobotLinkMotion::BACKWARD);
     if (distanceMove && (angle < 1 ||
                          angle > static_cast<int>(ROBOT_AI_DISTANCE_MAX_MM))) {
-      serial_.print("<ERR,INVALID_DISTANCE>\r\n");
+      rejectMotion("INVALID_DISTANCE");
       return;
     }
     if (distanceMove && !telemetry.encoderReady) {
-      serial_.print("<ERR,ENCODER,NOT_READY>\r\n");
+      rejectMotion("ENCODER,NOT_READY");
       return;
     }
     if (distanceMove && telemetry.encoderHealth != 1U) {
-      serial_.print("<ERR,ENCODER,FAULT>\r\n");
+      rejectMotion("ENCODER,FAULT");
       return;
     }
     if ((motion == RobotLinkMotion::TURN_REL_LEFT ||
          motion == RobotLinkMotion::TURN_REL_RIGHT) &&
         (angle < 1 || angle > TURN_MAX_RELATIVE_DEG)) {
-      serial_.print("<ERR,INVALID_ANGLE>\r\n");
+      rejectMotion("INVALID_ANGLE");
       return;
     }
     if (motion == RobotLinkMotion::TURN_ABSOLUTE &&
         (angle < -180 || angle > 180)) {
-      serial_.print("<ERR,INVALID_ANGLE>\r\n");
+      rejectMotion("INVALID_ANGLE");
       return;
     }
     if (!deferredAck) {
@@ -781,6 +866,10 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     motionRequest_.distanceMm = distanceMove ? static_cast<uint32_t>(angle) : 0U;
     motionRequest_.continuous = continuous;
     motionRequest_.deferredAck = deferredAck;
+    motionRequest_.sessionId = correlatedMotion
+        ? static_cast<uint32_t>(sessionId) : 0U;
+    motionRequest_.operationId = correlatedMotion
+        ? static_cast<uint32_t>(operationId) : 0U;
     motionRequested_ = true;
     motionRequestInFlight_ = deferredAck;
     lastSessionActivityMs_ = now;
@@ -972,6 +1061,7 @@ void RobotLinkServer::update(const RobotTelemetry& telemetry) {
     serial_.print(telemetry.aiTurnErrorDeg, 1);
     serial_.print(",SPD,");
     serial_.print(telemetry.aiTurnSpeed);
+    PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
     serial_.print(">\r\n");
   }
   if (aiMode_ && motionLeaseActive_ && telemetry.aiDistanceActive &&
@@ -1005,6 +1095,7 @@ void RobotLinkServer::update(const RobotTelemetry& telemetry) {
     serial_.print(ObstacleZoneName(telemetry.obstacleZone));
     serial_.print(",LIMITED,");
     serial_.print(telemetry.obstacleLimited ? 1 : 0);
+    PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
     serial_.print(">\r\n");
   }
   if (connected() != linkReported_) {
