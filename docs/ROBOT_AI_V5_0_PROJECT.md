@@ -331,3 +331,34 @@ Implemented in the current alpha branch and host-tested:
 - deterministic host regression suite in `tools/v5_host_selftest.py`.
 
 Still requiring hardware/HIL validation: STOP latency, physical left/right mapping, encoder/heading calibration, Full Replay commissioning, automatic detour/rejoin, camera marker decoding and both clean firmware builds. These are not reported as PASS by the alpha branch.
+
+## 11. Alpha.2 implementation record
+
+### IMPLEMENTED_AND_HOST_TESTED
+
+- Full Replay preflight now emits per-capability `PASS`, `WARN`, `FAIL` or
+  `UNAVAILABLE` for link/session, owner, lease, STOP state, route, sensors,
+  encoder, odometry/reset boundary and heading; camera is explicitly optional
+  for basic replay.
+- STM32 state telemetry includes the motion owner, so ESP32 replay refuses an
+  unknown or conflicting owner instead of inferring ownership from movement.
+- Every Full Replay terminal log names one of `ROUTE_COMPLETE`,
+  `TEST_COMPLETE`, `CANCELLED`, `STOPPED`, `ABORTED_SENSOR_FAULT`,
+  `ABORTED_LINK_LOSS`, `ABORTED_POSE_UNRELIABLE`,
+  `ABORTED_RESET_BOUNDARY` or `INVALID_ROUTE`.
+- Host regression coverage is expanded to 20 deterministic tests, including
+  route transitions, preflight/degraded matrices, stale-result rejection model,
+  owner/lease cleanup and reset-boundary handling.
+
+### DISABLED_BY_DEFAULT
+
+- `SHORT_SAFETY_TEST` remains default; `FULL_PRODUCTION` remains gated by
+  `ROBOT_V5_FULL_REPLAY_PRODUCTION=0`.
+- `CONFIG_AUTOMATIC_DETOUR=n`, automatic reverse, and automatic resume after
+  AI stay disabled.
+
+### IMPLEMENTED_HARDWARE_VALIDATION_REQUIRED
+
+- The code and host tests do not prove hardware health, STOP latency, physical
+  sensor side mapping, wheel calibration, fused-heading calibration, Full
+  Production route execution, or link-loss behavior on a moving robot.

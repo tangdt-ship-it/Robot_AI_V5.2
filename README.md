@@ -31,6 +31,23 @@ Automatic detour is explicitly disabled by default. Autonomous navigation
 stops at an obstacle and reports `automatic_detour_disabled` until physical
 commissioning enables `CONFIG_AUTOMATIC_DETOUR=y`.
 
+## Alpha.2 replay boundary
+
+`IMPLEMENTED_AND_HOST_TESTED`: Full Replay uses a unified preflight gate for
+RobotLink/session, STM32 motion owner, client motion lease, per-channel sensor
+health/freshness, encoder health, odometry/reset generation, and fused-heading
+confidence before a TURN. Basic replay does not require camera; its absence is
+reported as `WARN` rather than bypassing any motion safety gate.
+
+`DISABLED_BY_DEFAULT`: `SHORT_SAFETY_TEST` remains the default and ends with
+`TEST_COMPLETE`. `FULL_PRODUCTION` remains compiled but gated off. Automatic
+detour, automatic reverse, and automatic resume after AI remain disabled.
+
+`IMPLEMENTED_HARDWARE_VALIDATION_REQUIRED`: preflight classification and replay
+terminal states are host-tested only. STOP latency, physical sensor mapping,
+encoder/heading calibration and commissioning of Full Production still require
+the real robot.
+
 - `MANUAL_PS2`, Teach Route, Replay dry-run và `SHORT_SAFETY_TEST`: enabled.
 - `ROBOT_V5_FULL_REPLAY_PRODUCTION`: `0` mặc định; chỉ bật sau HIL commissioning.
 - Automatic detour, automatic reverse và automatic resume sau AI: disabled.

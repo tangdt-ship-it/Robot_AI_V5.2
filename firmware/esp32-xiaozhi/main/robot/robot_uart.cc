@@ -1058,6 +1058,32 @@ void RobotUart::HandleFrame(const char* frame) {
     int right = 0;
     int moving = 0;
     float heading = 0.0f;
+    char owner[12] = {};
+    if (sscanf(frame,
+               "STATE,MODE,%7[^,],SPEED,%d,BRAKE,%3[^,],RAMP,%3[^,],H,%f,L,%d,R,%d,MOVE,%d,PS2,%7[^,],COMPASS,%7[^,],AI_LINK,%7[^,],OWNER,%11s",
+               mode, &speed, brake, ramp, &heading, &left, &right, &moving,
+               ps2, compass, ai_link, owner) == 12) {
+        if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
+            state_.valid = true;
+            state_.ai_mode = strcmp(mode, "AI") == 0;
+            state_.heading_deg = heading;
+            state_.speed = speed;
+            state_.left = left;
+            state_.right = right;
+            state_.moving = moving != 0;
+            state_.brake_enabled = strcmp(brake, "ON") == 0;
+            state_.ramp_enabled = strcmp(ramp, "ON") == 0;
+            state_.ps2_ok = strcmp(ps2, "LOST") != 0;
+            state_.compass_ok = strcmp(compass, "OK") == 0;
+            strncpy(state_.motion_owner, owner,
+                    sizeof(state_.motion_owner) - 1);
+            state_.motion_owner[sizeof(state_.motion_owner) - 1] = '\0';
+            state_.received_at_ms = NowMs();
+            xSemaphoreGive(state_mutex_);
+        }
+        xEventGroupSetBits(response_events_, kResponseState);
+        return;
+    }
     if (sscanf(frame,
                "STATE,MODE,%7[^,],SPEED,%d,BRAKE,%3[^,],RAMP,%3[^,],H,%f,L,%d,R,%d,MOVE,%d,PS2,%7[^,],COMPASS,%7[^,],AI_LINK,%7s",
                mode, &speed, brake, ramp, &heading, &left, &right, &moving,
@@ -1074,6 +1100,8 @@ void RobotUart::HandleFrame(const char* frame) {
             state_.ramp_enabled = strcmp(ramp, "ON") == 0;
             state_.ps2_ok = strcmp(ps2, "LOST") != 0;
             state_.compass_ok = strcmp(compass, "OK") == 0;
+            snprintf(state_.motion_owner, sizeof(state_.motion_owner), "%s",
+                     "UNKNOWN");
             state_.received_at_ms = NowMs();
             xSemaphoreGive(state_mutex_);
         }
@@ -1095,6 +1123,8 @@ void RobotUart::HandleFrame(const char* frame) {
         state_.left = left;
         state_.right = right;
         state_.moving = moving != 0;
+        snprintf(state_.motion_owner, sizeof(state_.motion_owner), "%s",
+                 "UNKNOWN");
         state_.received_at_ms = NowMs();
         xSemaphoreGive(state_mutex_);
     }

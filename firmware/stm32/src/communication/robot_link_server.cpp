@@ -36,6 +36,12 @@ const char* FusionHealthName(uint8_t health) {
   return health < 3U ? names[health] : "UNKNOWN";
 }
 
+const char* MotionOwnerName(uint8_t owner) {
+  static const char* const names[] = {
+      "NONE", "MCP", "MISSION", "REPLAY", "DIAGNOSTIC", "PS2"};
+  return owner < 6U ? names[owner] : "UNKNOWN";
+}
+
 bool RequiresIntegrity(const char* frame) {
   if (frame == nullptr) return false;
   return strncmp(frame, "MODE,", 5) == 0 ||
@@ -287,6 +293,8 @@ void RobotLinkServer::sendAsciiStateDetailed(const RobotTelemetry& telemetry) {
   serial_.print(telemetry.compassConnected ? "OK" : "LOST");
   serial_.print(",AI_LINK,");
   serial_.print(connected() ? "OK" : "WAIT");
+  serial_.print(",OWNER,");
+  serial_.print(MotionOwnerName(telemetry.motionOwner));
   serial_.print(">\r\n");
 }
 

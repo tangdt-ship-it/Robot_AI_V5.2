@@ -59,6 +59,31 @@ float NormalizeTurnDelta(float delta_deg) {
     while (delta_deg < -180.0f) delta_deg += 360.0f;
     return delta_deg;
 }
+
+const char* ReplayTerminalStatus(const char* reason) {
+    if (reason == nullptr) return "STOPPED";
+    if (strcmp(reason, "X_CANCEL") == 0) return "CANCELLED";
+    if (strcmp(reason, "PLAN_INVALID") == 0 ||
+        strcmp(reason, "INVALID_ROUTE") == 0) return "INVALID_ROUTE";
+    if (strstr(reason, "RESET_BOUNDARY") != nullptr) {
+        return "ABORTED_RESET_BOUNDARY";
+    }
+    if (strstr(reason, "ENCODER") != nullptr ||
+        strstr(reason, "ODOMETRY") != nullptr ||
+        strstr(reason, "POSE") != nullptr ||
+        strstr(reason, "HEADING") != nullptr) {
+        return "ABORTED_POSE_UNRELIABLE";
+    }
+    if (strstr(reason, "LINK") != nullptr ||
+        strcmp(reason, "STATE_RX") == 0 || strcmp(reason, "OBS_RX") == 0) {
+        return "ABORTED_LINK_LOSS";
+    }
+    if (strstr(reason, "SENSOR") != nullptr ||
+        strstr(reason, "OBS_") != nullptr) {
+        return "ABORTED_SENSOR_FAULT";
+    }
+    return "STOPPED";
+}
 }
 TeachRoute::TeachRoute(RobotUart* robot_uart, MissionManager* mission_manager)
     : robot_uart_(robot_uart), mission_manager_(mission_manager) {}
@@ -878,52 +903,127 @@ bool TeachRoute::RunReplayDryRun() {
 
 bool TeachRoute::CheckReplaySafety(const char* stage, RobotState& state,
                                    RobotObstacleStatus& obstacle,
-                                   const char*& reason) const {
+                                   const char*& reason, bool require_turn) {
     state = {};
     obstacle = {};
     reason = "OK";
+    const char* link_status = "UNAVAILABLE";
+    const char* sensor_status = "UNAVAILABLE";
+    const char* encoder_status = "UNAVAILABLE";
+    const char* odometry_status = "UNAVAILABLE";
+    const char* heading_status = "UNAVAILABLE";
+    const char* owner_status = "UNAVAILABLE";
+    const char* lease_status = "UNAVAILABLE";
+    const char* stop_status = "UNAVAILABLE";
+    const char* route_status = "UNAVAILABLE";
+    const char* camera_status = "WARN";  // Basic replay never requires camera.
     const bool mission = mission_manager_ != nullptr && mission_manager_->IsActive();
     const bool ai_hold = mission_manager_ != nullptr &&
                          mission_manager_->IsAiObstacleHoldActive();
     const bool ps2 = robot_uart_ != nullptr && robot_uart_->Ps2OverrideActive();
     bool pass = true;
-    if (replay_cancel_requested_.load()) { reason = "X_CANCEL"; pass = false; }
-    else if (mission) { reason = "MISSION_ACTIVE"; pass = false; }
-    else if (ai_hold) { reason = "AI_OBSTACLE_HOLD"; pass = false; }
-    else if (ps2) { reason = "PS2_OVERRIDE"; pass = false; }
-    else if (robot_uart_ == nullptr ||
-             !robot_uart_->GetState(state, kReplaySafetyRxTimeoutMs)) {
-        reason = "STATE_RX"; pass = false;
-    } else if (!state.valid) { reason = "STATE_INVALID"; pass = false; }
-    else if (state.moving || state.left != 0 || state.right != 0) {
-        reason = "MOVING"; pass = false;
-    } else if (state.brake_enabled) { reason = "BRAKE"; pass = false; }
-    else if (!robot_uart_->GetObstacle(obstacle, kReplaySafetyRxTimeoutMs)) {
-        reason = "OBS_RX"; pass = false;
-    } else if (!obstacle.valid) { reason = "OBS_INVALID"; pass = false; }
-    else if (!obstacle.fresh) { reason = "OBS_STALE"; pass = false; }
-    else if (strcmp(obstacle.health, "HEALTHY") != 0) {
-        reason = "SENSOR_HEALTH"; pass = false;
+    auto fail = [&](const char* value) {
+        if (pass) reason = value;
+        pass = false;
+    };
+
+    if (loaded_route_.header.waypoint_count < 2U ||
+        loaded_route_.header.waypoint_count > kMaxWaypointsPerMap) {
+        route_status = "FAIL";
+        fail("INVALID_ROUTE");
+    } else route_status = "PASS";
+    stop_status = "PASS";
+    owner_status = "PASS";
+    lease_status = "PASS";
+    if (replay_cancel_requested_.load()) { stop_status = "FAIL"; fail("X_CANCEL"); }
+    else if (mission) { owner_status = "FAIL"; fail("MISSION_ACTIVE"); }
+    else if (ai_hold) { stop_status = "FAIL"; fail("AI_OBSTACLE_HOLD"); }
+    else if (ps2) { owner_status = "FAIL"; fail("PS2_OVERRIDE"); }
+    if (pass && (robot_uart_ == nullptr ||
+                 !robot_uart_->GetState(state, kReplaySafetyRxTimeoutMs))) {
+        link_status = "FAIL"; fail("STATE_RX");
+    } else if (pass && !state.valid) { link_status = "FAIL"; fail("STATE_INVALID"); }
+    else if (pass) link_status = "PASS";
+    if (pass && (state.moving || state.left != 0 || state.right != 0)) {
+        stop_status = "FAIL"; fail("MOVING");
+    } else if (pass && state.brake_enabled) { stop_status = "FAIL"; fail("BRAKE"); }
+    else if (pass && !robot_uart_->SessionReady()) { link_status = "FAIL"; fail("LINK_STALE"); }
+    else if (pass && strcmp(state.motion_owner, "NONE") != 0 &&
+             strcmp(state.motion_owner, "MCP") != 0) {
+        owner_status = "FAIL"; fail("OWNER_INVALID");
+    } else if (pass && robot_uart_->MotionLeaseActive()) {
+        lease_status = "FAIL"; fail("LEASE_ACTIVE");
     }
-    else if (strcmp(obstacle.zone, "CAUTION") == 0) {
-        reason = "CAUTION"; pass = false;
-    } else if (strcmp(obstacle.zone, "BLOCKED") == 0) {
-        reason = "BLOCKED"; pass = false;
-    } else if (strcmp(obstacle.zone, "EMERGENCY") == 0) {
-        reason = "EMERGENCY"; pass = false;
-    } else if (strcmp(obstacle.zone, "CLEAR") != 0) {
-        reason = "OBS_INVALID"; pass = false;
+    if (pass && !robot_uart_->GetObstacle(obstacle, kReplaySafetyRxTimeoutMs)) {
+        sensor_status = "FAIL"; fail("OBS_RX");
+    } else if (pass && !obstacle.valid) { sensor_status = "FAIL"; fail("OBS_INVALID"); }
+    else if (pass && !obstacle.fresh) { sensor_status = "FAIL"; fail("OBS_STALE"); }
+    else if (pass && strcmp(obstacle.health, "HEALTHY") != 0) {
+        sensor_status = "FAIL"; fail("SENSOR_HEALTH");
+    } else if (pass && (strcmp(obstacle.front_left_health, "HEALTHY") != 0 ||
+               strcmp(obstacle.front_right_health, "HEALTHY") != 0 ||
+               obstacle.front_left_age_ms > 400U ||
+               obstacle.front_right_age_ms > 400U)) {
+        sensor_status = "FAIL"; fail("SENSOR_CHANNEL_HEALTH");
+    }
+    else if (pass && strcmp(obstacle.zone, "CAUTION") == 0) {
+        sensor_status = "FAIL"; fail("CAUTION");
+    } else if (pass && strcmp(obstacle.zone, "BLOCKED") == 0) {
+        sensor_status = "FAIL"; fail("BLOCKED");
+    } else if (pass && strcmp(obstacle.zone, "EMERGENCY") == 0) {
+        sensor_status = "FAIL"; fail("EMERGENCY");
+    } else if (pass && strcmp(obstacle.zone, "CLEAR") != 0) {
+        sensor_status = "FAIL"; fail("OBS_INVALID");
+    } else if (pass) sensor_status = "PASS";
+
+    RobotEncoderStatus encoder;
+    RobotOdometry odometry;
+    if (pass && !robot_uart_->GetEncoderStatus(encoder, kReplaySafetyRxTimeoutMs)) {
+        encoder_status = "FAIL"; fail("ENCODER_RX");
+    } else if (pass && (!encoder.valid || !encoder.ready ||
+                        strcmp(encoder.health, "OK") != 0)) {
+        encoder_status = "FAIL"; fail("ENCODER_UNRELIABLE");
+    } else if (pass) encoder_status = "PASS";
+    if (pass && !robot_uart_->GetOdometry(odometry, kReplaySafetyRxTimeoutMs)) {
+        odometry_status = "FAIL"; fail("ODOMETRY_RX");
+    } else if (pass && !odometry.valid) {
+        odometry_status = "FAIL"; fail("ODOMETRY_UNRELIABLE");
+    } else if (pass && replay_reset_generation_ != 0U &&
+               odometry.reset_generation != replay_reset_generation_) {
+        odometry_status = "FAIL"; fail("RESET_BOUNDARY_UNRESOLVED");
+    } else if (pass) odometry_status = "PASS";
+    if (pass && require_turn) {
+        RobotFusionStatus fusion;
+        if (!robot_uart_->GetFusionStatus(fusion, kReplaySafetyRxTimeoutMs)) {
+            heading_status = "FAIL"; fail("HEADING_RX");
+        } else if (!fusion.valid || !fusion.ready ||
+                   strcmp(fusion.health, "FUSED") != 0 ||
+                   fusion.confidence_pct < 70.0f) {
+            heading_status = "FAIL"; fail("HEADING_UNRELIABLE");
+        } else heading_status = "PASS";
     }
     ESP_LOGI(kTag,
-             "ROUTE,REPLAY=SAFETY_CHECK,STAGE=%s,PASS=%u,REASON=%s,MISSION=%u,AI_HOLD=%u,PS2_OVERRIDE=%u,STATE_VALID=%u,MOVING=%u,BRAKE=%u,OBS_VALID=%u,OBS_FRESH=%u,OBS_ECHO=%u,OBS_HEALTH=%s,OBS_DIST_CM=%.1f,OBS_ZONE=%s",
+             "ROUTE,REPLAY=PREFLIGHT,STAGE=%s,PASS=%u,REASON=%s,LINK=%s,SENSORS=%s,ENCODER=%s,ODOMETRY=%s,HEADING=%s,OWNER=%s,LEASE=%s,STOP=%s,ROUTE=%s,CAMERA=%s,MISSION=%u,AI_HOLD=%u,PS2_OVERRIDE=%u,STATE_VALID=%u,OWNER_VALUE=%s,MOVING=%u,BRAKE=%u,OBS_VALID=%u,OBS_FRESH=%u,OBS_ECHO=%u,OBS_HEALTH=%s,OBS_LH=%s,OBS_RH=%s,OBS_LAGE=%lu,OBS_RAGE=%lu,OBS_DIST_CM=%.1f,OBS_ZONE=%s,RESET_GEN=%lu",
              stage != nullptr ? stage : "UNKNOWN", pass ? 1U : 0U, reason,
+             link_status, sensor_status, encoder_status, odometry_status,
+             heading_status, owner_status, lease_status, stop_status,
+             route_status, camera_status,
              mission ? 1U : 0U, ai_hold ? 1U : 0U, ps2 ? 1U : 0U,
-             state.valid ? 1U : 0U, state.moving ? 1U : 0U,
+             state.valid ? 1U : 0U,
+             state.motion_owner[0] != '\0' ? state.motion_owner : "UNKNOWN",
+             state.moving ? 1U : 0U,
              state.brake_enabled ? 1U : 0U, obstacle.valid ? 1U : 0U,
              obstacle.fresh ? 1U : 0U, obstacle.echo_valid ? 1U : 0U,
              obstacle.health[0] != '\0' ? obstacle.health : "UNKNOWN",
+             obstacle.front_left_health[0] != '\0'
+                 ? obstacle.front_left_health : "UNKNOWN",
+             obstacle.front_right_health[0] != '\0'
+                 ? obstacle.front_right_health : "UNKNOWN",
+             static_cast<unsigned long>(obstacle.front_left_age_ms),
+             static_cast<unsigned long>(obstacle.front_right_age_ms),
              obstacle.distance_cm,
-             obstacle.zone[0] != '\0' ? obstacle.zone : "UNKNOWN");
+             obstacle.zone[0] != '\0' ? obstacle.zone : "UNKNOWN",
+             static_cast<unsigned long>(odometry.reset_generation));
     return pass;
 }
 
@@ -1022,7 +1122,7 @@ bool TeachRoute::StartReplayTurnAtWp2() {
     RobotState state;
     RobotObstacleStatus obstacle;
     const char* reason = "OK";
-    if (!CheckReplaySafety("B2_START_GATE", state, obstacle, reason)) {
+    if (!CheckReplaySafety("B2_START_GATE", state, obstacle, reason, true)) {
         ESP_LOGW(kTag, "ROUTE,REPLAY=B2_REJECT,REASON=%s,MOTOR=0", reason);
         mode_ = Mode::REPLAY_HOLD;
         UpdateMapStatus();
@@ -1156,6 +1256,7 @@ bool TeachRoute::StartFullReplay() {
         return false;
     }
     ClearResumeContext();
+    replay_reset_generation_ = obstacle.encoder_reset_generation;
     replay_cancel_requested_.store(false);
     replay_motion_running_.store(true);
     replay_plan_valid_ = false;
@@ -1242,7 +1343,7 @@ void TeachRoute::RunReplayTurnAtWp2() {
         char stage[32];
         snprintf(stage, sizeof(stage), "B2_WORKER_PRECHECK_%u",
                  precheck_attempt);
-        if (CheckReplaySafety(stage, state, obstacle, reason)) {
+        if (CheckReplaySafety(stage, state, obstacle, reason, true)) {
             safety_ready = true;
             ESP_LOGI(kTag,
                      "ROUTE,REPLAY=B2_PRECHECK_READY,ATTEMPT=%u/3,REASON=OK",
@@ -1476,7 +1577,8 @@ void TeachRoute::RunFullReplay() {
         replay_motion_running_.store(false);
         mode_ = Mode::REPLAY_HOLD;
         ESP_LOGW(kTag,
-                 "ROUTE,FULL_REPLAY=STOP,WP=%u/%u,REASON=%s,CONTINUE=NO,MOTOR=0",
+                 "ROUTE,FULL_REPLAY=STOP,TERMINAL=%s,WP=%u/%u,REASON=%s,CONTINUE=NO,MOTOR=0",
+                 ReplayTerminalStatus(reason),
                  static_cast<unsigned>(replay_wp_index_),
                  static_cast<unsigned>(count), reason);
         Notify("FULL REPLAY HOLD: X CANCEL", 4000);
@@ -1647,7 +1749,9 @@ void TeachRoute::RunFullReplay() {
             stop_hold(resume_result.code == RobotDistanceResult::Code::ENCODER_FAULT
                           ? "ENCODER_FAULT"
                           : resume_result.code == RobotDistanceResult::Code::TIMEOUT
-                                ? "TIMEOUT" : "MOVE_FAIL");
+                                ? "TIMEOUT"
+                                : resume_result.code == RobotDistanceResult::Code::LINK_ERROR
+                                      ? "LINK_LOSS" : "MOVE_FAIL");
             return;
         }
         total_target += original_target;
@@ -1672,7 +1776,7 @@ void TeachRoute::RunFullReplay() {
                 : original_target - replay_travel_mm_;
             mode_ = Mode::REPLAY_COMPLETE;
             ESP_LOGI(kTag,
-                     "ROUTE,HR_SHORT=DONE,TARGET_MM=%lu,TRAVEL_MM=%lu,MOTOR=0,CONTINUE=NO",
+                     "ROUTE,HR_SHORT=DONE,TERMINAL=TEST_COMPLETE,TARGET_MM=%lu,TRAVEL_MM=%lu,MOTOR=0,CONTINUE=NO",
                      static_cast<unsigned long>(original_target),
                      static_cast<unsigned long>(replay_travel_mm_));
             Notify("MAP TEST DONE: STOPPED", 4000);
@@ -1733,7 +1837,7 @@ void TeachRoute::RunFullReplay() {
             for (unsigned int attempt = 1; attempt <= 3; ++attempt) {
                 char stage[32];
                 snprintf(stage, sizeof(stage), "FULL_TURN_PRECHECK_%u", attempt);
-                if (CheckReplaySafety(stage, state, obstacle, reason)) {
+                if (CheckReplaySafety(stage, state, obstacle, reason, true)) {
                     ready = true;
                     break;
                 }
@@ -1837,6 +1941,8 @@ void TeachRoute::RunFullReplay() {
                 stop_hold("ENCODER_FAULT");
             } else if (move_result.code == RobotDistanceResult::Code::TIMEOUT) {
                 stop_hold("TIMEOUT");
+            } else if (move_result.code == RobotDistanceResult::Code::LINK_ERROR) {
+                stop_hold("LINK_LOSS");
             } else {
                 stop_hold("MOVE_FAIL");
             }
@@ -1865,7 +1971,7 @@ void TeachRoute::RunFullReplay() {
                 : replay_target_mm_ - replay_travel_mm_;
             mode_ = Mode::REPLAY_COMPLETE;
             ESP_LOGI(kTag,
-                     "ROUTE,HR_SHORT=DONE,TARGET_MM=%lu,TRAVEL_MM=%.1f,MOTOR=0,CONTINUE=NO",
+                     "ROUTE,HR_SHORT=DONE,TERMINAL=TEST_COMPLETE,TARGET_MM=%lu,TRAVEL_MM=%.1f,MOTOR=0,CONTINUE=NO",
                      static_cast<unsigned long>(replay_target_mm_),
                      move_result.travelled_mm);
             Notify("MAP TEST DONE: STOPPED", 4000);
@@ -1887,7 +1993,7 @@ void TeachRoute::RunFullReplay() {
         ? total_travel - total_target : total_target - total_travel;
     mode_ = Mode::REPLAY_COMPLETE;
     ESP_LOGI(kTag,
-             "ROUTE,FULL_REPLAY=COMPLETE,SLOT=%u,POINTS=%u,SEGMENTS=%u,TOTAL_TARGET_MM=%lu,TOTAL_TRAVEL_MM=%lu,MOTOR=0",
+             "ROUTE,FULL_REPLAY=COMPLETE,TERMINAL=ROUTE_COMPLETE,SLOT=%u,POINTS=%u,SEGMENTS=%u,TOTAL_TARGET_MM=%lu,TOTAL_TRAVEL_MM=%lu,MOTOR=0",
              static_cast<unsigned>(selected_slot_), static_cast<unsigned>(count),
              static_cast<unsigned>(count - 1U),
              static_cast<unsigned long>(total_target),

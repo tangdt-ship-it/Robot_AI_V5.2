@@ -24,6 +24,7 @@ struct RobotState {
     bool ramp_enabled = false;
     bool compass_ok = false;
     bool ps2_ok = false;
+    char motion_owner[12] = "UNKNOWN";
     uint32_t received_at_ms = 0;
 };
 
@@ -197,6 +198,8 @@ public:
 
     bool Ps2OverrideActive() const;
     bool IsConnected() const;
+    bool MotionLeaseActive() const { return motion_lease_active_; }
+    bool SessionReady() const { return protocol_compatible_ && IsConnected(); }
 
 private:
     friend class TeachRoute;

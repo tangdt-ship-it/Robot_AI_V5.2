@@ -82,6 +82,18 @@ require("compare_exchange_strong" in obstacle_assist and
 require("SHORT_SAFETY_TEST" in teach_route and "FULL_PRODUCTION" in teach_route and
         "ROBOT_V5_FULL_REPLAY_PRODUCTION 0" in teach_route,
         "explicit replay mode/default production gate missing")
+require("ROUTE,REPLAY=PREFLIGHT" in teach_route and
+        "SENSOR_CHANNEL_HEALTH" in teach_route and
+        "RESET_BOUNDARY_UNRESOLVED" in teach_route and
+        "HEADING_UNRELIABLE" in teach_route,
+        "unified replay preflight/degraded safety gate missing")
+require("ReplayTerminalStatus" in teach_route and
+        "TERMINAL=ROUTE_COMPLETE" in teach_route and
+        "TERMINAL=TEST_COMPLETE" in teach_route,
+        "replay terminal status contract missing")
+require("MotionLeaseActive" in ruart_h and "motion_owner" in ruart_h and
+        "OWNER," in server and "MotionOwnerName" in server,
+        "motion owner/lease telemetry gate missing")
 require("CONFIG_AUTOMATIC_DETOUR 0" in mission and
         "AUTO_DETOUR_DISABLED" in mission and
         'config AUTOMATIC_DETOUR' in kconfig and
