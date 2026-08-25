@@ -88,7 +88,7 @@ python tools\v4_2_localization_selftest.py
 python tools\v4_2_static_audit.py
 ```
 
-Các static audit V4.x hiện còn chứa điều kiện phiên bản cố định. Chúng phải được chuyển thành audit nhận biết phiên bản ở Stage 0; không được coi lỗi tên phiên bản là lỗi thuật toán robot.
+`v5_static_audit.py` kiểm tra phiên bản alpha V5.0 và toàn bộ guardrail kiến trúc kế thừa. Các audit V4.x được giữ lại để kiểm tra checkpoint cũ; lỗi phiên bản của audit V4.x không được coi là lỗi thuật toán robot trên nhánh V5.0.
 
 ## Cảnh báo vận hành
 
