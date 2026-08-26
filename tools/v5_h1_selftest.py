@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Static Alpha.5 checks for finite-operation STOP lifecycle hardening.
+"""Static H1 regression checks for finite-operation STOP lifecycle hardening.
 
 This test never opens serial ports. Hardware timing remains the authority for H1.
+The H1 behaviour was introduced in Alpha.5 and must remain valid on all later
+V5 alpha revisions.
 """
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "firmware/esp32-xiaozhi/main/robot/robot_uart.h"
@@ -13,9 +16,11 @@ VERSION = ROOT / "VERSION"
 header = HEADER.read_text(encoding="utf-8")
 source = SOURCE.read_text(encoding="utf-8")
 version = VERSION.read_text(encoding="utf-8").strip()
+version_match = re.fullmatch(r"5\.0\.0-alpha\.(\d+)", version)
+alpha_revision = int(version_match.group(1)) if version_match else -1
 
 checks = {
-    "alpha5 version": version == "5.0.0-alpha.5",
+    "alpha5+ version": alpha_revision >= 5,
     "public cancellation-aware stop": "bool Stop(int timeout_ms = 500)" in header,
     "raw stop is private transport": "bool Stop(uint32_t timeout_ms);" in header,
     "stop captures turn waiter": "const bool wake_turn = turn_waiting_;" in header,
