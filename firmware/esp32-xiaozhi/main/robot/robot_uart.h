@@ -7,6 +7,7 @@
 
 #include <driver/gpio.h>
 #include <driver/uart.h>
+#include <esp_random.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <freertos/semphr.h>
@@ -251,6 +252,14 @@ private:
     static constexpr EventBits_t kResponseDistanceError = BIT14;
     static constexpr EventBits_t kResponseOdometry = BIT15;
 
+    static uint32_t RandomCorrelationSeed() {
+        uint32_t value = 0U;
+        do {
+            value = esp_random();
+        } while (value == 0U || value == 0xFFFFFFFFU);
+        return value;
+    }
+
     static void RxTaskEntry(void* context);
     static void LinkTestTaskEntry(void* context);
     static void HeartbeatTaskEntry(void* context);
@@ -304,8 +313,14 @@ private:
     volatile bool distance_waiting_ = false;
     volatile bool motion_ack_waiting_ = false;
     volatile bool motion_correlation_active_ = false;
-    volatile uint32_t motion_session_id_ = 0;
-    volatile uint32_t next_operation_id_ = 1;
+    // Alpha.7 seeds both halves of the correlation pair from the ESP32
+    // hardware RNG at construction. CheckProtocol() still advances SID on
+    // each successful negotiation, preserving the existing session-boundary
+    // semantics while preventing deterministic (SID=1, OP=1) reuse after an
+    // ESP32 reboot. Independent random seeds reduce pair-collision risk across
+    // reboots without adding NVS writes or changing the STM32 protocol.
+    volatile uint32_t motion_session_id_ = RandomCorrelationSeed();
+    volatile uint32_t next_operation_id_ = RandomCorrelationSeed();
     volatile uint32_t waiting_session_id_ = 0;
     volatile uint32_t waiting_operation_id_ = 0;
     volatile uint32_t terminal_operation_id_ = 0;
