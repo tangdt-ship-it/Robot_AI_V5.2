@@ -1,260 +1,92 @@
 # Project State
 
-## Stable product baseline
+## Repository
 
-`V4.3 AI Obstacle Assist V1`
+- Repository: `tangdt-ship-it/Robot_AI`
+- Stable / release branch: `main`
+- Development branch: `develop/robot-ai-v5.0`
+- Current development version: `5.0.0-alpha.3`
+- Current V5 development head is the latest commit on `develop/robot-ai-v5.0`.
 
-Status: `STABLE / COMMISSIONED`
+## Stable baseline
 
-Stable tag/checkpoint already published:
+Stable fallback remains the commissioned V4.x line. The current `main` branch carries the stable/release baseline and should not receive experimental V5 feature work directly.
 
-- `v4.3-ai-obstacle-v1-stable`
+Commissioned capabilities inherited by V5 include:
 
-Core commissioned capabilities:
+- Xiaozhi voice/audio/TFT/camera integration;
+- RobotLink V3;
+- PS2 manual control and safety priority;
+- STM32 motor control and watchdog;
+- encoder odometry;
+- MPU6050 + Compass + heading fusion;
+- HC-SR04 obstacle stop authority;
+- HOME / breadcrumb / Return Home;
+- Teach Route / RouteStore / Smart Waypoint;
+- Replay dry-run and commissioned MAP/Replay primitives;
+- AI Obstacle Assist advice mode.
 
-- `CAMERA_VISION = PASS`
-- `CAMERA_YUV422_SVGA = PASS`
-- `CAMERA_SRAM_OPTIMIZATION = PASS`
-- `AI_OBSTACLE_ASSIST_V1 = COMMISSIONED / PASS`
-- `TEST_A/B/C/D = PASS`
-- `CAMERA_FRAME = NORMAL`
-- `GLOBAL_HOLD = PASS`
-- `SUPPRESS_DIAGONAL_BYPASS = PASS`
-- `EXPLICIT_CANCEL_CLEAR_HOLD = PASS`
-- `PS2_OVERRIDE = PASS`
-- `SR04_SAFETY_OVERRIDE = PASS`
-- `AI_AUTO_DRIVE = NO`
-- `MISSION_RESUME_AFTER_AI = NO`
-- `MEMORY_LEAK = NONE`
+Historical MAP/Replay commissioning details previously stored in this file were preserved verbatim in:
 
-## SR04 robot frame
+`docs/MAP_REPLAY_COMMISSIONING_HISTORY.md`
 
-STM32 raw SR04 channels are normalized on ESP32 before AI Obstacle safety arbitration:
+## V5 Alpha.3 status
 
-- `ROBOT_LEFT = RAW_RIGHT`
-- `ROBOT_RIGHT = RAW_LEFT`
+Implemented and host-tested:
 
-Raw channels remain available for diagnostics. Camera frame is normal; no camera mirror/flip change is required.
+- fail-closed ultrasonic sensor-health classification;
+- motion-owner and motion-lease gates;
+- encoder reset generation / reset-boundary protection;
+- replay preflight classification;
+- explicit `SHORT_SAFETY_TEST` / `FULL_PRODUCTION` modes;
+- automatic detour disabled by default;
+- strict non-zero `(SID, OP)` correlation for finite MOVE/TURN operations;
+- stale/mismatched operation result rejection;
+- session/STOP/cancel/reset invalidation of pending operations;
+- bounded RAM-only safety black-box;
+- deterministic V5 host/static tests;
+- H0/H1/H2 HIL readiness plan.
 
----
+## Still requiring HIL / hardware validation
 
-# MAP / Teach Route / Replay development state
+- clean build confirmation for both production targets in the operator environment;
+- H0 link/session/correlation observation;
+- H1 bounded motion and STOP behavior;
+- H2 stale/reset/fault handling;
+- physical left/right sensor mapping;
+- STOP latency on the real robot;
+- encoder and heading calibration;
+- Full Replay production commissioning;
+- automatic detour/rejoin commissioning.
 
-## Current development branch
+Until those gates pass, V5 remains `DEVELOPMENT / NOT PRODUCTION`.
 
-`feature/map-replay-v1-full`
+## Disabled by default
 
-Current commissioned repository head:
+- Full Replay production;
+- automatic detour;
+- automatic reverse;
+- automatic resume after AI obstacle analysis.
 
-`2a198855b3b17dd3667adae07d24206614abd3c7`
+These features must not be enabled only by changing a flag without completing their required HIL gates.
 
-This branch contains the commissioned MAP Teach/Smart Waypoint work, Replay Phase A, B1 straight-segment motion, B2 turn-only implementation, and the MAP UI V2 parser regression fix.
+## Naming / compatibility
 
-## MAP input ownership and UI
+The project/repository name is now `Robot_AI`.
 
-Current architecture:
+Some historical names intentionally remain because they are compatibility interfaces or archival records, for example:
 
-`PS2 -> STM32 -> semantic EVENT,MAP -> ESP32 TeachRoute/RouteStore`
+- PlatformIO env `stm32_robot_v4_2`;
+- scripts `v4_2_localization_selftest.py`, `v4_2_static_audit.py`;
+- documents `V4_2_RELEASE_NOTES.md`, `V4_2_VALIDATION_CHECKLIST.md`;
+- historical V4.x commissioning references.
 
-- `INPUT_OWNER = STM32`
-- `ESP32_RAW_PS2_MAP_POLLING = OFF`
-- `ESP32_MAP_INPUT_TASK = OFF`
-- MAP UI is shown on STM32 20x4 LCD.
-- ESP32 TFT remains dedicated to Xiaozhi/camera UI.
-- MAP UI wire protocol: `MAP_UI_PROTO = 2`
-- Replay LCD modes currently cover READY / TEACH / LOADED / DELETE / REPLAY_READY / REPLAY_CHECKED / REPLAY_RUNNING / REPLAY_HOLD / REPLAY_COMPLETE.
+Do not rename those identifiers casually unless the corresponding build/test references are migrated in one controlled change.
 
-### Current MAP buttons
+## Source of truth
 
-On ROBOT page:
-
-- `R3` = brake toggle (replaces START brake function)
-- `START` = unused by ROBOT page and reserved for MAP workflow
-- `X/CROSS` = unused by ROBOT page and reserved for MAP workflow
-
-On MAP page:
-
-- `L3` = enter/exit MAP page
-- `SELECT` short = select MAP1/MAP2 when state is not locked
-- `START` = start Teach / advance Replay state
-- `TRIANGLE` = manual important waypoint while teaching
-- `SQUARE` short = undo last teach waypoint
-- `SQUARE` long = delete request
-- `CIRCLE` = load/save/confirm depending on state
-- `X` / long SELECT semantic path = cancel/stop
-
-## Smart Waypoint V1
-
-Status: `COMMISSIONED / PASS`
-
-Commissioned configuration:
-
-- `AUTO_DISTANCE = 750 mm`
-- `CORNER_TRIGGER = 25 deg`
-- `CORNER_STABLE_SAMPLES = 3`
-- `MAX_POINTS_PER_MAP = 128`
-- manual important points are preserved
-- endpoint is added when needed
-- old dense `125 mm / 12 deg` behavior is no longer used
-
-Commissioning result:
-
-- legacy MAP1 test route: `21 points / 1084 mm`
-- Smart MAP2 test route: `3 points / 950 mm`
-- reboot persistence/load = PASS
-- motor commands from MAP during Teach = NONE
-- robot movement source during Teach = PS2 only
-
-Smart Waypoint implementation checkpoint:
-
-`91d0fa565067799aecbc59913cc16a9eda10a9ae`
-
-## Replay Phase A — dry run
-
-Status: `PASS`
-
-Replay dry-run validates route geometry and storage without motor motion.
-
-MAP2 dry-run evidence:
-
-- WP1 -> WP2 = `771 mm`
-- WP2 -> WP3 = `179 mm`
-- summed/stored route length = `950 / 950 mm`
-- `MOTOR = 0`
-- robot movement = NONE
-
-## Replay B1 — first straight segment
-
-Status: `COMMISSIONED / PASS`
-
-Tested on MAP2:
-
-- target WP1 -> WP2 = `771 mm`
-- speed = `10`
-- turn = OFF
-- `START_GATE = PASS / OK`
-- `WORKER_PRECHECK = PASS / OK`
-- `OBS_VALID=1, OBS_FRESH=1, OBS_ZONE=CLEAR`
-- `ECHO=0 + FRESH + CLEAR` is allowed as no-return-clear; it is not treated as an obstacle by itself
-- travelled = `771.3 mm`
-- internal odometry error = `0.3 mm`
-- robot stopped completely at WP2
-- WP3 was not run
-- no replay turn command was issued
-- ESP32 reset = NO
-- STM32 reset = NO
-
-B1 tested code checkpoint:
-
-`0a3ac2f718f26110bda118ca341ec504fc0953f9`
-
-Note: `0.3 mm` is encoder/odometry-reported segment error, not an externally measured absolute-position accuracy claim.
-
-## MAP UI V2 parser regression — fixed
-
-The STM32 V2 parser uses 11 numeric conversions plus an optional trailing `%c` validator. A valid V2 frame therefore returns `fields == 11`.
-
-Correct parser condition:
-
-`const bool v2 = fields == 11;`
-
-Regression fix checkpoint:
-
-`d2acc3b91745effbdd805ac7a85bca9b9645293e`
-
-Verified after STM32 flash:
-
-- `MAP,UI,2,1,2,3,128,950,0,0,0,0,0` accepted
-- `ERR,MAP_UI = NONE`
-- MAP2 LCD leaves `SYNC` and shows `SAVED / 3 points / 950 mm`
-
-Do not revert this condition to `fields == 12` in later branches.
-
-## Replay B2 — waypoint turn
-
-Implementation status: `COMMISSIONED / PASS`
-
-B2 physical commissioning result on MAP2:
-
-- `B2_START_GATE = PASS / OK`
-- worker transport precheck attempt `1/3 = PASS / OK`
-- `B12 = -1.7 deg`, `B23 = -7.4 deg`, runtime delta = `-5.7 deg`, direction = `RIGHT`
-- RobotLink turn command: `TURN,REL,RIGHT,6,10`
-- final heading = `2.3 deg`, RobotLink target = `-0.5 deg`, reported error = `-2.8 deg`
-- `B2_TURN_DONE`, `CONTINUE=NO`, `MOVE=0`
-- manual mode restore = `PASS`
-- robot stopped; WP3 was not run; no translation command was issued
-
-The previous physical run exposed a transient `STATE_RX` at the worker precheck. The hardened policy now uses a 900 ms replay safety transaction timeout and retries only `STATE_RX` / `OBS_RX` up to three attempts (100 ms then 150 ms delay). Safety failures are never retried. RobotLink transaction failures log the failure stage (`MUTEX_TIMEOUT`, `SEND_FAIL`, `WAIT_TIMEOUT`, or `NACK`).
-
-B2 design:
-
-- compute `bearing12 = atan2(WP2-WP1)`
-- compute `bearing23 = atan2(WP3-WP2)`
-- `turnDelta = normalize(bearing23 - bearing12)`
-- positive delta = LEFT, negative delta = RIGHT
-- use STM32 closed-loop `TurnRelative()` at speed 10
-- no timed/open-loop turn
-- B2 only turns at WP2 and stops
-- no WP2 -> WP3 translation in B2
-- no full replay yet
-- dynamic turn safety stops if ultrasonic is stale or zone is not CLEAR
-- `ECHO=0 + FRESH + CLEAR` remains allowed
-- X / R3 / PS2 takeover / obstacle safety retain stop authority
-
-- STM32 session recovery: after STM32 `BOOT`, the ESP32 invalidates the cached
-  protocol session; B2 renegotiates `HELLO -> PING -> MODE,AI` before `TURN` and
-  restores `MODE,MANUAL` after the turn
-
-## Replay B3 — final segment
-
-Status: `COMMISSIONED / PASS`
-
-MAP2 physical commissioning result:
-
-- runtime geometry `WP2 -> WP3 = 179.5 mm`; target = `179 mm`
-- `B3_START_GATE = PASS / OK`
-- worker transport precheck attempt `1/3 = PASS / OK`
-- `MOVE,FWD,179,10`; no turn command was issued
-- travel = `180.9 mm`; reported error = `1.9 mm`
-- `MODE,MANUAL` restore = `PASS`
-- `B3_DONE`, `CONTINUE=NO`, `TURN=0`, `MOTOR=0`
-- robot stopped at WP3; LCD final state = `MAP2 COMPLETE / WP:03/03`
-
-B1, B2 and B3 are commissioned on the MAP2 route.
-
-## MAP Full Replay V1
-
-Status: `COMMISSIONED / PASS`
-
-MAP2 full replay physical commissioning result:
-
-- `FULL_START_GATE = PASS / OK`; `MISSION=0`, `AI_HOLD=0`, `PS2_OVERRIDE=0`,
-  `STATE_VALID=1`, `MOVING=0`, `BRAKE=0`, `OBS_VALID=1`, `OBS_FRESH=1`,
-  `OBS_ECHO=1`, `OBS_ZONE=CLEAR`
-- Segment 1 `WP1 -> WP2`: target `771 mm`, speed `10`, travel `771.0 mm`,
-  error `0.0 mm`
-- Segment 1 diagnostic samples showed `L/R=10/10`, `BRAKE=0`, `PS2CMD=0`,
-  `OBS=CLEAR`, `LIMITED=0`, encoder health `OK`, and changing encoder ticks
-- Turn at WP2: `TURN,REL,RIGHT,6,10`; delta `-5.7 deg`, target `-6.7 deg`,
-  final `-4.5 deg`, error `-2.2 deg`
-- Segment 2 `WP2 -> WP3`: target `179 mm`, travel `179.5 mm`, error `0.5 mm`
-- `FULL_REPLAY=COMPLETE`, total target `950 mm`, total travel `951 mm`,
-  `MOTOR=0`; manual mode restore = `PASS`
-- WP3 was the final waypoint; no further segment or turn was run
-- ESP32 reset = `NO`; STM32 reset = `NO`; robot stopped at completion
-
-Diagnostic telemetry checkpoint:
-
-`2a198855b3b17dd3667adae07d24206614abd3c7`
-
----
-
-# Data ownership / synchronization rules
-
-- Source of truth for code: GitHub repository branch/commit listed above.
-- Local workspace must `git pull --ff-only` before each build/flash/test cycle.
-- Codex should not change source unless the prompt explicitly requests a patch.
-- After an approved local patch passes build/test, commit and push it before starting the next feature phase.
-- Before branching to a new phase, preserve the last commissioned code checkpoint in Git history and update this state document.
-- MAP route contents themselves live in ESP32 NVS and are not stored in Git. Current MAP1/MAP2 point counts are commissioning data, not source-controlled assets.
+- Stable/release source: `main`.
+- Active V5 development source: `develop/robot-ai-v5.0`.
+- Historical MAP/Replay evidence: `docs/MAP_REPLAY_COMMISSIONING_HISTORY.md`.
+- V5 scope and release gates: `docs/ROBOT_AI_V5_0_PROJECT.md`.
+- V5 Alpha.3 HIL procedure: `docs/ROBOT_AI_V5_HIL_PLAN.md`.
