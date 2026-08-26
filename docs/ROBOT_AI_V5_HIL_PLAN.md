@@ -1,13 +1,24 @@
-# Robot_AI_V5.0 Alpha.3 HIL readiness plan
+# Robot_AI_V5.0 Alpha.4 HIL readiness plan
 
 This is a manual preparation plan only. It contains no flashing, serial-port,
 reset, reconnect or motion-control script.
 
+Alpha.4 is the H0 hardening follow-up to the first Alpha.3 hardware run. It
+closes two H0 evidence gaps without changing Compass/HeadingFusion semantics:
+
+- finite MOVE/TURN requests without a valid `(SID, OP)` are rejected by STM32;
+- a successful HELLO -> PING negotiation passively logs the newly allocated
+  non-zero ESP32 motion SID, so H0 can record it without causing motion.
+
+Legacy continuous/pulse compatibility is intentionally unchanged by this H0
+patch. The bounded RAM safety black-box remains RAM-only; dump/export is an H2
+or later Wireless-HIL concern, not an H0 pass requirement.
+
 ## Preconditions
 
-- Build both production firmware targets from the Alpha.3 commit.
+- Build both production firmware targets from the Alpha.4 commit.
 - Run `python tools/v5_host_selftest.py`, `python tools/v5_static_audit.py`,
-  `python tools/v4_protocol_selftest.py`, and
+  `python tools/v5_h0_selftest.py`, `python tools/v4_protocol_selftest.py`, and
   `python tools/v4_2_localization_selftest.py`.
 - Confirm the physical area is clear, the robot is supported safely when
   appropriate, an operator has the physical E-stop/STOP procedure available,
@@ -19,13 +30,20 @@ reset, reconnect or motion-control script.
 
 1. Establish the normal operator-approved connection using existing tooling.
 2. Observe boot, HELLO/PING and state telemetry. Record the newly negotiated
-   non-zero SID in the test sheet.
+   non-zero SID from `ROBOT_SESSION=READY,SID=<n>` in the test sheet.
 3. Inspect only diagnostic output for a deliberately invalid/blocked preflight;
    expected result is no lease and no motion command.
-4. If a protocol trace is captured, verify a finite motion request would use
+4. Verify from static/host evidence that every finite MOVE/TURN request uses
    `SID,OP` and that malformed, zero, missing and mismatched pairs are rejected.
+   H0 must not create a real MOVE/TURN merely to prove this guard.
+5. Treat `COMPASS=LOST` independently from robot heading availability. Heading
+   may remain valid through HeadingFusion/IMU/encoder. A Compass fault alone is
+   not an H0 failure when heading remains available and no uncontrolled action
+   occurs.
 
-Pass: link and safety gates are observable; no motion is caused by H0.
+Pass: link and safety gates are observable, negotiated SID is non-zero, the
+finite-motion correlation guard passes, motors remain stopped, and H0 causes no
+motion.
 
 ## H1 — controlled bounded motion, operator initiated
 
@@ -61,5 +79,5 @@ Pass: fail-closed behaviour is demonstrated without an uncontrolled run.
 ## Evidence and exit criteria
 
 Record host/build output, resource sizes, correlation trace excerpts, operator
-observations, anomalies and final safety state. Alpha.3 is HIL-ready code and
-documentation, not a claim that hardware validation has occurred.
+observations, anomalies and final safety state. Alpha.4 remains development
+firmware until H0/H1/H2 hardware evidence passes.
