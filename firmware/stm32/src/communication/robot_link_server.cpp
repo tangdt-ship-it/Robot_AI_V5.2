@@ -730,14 +730,6 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     motion = RobotLinkMotion::TURN_ABSOLUTE;
     deferredAck = true;
     correlatedMotion = true;
-  } else if (sscanf(frame, "MOVE,FWD,%d,%d%c", &angle, &speed,
-                    &trailingMotion) == 2) {
-    motion = RobotLinkMotion::FORWARD;
-    deferredAck = true;
-  } else if (sscanf(frame, "MOVE,BACK,%d,%d%c", &angle, &speed,
-                    &trailingMotion) == 2) {
-    motion = RobotLinkMotion::BACKWARD;
-    deferredAck = true;
   } else if (sscanf(frame, "MOVE,FWD,%d,CONT%c", &speed,
                     &trailingMotion) == 1) {
     motion = RobotLinkMotion::FORWARD;
@@ -758,18 +750,6 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     motion = RobotLinkMotion::RIGHT;
     continuous = true;
     deferredAck = true;
-  } else if (sscanf(frame, "TURN,REL,LEFT,%d,%d%c", &angle, &speed,
-                    &trailingMotion) == 2) {
-    motion = RobotLinkMotion::TURN_REL_LEFT;
-    deferredAck = true;
-  } else if (sscanf(frame, "TURN,REL,RIGHT,%d,%d%c", &angle, &speed,
-                    &trailingMotion) == 2) {
-    motion = RobotLinkMotion::TURN_REL_RIGHT;
-    deferredAck = true;
-  } else if (sscanf(frame, "TURN,ABS,%d,%d%c", &angle, &speed,
-                    &trailingMotion) == 2) {
-    motion = RobotLinkMotion::TURN_ABSOLUTE;
-    deferredAck = true;
   } else if (sscanf(frame, "CMD,FWD,%d", &speed) == 1) {
     motion = RobotLinkMotion::FORWARD;
     ack = "<ACK,FWD>\r\n";
@@ -783,6 +763,17 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     motion = RobotLinkMotion::RIGHT;
     ack = "<ACK,RIGHT>\r\n";
   }
+
+  // V5 finite MOVE/TURN operations are transactional. A finite request that
+  // fails to match one of the correlated forms above must never fall through
+  // to a legacy parser and acquire a motion lease. Continuous/pulse commands
+  // intentionally keep their existing compatibility path for this H0 fix.
+  if (motion == RobotLinkMotion::NONE &&
+      (strncmp(frame, "MOVE,", 5) == 0 || strncmp(frame, "TURN,", 5) == 0)) {
+    serial_.print("<ERR,CORRELATION_REQUIRED>\r\n");
+    return;
+  }
+
   if (motion != RobotLinkMotion::NONE) {
     if (correlatedMotion && (sessionId == 0UL || operationId == 0UL)) {
       rejectMotion("OP_INVALID");
@@ -972,7 +963,7 @@ void RobotLinkServer::update(const RobotTelemetry& telemetry) {
       serial_.print("<EVENT,OBSTACLE,DETECTED,ZONE,");
       serial_.print(ObstacleZoneName(telemetry.obstacleZone));
       serial_.print(",DIST,");
-      serial_.print(telemetry.obstacleDistanceCm, 1);
+      serial_.print(telemetry.obstacleDistanceCm_, 1);
       serial_.print(">\r\n");
     } else if (telemetry.obstacleZone == 1U) {
       serial_.print("<EVENT,OBSTACLE,CLEAR,DIST,");
