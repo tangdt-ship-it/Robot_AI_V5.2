@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Host-only H2 guards for Robot_AI V5 Alpha.6.
+"""Host-only H2 guards for Robot_AI V5 Alpha.6+.
 
-No serial port, actuator, reset or hardware access is performed.  The tests
-exercise stale/session/reset semantics and statically verify that the Alpha.6
-black-box trace remains telemetry-only.
+No serial port, actuator, reset or hardware access is performed. The tests
+exercise stale/session/reset semantics, preserve passive Alpha.6 black-box
+observability, and guard the Alpha.7 cross-reboot correlation seeding fix.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -115,9 +116,25 @@ class V5H2SelfTest(unittest.TestCase):
         self.assertIn("STM32_BOOT", uart)
         self.assertIn("RESET_BOUNDARY_UNRESOLVED", teach)
 
-    def test_version_is_alpha6(self) -> None:
-        self.assertEqual((ROOT / "VERSION").read_text().strip(),
-                         "5.0.0-alpha.6")
+    def test_alpha7_correlation_pair_is_not_fixed_after_reboot(self) -> None:
+        header = (ROOT / "firmware/esp32-xiaozhi/main/robot/robot_uart.h").read_text()
+        source = (ROOT / "firmware/esp32-xiaozhi/main/robot/robot_uart.cc").read_text()
+        self.assertIn("#include <esp_random.h>", header)
+        self.assertIn("RandomCorrelationSeed()", header)
+        self.assertIn("value = esp_random();", header)
+        self.assertIn("value == 0U || value == 0xFFFFFFFFU", header)
+        self.assertIn("motion_session_id_ = RandomCorrelationSeed();", header)
+        self.assertIn("next_operation_id_ = RandomCorrelationSeed();", header)
+        # Preserve the existing successful-negotiation session advance and
+        # explicit non-zero wrap guard on top of the per-boot random seed.
+        self.assertIn("++motion_session_id_;", source)
+        self.assertIn("if (motion_session_id_ == 0U)", source)
+
+    def test_version_is_alpha6_or_later(self) -> None:
+        version = (ROOT / "VERSION").read_text().strip()
+        match = re.fullmatch(r"5\.0\.0-alpha\.(\d+)", version)
+        self.assertIsNotNone(match)
+        self.assertGreaterEqual(int(match.group(1)), 6)
 
 
 if __name__ == "__main__":
