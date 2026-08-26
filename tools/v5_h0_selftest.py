@@ -12,7 +12,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 STM32 = ROOT / "firmware/stm32/src/communication/robot_link_server.cpp"
-ESP32 = ROOT / "firmware/esp32-xiaozhi/main/robot/robot_uart.cc"
+ESP32_UART = ROOT / "firmware/esp32-xiaozhi/main/robot/robot_uart.cc"
+BLACKBOX = ROOT / "firmware/esp32-xiaozhi/main/robot/safety_blackbox.cc"
 
 errors: list[str] = []
 
@@ -21,7 +22,8 @@ def require(condition: bool, message: str) -> None:
         errors.append(message)
 
 stm32 = STM32.read_text(errors="replace")
-esp32 = ESP32.read_text(errors="replace")
+esp32_uart = ESP32_UART.read_text(errors="replace")
+blackbox = BLACKBOX.read_text(errors="replace")
 
 # Correlated finite commands must remain implemented.
 for pattern in (
@@ -57,10 +59,16 @@ require('CMD,FWD,%d' in stm32,
         "legacy pulse compatibility changed unexpectedly")
 
 # H0 must be able to record a newly negotiated non-zero SID without issuing a
-# motion command.
-require('ROBOT_SESSION=READY,SID=%lu' in esp32,
+# motion command. CheckProtocol creates the SESSION_CHANGE/HELLO breadcrumb;
+# SafetyBlackBox exposes only that passive breadcrumb to the serial log.
+require('GetSafetyBlackBox().Record(SafetyEventType::SESSION_CHANGE' in esp32_uart,
+        "session-change breadcrumb missing from protocol negotiation")
+require('ROBOT_SESSION=READY,SID=%lu' in blackbox,
         "passive negotiated SID log missing")
-require('motion_session_id_' in esp32 and 'if (motion_session_id_ == 0U)' in esp32,
+require('std::strcmp(reason, "HELLO") == 0' in blackbox,
+        "SID log is not constrained to HELLO session boundaries")
+require('motion_session_id_' in esp32_uart and
+        'if (motion_session_id_ == 0U)' in esp32_uart,
         "non-zero session generation guard missing")
 
 if errors:
