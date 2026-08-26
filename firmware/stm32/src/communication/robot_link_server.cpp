@@ -963,7 +963,7 @@ void RobotLinkServer::update(const RobotTelemetry& telemetry) {
       serial_.print("<EVENT,OBSTACLE,DETECTED,ZONE,");
       serial_.print(ObstacleZoneName(telemetry.obstacleZone));
       serial_.print(",DIST,");
-      serial_.print(telemetry.obstacleDistanceCm_, 1);
+      serial_.print(telemetry.obstacleDistanceCm, 1);
       serial_.print(">\r\n");
     } else if (telemetry.obstacleZone == 1U) {
       serial_.print("<EVENT,OBSTACLE,CLEAR,DIST,");
