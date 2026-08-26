@@ -4,9 +4,12 @@
 #include <cmath>
 #include <cstring>
 
+#include <esp_log.h>
 #include <esp_timer.h>
 
 namespace {
+constexpr const char* kTag = "SafetyBlackBox";
+
 uint32_t NowMs() {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
 }
@@ -34,6 +37,18 @@ void SafetyBlackBox::Record(SafetyEventType type, uint32_t session_id,
     next_slot_ = (next_slot_ + 1U) % kCapacity;
     size_ = std::min(size_ + 1U, kCapacity);
     portEXIT_CRITICAL(&lock_);
+
+    // H0 must be able to record the newly negotiated non-zero motion session
+    // without issuing a motion command. CheckProtocol() records this exact
+    // SESSION_CHANGE/HELLO breadcrumb after HELLO -> PING succeeds. Keep the
+    // forensic ring buffer as the source of truth and expose only this safe,
+    // passive session-boundary breadcrumb on the serial log.
+    if (type == SafetyEventType::SESSION_CHANGE && session_id != 0U &&
+        operation_id == 0U && reason != nullptr &&
+        std::strcmp(reason, "HELLO") == 0) {
+        ESP_LOGI(kTag, "ROBOT_SESSION=READY,SID=%lu",
+                 static_cast<unsigned long>(session_id));
+    }
 }
 
 size_t SafetyBlackBox::CopyRecent(SafetyBlackBoxEvent* output,
