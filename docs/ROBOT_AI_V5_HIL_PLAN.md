@@ -1,83 +1,93 @@
-# Robot_AI_V5.0 Alpha.4 HIL readiness plan
+# Robot_AI_V5.0 Alpha.6 HIL readiness plan
 
-This is a manual preparation plan only. It contains no flashing, serial-port,
-reset, reconnect or motion-control script.
+Alpha.6 is the H2 observability follow-up after H0 Alpha.4 and H1 Alpha.5 both
+passed on hardware. It does not change STM32 motion control or the ESP32 motion
+protocol. Its only firmware change is passive forensic logging of each event
+already committed to the bounded RAM safety black-box.
 
-Alpha.4 is the H0 hardening follow-up to the first Alpha.3 hardware run. It
-closes two H0 evidence gaps without changing Compass/HeadingFusion semantics:
+## Passed gates
 
-- finite MOVE/TURN requests without a valid `(SID, OP)` are rejected by STM32;
-- a successful HELLO -> PING negotiation passively logs the newly allocated
-  non-zero ESP32 motion SID, so H0 can record it without causing motion.
+- H0 Alpha.4: PASS.
+- H1-A bounded correlated MOVE: PASS.
+- H1-B finite TURN + explicit STOP: PASS on Alpha.5 after the waiter lifecycle
+  fix; waiter release improved from about 12.86 s to 3.5 ms after `DONE,STOP`.
 
-Legacy continuous/pulse compatibility is intentionally unchanged by this H0
-patch. The bounded RAM safety black-box remains RAM-only; dump/export is an H2
-or later Wireless-HIL concern, not an H0 pass requirement.
+## Alpha.6 observability
+
+Each `SafetyBlackBox::Record()` event is still stored in the fixed 48-entry,
+RAM-only ring and is now also emitted as a passive serial breadcrumb:
+
+`ROBOT_BLACKBOX SEQ=<n> MS=<ms> TYPE=<type> SID=<sid> OP=<op> RESET_GEN=<g> ROUTE=<r> SEG=<s> REASON=<reason>`
+
+The trace path has no RobotUart/actuator dependency and must never acquire a
+motion lease or issue MOVE/TURN/STOP. It exists only to make H2 evidence
+observable in the external HIL log.
 
 ## Preconditions
 
-- Build both production firmware targets from the Alpha.4 commit.
-- Run `python tools/v5_host_selftest.py`, `python tools/v5_static_audit.py`,
-  `python tools/v5_h0_selftest.py`, `python tools/v4_protocol_selftest.py`, and
-  `python tools/v4_2_localization_selftest.py`.
-- Confirm the physical area is clear, the robot is supported safely when
-  appropriate, an operator has the physical E-stop/STOP procedure available,
-  and no autonomous run is armed by this document.
-- Record firmware commit, board IDs, date, operator, test area and any known
-  sensor/calibration limitations. Do not place credentials or secrets in logs.
+- Use branch/commit explicitly named by the H2 execution prompt.
+- Run all V4/V4.2/V5 host/static tests, including `tools/v5_h2_selftest.py`.
+- Store runtime HIL logs outside the repository, under
+  `F:\Robot\Robot_AI_HIL_Logs`.
+- Robot must be physically stopped, navigation idle, PS2 neutral and motors 0.
+- H2 must not create a MOVE/TURN merely to obtain evidence.
 
-## H0 — link and correlation observation (no motion)
+## H0 — historical pass
 
-1. Establish the normal operator-approved connection using existing tooling.
-2. Observe boot, HELLO/PING and state telemetry. Record the newly negotiated
-   non-zero SID from `ROBOT_SESSION=READY,SID=<n>` in the test sheet.
-3. Inspect only diagnostic output for a deliberately invalid/blocked preflight;
-   expected result is no lease and no motion command.
-4. Verify from static/host evidence that every finite MOVE/TURN request uses
-   `SID,OP` and that malformed, zero, missing and mismatched pairs are rejected.
-   H0 must not create a real MOVE/TURN merely to prove this guard.
-5. Treat `COMPASS=LOST` independently from robot heading availability. Heading
-   may remain valid through HeadingFusion/IMU/encoder. A Compass fault alone is
-   not an H0 failure when heading remains available and no uncontrolled action
-   occurs.
+H0 established RobotLink HELLO/PING, non-zero SID, strict finite-motion SID/OP
+guards, stopped motor state and no uncontrolled motion.
 
-Pass: link and safety gates are observable, negotiated SID is non-zero, the
-finite-motion correlation guard passes, motors remain stopped, and H0 causes no
-motion.
+## H1 — historical pass
 
-## H1 — controlled bounded motion, operator initiated
+H1-A established correlated bounded finite MOVE and matching ACK/progress/DONE.
+H1-B established physical STOP plus prompt finite-waiter cancellation, stale
+result rejection, lease release and final stopped state.
 
-This phase is executed manually by an authorized operator after H0 passes.
-Use the existing stop procedure; this plan never authorizes automatic control.
+## H2 — fault/recovery observation, no motion
 
-- Begin with the shortest approved straight-line safety test in a clear area.
-- Correlate each accepted ACK, progress and terminal frame by exact `(SID, OP)`.
-- Inject no synthetic sensor values and make no calibration/PID/PWM changes.
-- On obstacle, encoder, heading, link or reset-boundary concern, stop and
-  record the terminal reason. Do not auto-resume.
+H2 uses only safe idle-state operations and host trace playback.
 
-Pass: each result matches the issued pair; STOP/cancel/link loss leaves no
-pending operation or active lease.
+1. **Host stale/missing/duplicate trace tests**
+   - stale `(SID, OP)` must not complete a new operation;
+   - duplicate terminal must be rejected;
+   - session invalidation must clear the old pending pair;
+   - reset-generation mismatch must block resume/preflight.
 
-## H2 — fault-injection observation and recovery
+2. **Passive black-box trace**
+   - capture `ROBOT_BLACKBOX` lines during boot/session negotiation and all H2
+     observations;
+   - sequence values must advance and event fields must be well formed;
+   - no black-box observation may create motion.
 
-Use only safe, operator-approved methods that do not move the robot.
+3. **Idle reset/session boundary**
+   - perform only the operator-approved reset/reconnect action named in the H2
+     execution prompt while motors are already zero;
+   - observe session/link invalidation and recovery;
+   - verify no motion lease survives the boundary and final state remains idle.
 
-- Observe stale/missing/duplicate frame handling from trace playback or an
-  isolated approved test fixture; stale frames must not complete a new op.
-- Observe session change/reset boundary while idle; the next replay requires a
-  fresh preflight and manual start.
-- Review the fixed RAM black-box breadcrumbs: preflight, owner/lease,
-  command, ACK/result accept-or-stale, hold/resume/reset/stop/cancel/link and
-  terminal events. The buffer is RAM-only, bounded, non-persistent and
-  contains no secrets.
-- Treat `UNCALIBRATED` and `UNAVAILABLE` diagnostics as observation labels,
-  not permission for any new automatic action.
+4. **Reset generation**
+   - observe `RESET_GEN` before and after any explicitly approved idle encoder
+     reset action;
+   - if generation changes, old route/hold context must not be silently resumed;
+   - no replay is started automatically in H2.
 
-Pass: fail-closed behaviour is demonstrated without an uncontrolled run.
+5. **Diagnostic labels**
+   - `UNCALIBRATED`, `UNAVAILABLE`, `HEADING_UNRELIABLE` or similar labels are
+     observations only; they never authorize an automatic action.
 
-## Evidence and exit criteria
+## H2 pass criteria
 
-Record host/build output, resource sizes, correlation trace excerpts, operator
-observations, anomalies and final safety state. Alpha.4 remains development
-firmware until H0/H1/H2 hardware evidence passes.
+- all host/static/H2 self-tests pass;
+- black-box telemetry is observable and passive;
+- stale/duplicate/session/reset guards are fail-closed;
+- any approved idle reset/session boundary leaves motors at zero and no active
+  motion lease;
+- no mission/replay resumes automatically;
+- no uncontrolled run occurs.
+
+## Exit criteria
+
+Record host/build output, resource sizes, external log path, relevant
+`ROBOT_BLACKBOX` excerpts, reset/session observations, anomalies and the final
+safe state. Alpha.6 remains development firmware until H2 hardware evidence
+passes.
