@@ -168,7 +168,30 @@ public:
                       uint32_t timeout_ms = 13000);
     bool TurnAbsolute(int heading_deg, int speed, RobotTurnResult& result,
                       uint32_t timeout_ms = 13000);
-    bool Stop(uint32_t timeout_ms = 500);
+
+    // Public STOP is cancellation-aware. The transport-level uint32_t overload
+    // remains private so normal callers cannot accidentally bypass waiter
+    // release. Physical STOP confirmation is authoritative: a finite MOVE/TURN
+    // waiter is released only after the STM32 has returned DONE,STOP.
+    bool Stop(int timeout_ms = 500) {
+        const bool wake_turn = turn_waiting_;
+        const bool wake_distance = distance_waiting_;
+        stop_in_progress_ = true;
+        const uint32_t bounded_timeout =
+            timeout_ms > 0 ? static_cast<uint32_t>(timeout_ms) : 0U;
+        const bool stopped = Stop(bounded_timeout);
+        if (stopped) {
+            EventBits_t wake_bits = 0;
+            if (wake_turn) wake_bits |= kResponseTurnError;
+            if (wake_distance) wake_bits |= kResponseDistanceError;
+            if (wake_bits != 0) {
+                xEventGroupSetBits(response_events_, wake_bits);
+            }
+        }
+        stop_in_progress_ = false;
+        return stopped;
+    }
+
     bool GetState(RobotState& state, uint32_t timeout_ms = 500);
     bool GetSpeed(int& speed, uint32_t timeout_ms = 500);
     bool SetSpeed(int speed, uint32_t timeout_ms = 500);
@@ -203,7 +226,9 @@ public:
     bool Ps2OverrideActive() const;
     bool IsConnected() const;
     bool MotionLeaseActive() const { return motion_lease_active_; }
-    bool SessionReady() const { return protocol_compatible_ && IsConnected(); }
+    bool SessionReady() const {
+        return protocol_compatible_ && IsConnected() && !stop_in_progress_;
+    }
     uint32_t MotionSessionId() const { return motion_session_id_; }
 
 private:
@@ -237,6 +262,9 @@ private:
     bool SendFrame(const char* body);
     bool SendAndWait(const char* body, EventBits_t expected,
                      uint32_t timeout_ms);
+    // Raw STOP transport primitive. Use the public int overload so finite
+    // operation waiters are released only after physical STOP confirmation.
+    bool Stop(uint32_t timeout_ms);
     bool BeginMotionCorrelation(uint32_t& session_id, uint32_t& operation_id);
     void EndMotionCorrelation();
     void InvalidateMotionCorrelation(const char* reason);
@@ -271,6 +299,7 @@ private:
     volatile uint32_t last_rx_ms_ = 0;
     volatile bool protocol_compatible_ = false;
     volatile bool motion_lease_active_ = false;
+    volatile bool stop_in_progress_ = false;
     volatile bool turn_waiting_ = false;
     volatile bool distance_waiting_ = false;
     volatile bool motion_ack_waiting_ = false;
