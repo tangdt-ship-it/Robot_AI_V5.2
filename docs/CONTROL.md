@@ -1,4 +1,4 @@
-# Robot_AI_V4.2 — Motion / heading control
+# Robot_AI — Motion / heading control
 
 ## Heading source
 
@@ -16,8 +16,8 @@ Encoder được sample trước, sau đó fusion tính heading của vòng hi�
 
 ## Distance
 
-`MOVE_DISTANCE` vẫn do STM32 đóng vòng theo encoder. MissionManager V4.2 dùng primitive này cho Return Home thay vì duration->distance.
+`MOVE_DISTANCE` do STM32 đóng vòng theo encoder. MissionManager dùng primitive này cho Return Home thay vì duration->distance.
 
 ## Wheel-speed PID
 
-V4.2 **chưa bật PID tốc độ bánh chưa tune**. Trước khi bật cần đo PWM->mm/s, dead-zone và tune riêng từng bánh. Safety/PS2 phải nằm ngoài vòng PID.
+Firmware hiện tại **chưa bật PID tốc độ từng bánh đã được tune**. Trước khi bật cần đo PWM->mm/s, dead-zone và tune riêng từng bánh. Safety/PS2 phải nằm ngoài vòng PID.

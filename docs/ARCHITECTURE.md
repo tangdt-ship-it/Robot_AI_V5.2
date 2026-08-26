@@ -1,4 +1,4 @@
-# Robot_AI_V4.2 — Kiến trúc chuẩn
+# Robot_AI — Kiến trúc chuẩn
 
 ## 1. Phân tầng
 
@@ -8,7 +8,7 @@
 
 STM32 luôn là motor authority cuối cùng. ESP32 chỉ yêu cầu chuyển động cấp cao.
 
-## 2. Localization V4.2
+## 2. Localization / odometry
 
 ```text
 Encoder L/R ---> encoder yaw -----+

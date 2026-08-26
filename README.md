@@ -1,15 +1,15 @@
-# Robot_AI_V5.0
+# Robot_AI — V5.0 Development
 
-Robot_AI_V5.0 là nhánh phát triển kế thừa firmware Robot_AI_V4.2/V4.3 cho robot vi sai hai bánh dùng STM32F103VET6 và ESP32-S3 N16R8/CAM.
+Robot_AI V5.0 là nhánh phát triển kế thừa dòng firmware V4.x cho robot vi sai hai bánh dùng STM32F103VET6 và ESP32-S3 N16R8/CAM.
 
 ## Trạng thái
 
-- Phiên bản: `5.0.0-alpha.0`
+- Phiên bản: `5.0.0-alpha.3`
 - Nhánh: `develop/robot-ai-v5.0`
-- Điểm kế thừa: `ea85c29904984c822dab0b53e152ab7e88ed0b81`
+- Điểm kế thừa V4.x: `ea85c29904984c822dab0b53e152ab7e88ed0b81`
 - Trạng thái phát hành: DEVELOPMENT / NOT PRODUCTION
 
-V5.0 giữ nguyên phần cứng, pinout và các chức năng V4.x đã được commissioning. Nhánh này sẽ sửa các đường điều khiển chưa đủ an toàn trước khi mở Full Replay và tự né vật cản.
+V5.0 giữ nguyên phần cứng, pinout và các chức năng V4.x đã được commissioning. Nhánh này tăng cường các đường điều khiển/safety trước khi mở Full Replay production và tự né vật cản.
 
 Tài liệu phạm vi, kiến trúc, giai đoạn phát triển và cổng kiểm thử: [docs/ROBOT_AI_V5_0_PROJECT.md](docs/ROBOT_AI_V5_0_PROJECT.md).
 
@@ -53,6 +53,10 @@ the real robot.
 - Automatic detour, automatic reverse và automatic resume sau AI: disabled.
 - Physical left/right sensor wiring vẫn cần xác minh; phần mềm dùng một mapping robot-frame canonical và fail-closed khi health chưa xác nhận.
 
+## Alpha.3 safety correlation
+
+Alpha.3 bổ sung strict `(SID, OP)` cho MOVE/TURN hữu hạn, reject stale/mismatched result, reset/session invalidation, safety black-box RAM cố định và HIL readiness plan. Các thay đổi này mới chứng minh contract ở host-test; hành vi phần cứng vẫn phải hoàn tất HIL trước khi nâng trạng thái phát hành.
+
 ## Kiến trúc giữ nguyên
 
 ```text
@@ -80,7 +84,7 @@ STM32 luôn là motor/safety authority. Camera, cloud và AI chỉ được đ�
 
 ## Build STM32
 
-Tên PlatformIO environment được giữ nguyên để không làm hỏng quy trình V4.x:
+Tên PlatformIO environment lịch sử được giữ nguyên để không làm hỏng quy trình V4.x/V5:
 
 ```powershell
 cd firmware\stm32
@@ -110,6 +114,8 @@ Target: ESP32-S3, board `bread-compact-wifi-s3cam`, locale `vi-VN`, flash 16 MB.
 
 ## Kiểm thử host kế thừa
 
+Tên các script V4.x được giữ nguyên vì là compatibility/test interface, không phải tên repository hiện tại:
+
 ```powershell
 python tools\v4_protocol_selftest.py
 python tools\v4_2_localization_selftest.py
@@ -118,13 +124,13 @@ python tools\v5_host_selftest.py
 python tools\v5_static_audit.py
 ```
 
-`v5_static_audit.py` kiểm tra phiên bản alpha V5.0 và toàn bộ guardrail kiến trúc kế thừa. Các audit V4.x được giữ lại để kiểm tra checkpoint cũ; lỗi phiên bản của audit V4.x không được coi là lỗi thuật toán robot trên nhánh V5.0.
+`v5_static_audit.py` kiểm tra phiên bản alpha V5.0 và các guardrail kiến trúc kế thừa. Audit V4.x vẫn được giữ để kiểm tra compatibility/checkpoint cũ; lỗi version guard của audit V4.x không tự động đồng nghĩa với lỗi thuật toán robot trên nhánh V5.0.
 
 ## Cảnh báo vận hành
 
 - Đây chưa phải firmware V5.0 production.
-- Không bật Full Replay bằng cách chỉ đổi cờ giới hạn 150 mm.
-- Không bật AI auto-drive hoặc auto-resume trước khi Stage 1–6 đạt.
+- Không bật Full Replay production chỉ bằng cách đổi feature flag.
+- Không bật AI auto-drive hoặc auto-resume trước khi các stage an toàn tương ứng đạt HIL.
 - Voice STOP không thay thế nút STOP/PS2 vật lý.
 - Hai cảm biến trước không bảo vệ phía sau, hai bên hoặc cạnh vực.
 - HOME và Replay vẫn dựa trên odometry/heading fusion, chưa phải SLAM định vị tuyệt đối.

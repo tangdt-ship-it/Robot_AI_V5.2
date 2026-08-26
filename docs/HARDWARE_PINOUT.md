@@ -1,4 +1,4 @@
-# Robot_AI_V4.2 — Hardware pinout
+# Robot_AI — Hardware pinout
 
 ## STM32F103VET6
 
