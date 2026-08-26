@@ -13,6 +13,33 @@ constexpr const char* kTag = "SafetyBlackBox";
 uint32_t NowMs() {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
 }
+
+const char* EventTypeName(SafetyEventType type) {
+    switch (type) {
+        case SafetyEventType::PREFLIGHT_BEGIN: return "PREFLIGHT_BEGIN";
+        case SafetyEventType::PREFLIGHT_PASS: return "PREFLIGHT_PASS";
+        case SafetyEventType::PREFLIGHT_FAIL: return "PREFLIGHT_FAIL";
+        case SafetyEventType::OWNER_ACQUIRE: return "OWNER_ACQUIRE";
+        case SafetyEventType::OWNER_REJECT: return "OWNER_REJECT";
+        case SafetyEventType::LEASE_ACQUIRE: return "LEASE_ACQUIRE";
+        case SafetyEventType::LEASE_RELEASE: return "LEASE_RELEASE";
+        case SafetyEventType::COMMAND_SEND: return "COMMAND_SEND";
+        case SafetyEventType::ACK_ACCEPT: return "ACK_ACCEPT";
+        case SafetyEventType::ACK_STALE: return "ACK_STALE";
+        case SafetyEventType::RESULT_ACCEPT: return "RESULT_ACCEPT";
+        case SafetyEventType::RESULT_STALE: return "RESULT_STALE";
+        case SafetyEventType::HOLD: return "HOLD";
+        case SafetyEventType::RESUME: return "RESUME";
+        case SafetyEventType::RESET_BOUNDARY: return "RESET_BOUNDARY";
+        case SafetyEventType::STOP: return "STOP";
+        case SafetyEventType::CANCEL: return "CANCEL";
+        case SafetyEventType::LINK_LOSS: return "LINK_LOSS";
+        case SafetyEventType::SESSION_CHANGE: return "SESSION_CHANGE";
+        case SafetyEventType::TERMINAL_RESULT: return "TERMINAL_RESULT";
+        case SafetyEventType::DIAGNOSTIC: return "DIAGNOSTIC";
+    }
+    return "UNKNOWN";
+}
 }  // namespace
 
 void SafetyBlackBox::Record(SafetyEventType type, uint32_t session_id,
@@ -38,11 +65,23 @@ void SafetyBlackBox::Record(SafetyEventType type, uint32_t session_id,
     size_ = std::min(size_ + 1U, kCapacity);
     portEXIT_CRITICAL(&lock_);
 
-    // H0 must be able to record the newly negotiated non-zero motion session
-    // without issuing a motion command. CheckProtocol() records this exact
-    // SESSION_CHANGE/HELLO breadcrumb after HELLO -> PING succeeds. Keep the
-    // forensic ring buffer as the source of truth and expose only this safe,
-    // passive session-boundary breadcrumb on the serial log.
+    // Alpha.6 H2 observability: emit each forensic breadcrumb after it has
+    // been committed to the bounded RAM ring. This is telemetry only; it does
+    // not call RobotUart, acquire a motion lease or change actuator state.
+    ESP_LOGI(kTag,
+             "ROBOT_BLACKBOX SEQ=%lu MS=%lu TYPE=%s SID=%lu OP=%lu RESET_GEN=%lu ROUTE=%u SEG=%u REASON=%s",
+             static_cast<unsigned long>(event.sequence),
+             static_cast<unsigned long>(event.timestamp_ms),
+             EventTypeName(event.type),
+             static_cast<unsigned long>(event.session_id),
+             static_cast<unsigned long>(event.operation_id),
+             static_cast<unsigned long>(event.reset_generation),
+             static_cast<unsigned>(event.route_index),
+             static_cast<unsigned>(event.segment_index),
+             event.reason[0] != '\0' ? event.reason : "-");
+
+    // H0/H1 retain the compact negotiated-session marker used by existing
+    // hardware procedures. The black-box line above is the richer H2 trace.
     if (type == SafetyEventType::SESSION_CHANGE && session_id != 0U &&
         operation_id == 0U && reason != nullptr &&
         std::strcmp(reason, "HELLO") == 0) {
