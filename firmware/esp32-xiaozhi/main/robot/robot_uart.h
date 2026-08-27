@@ -1,12 +1,15 @@
 #ifndef XIAOZHI_ROBOT_UART_H
 #define XIAOZHI_ROBOT_UART_H
 
+#include "safety_blackbox.h"
+
 #include <cstddef>
 #include <atomic>
 #include <cstdint>
 
 #include <driver/gpio.h>
 #include <driver/uart.h>
+#include <esp_log.h>
 #include <esp_random.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
@@ -144,7 +147,18 @@ public:
 
     RobotUart(gpio_num_t rx_pin, gpio_num_t tx_pin,
               uart_port_t port = UART_NUM_1, int baud_rate = 115200)
-        : rx_pin_(rx_pin), tx_pin_(tx_pin), port_(port), baud_rate_(baud_rate) {}
+        : rx_pin_(rx_pin), tx_pin_(tx_pin), port_(port), baud_rate_(baud_rate) {
+        // Board instances are created lazily from app_main, after the FreeRTOS
+        // scheduler is running.  Start a low-priority recovery observer now;
+        // it waits for Begin() and the one-shot startup link test before doing
+        // anything.  The task never emits a motion command.
+        if (xTaskCreatePinnedToCore(ProtocolRecoveryTaskEntry,
+                                    "robot_proto_recovery", 3072, this, 2,
+                                    &protocol_recovery_task_, 0) != pdPASS) {
+            protocol_recovery_task_ = nullptr;
+            ESP_LOGE("RobotUart", "Cannot start protocol recovery task");
+        }
+    }
     ~RobotUart() = default;
 
     bool Begin();
@@ -263,9 +277,70 @@ private:
     static void RxTaskEntry(void* context);
     static void LinkTestTaskEntry(void* context);
     static void HeartbeatTaskEntry(void* context);
+    static void ProtocolRecoveryTaskEntry(void* context) {
+        static_cast<RobotUart*>(context)->ProtocolRecoveryTask();
+    }
     void RxTask();
     void HeartbeatTask();
     void RunLinkTest();
+
+    // Alpha.9 recovery runs outside the UART RX task so CheckProtocol() can
+    // wait for HELLO/PONG while the RX task remains free to parse them.  It
+    // observes only STM32 boot-epoch changes (plus an initial failed startup
+    // negotiation), waits for all motion/cancellation state to be idle, then
+    // retries HELLO/PING until the session is restored.  No MODE, MOVE, TURN,
+    // STOP or lease acquisition is issued here.
+    void ProtocolRecoveryTask() {
+        while (!started_) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+
+        // The normal one-shot RunLinkTest starts after 800 ms and may consume
+        // up to 1.4 s for HELLO+PING. Establish the recovery baseline only
+        // after that path has had time to finish, avoiding duplicate startup
+        // negotiations and extra SID increments.
+        vTaskDelay(pdMS_TO_TICKS(2500));
+        uint32_t observed_epoch = GetStm32BootEpoch();
+        bool recovery_needed = !protocol_compatible_;
+
+        while (true) {
+            const uint32_t current_epoch = GetStm32BootEpoch();
+            if (current_epoch != observed_epoch) {
+                observed_epoch = current_epoch;
+                recovery_needed = true;
+                ESP_LOGW("RobotUart",
+                         "ROBOT_SESSION=RECOVERY,STATE=REQUESTED,STM32_EPOCH=%lu",
+                         static_cast<unsigned long>(current_epoch));
+                // Let STM32 finish setup()/UART initialization after BOOT.
+                vTaskDelay(pdMS_TO_TICKS(250));
+            }
+
+            if (protocol_compatible_) {
+                recovery_needed = false;
+            } else if (recovery_needed &&
+                       !motion_lease_active_ && !stop_in_progress_ &&
+                       !motion_correlation_active_ && !turn_waiting_ &&
+                       !distance_waiting_) {
+                const bool recovered = CheckProtocol(700);
+                if (recovered) {
+                    recovery_needed = false;
+                    ESP_LOGI("RobotUart",
+                             "ROBOT_SESSION=RECOVERY,STATE=PASS,SID=%lu,STM32_EPOCH=%lu",
+                             static_cast<unsigned long>(motion_session_id_),
+                             static_cast<unsigned long>(observed_epoch));
+                } else {
+                    ESP_LOGW("RobotUart",
+                             "ROBOT_SESSION=RECOVERY,STATE=RETRY,STM32_EPOCH=%lu",
+                             static_cast<unsigned long>(observed_epoch));
+                }
+            }
+
+            // Keep retry traffic bounded if STM32 is absent. Successful
+            // recovery returns this task to a passive observer state.
+            vTaskDelay(pdMS_TO_TICKS(750));
+        }
+    }
+
     void HandleFrame(const char* frame);
     void DispatchMapEvent(const char* action, uint8_t slot);
     bool SendFrame(const char* body);
@@ -287,6 +362,7 @@ private:
     EventGroupHandle_t response_events_ = nullptr;
     TaskHandle_t rx_task_ = nullptr;
     TaskHandle_t heartbeat_task_ = nullptr;
+    TaskHandle_t protocol_recovery_task_ = nullptr;
     RobotState state_;
     int value_speed_ = 0;
     bool value_brake_ = false;
