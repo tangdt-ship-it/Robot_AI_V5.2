@@ -16,6 +16,54 @@ class RobotUart;
 struct RobotState;
 struct RobotObstacleStatus;
 
+// Declared by safety_blackbox.h/.cc. Keep the dependency one-way here so this
+// lightweight header does not pull the whole forensic recorder into every
+// TeachRoute includer.
+uint32_t GetStm32BootEpoch();
+
+// A replay/reset boundary is not identified by the STM32 RESET_GEN number
+// alone: RESET_GEN restarts after an STM32 reboot. Capture the ESP32-observed
+// STM32 boot epoch beside the raw generation so a reboot invalidates a saved
+// Replay/HOLD context even when the numeric RESET_GEN happens to repeat.
+struct ResetBoundaryToken {
+    uint32_t raw_generation = 0;
+    uint32_t stm32_boot_epoch = 0;
+
+    ResetBoundaryToken& operator=(uint32_t generation) {
+        raw_generation = generation;
+        stm32_boot_epoch = generation == 0U ? 0U : GetStm32BootEpoch();
+        return *this;
+    }
+
+    operator uint32_t() const { return raw_generation; }
+
+    bool DiffersFrom(uint32_t current_generation) const {
+        // Preserve the existing zero sentinel semantics used by replay setup.
+        if (raw_generation == 0U || current_generation == 0U) {
+            return raw_generation != current_generation;
+        }
+        return raw_generation != current_generation ||
+               stm32_boot_epoch != GetStm32BootEpoch();
+    }
+
+    friend bool operator!=(const ResetBoundaryToken& saved,
+                           uint32_t current_generation) {
+        return saved.DiffersFrom(current_generation);
+    }
+    friend bool operator!=(uint32_t current_generation,
+                           const ResetBoundaryToken& saved) {
+        return saved.DiffersFrom(current_generation);
+    }
+    friend bool operator==(const ResetBoundaryToken& saved,
+                           uint32_t current_generation) {
+        return !saved.DiffersFrom(current_generation);
+    }
+    friend bool operator==(uint32_t current_generation,
+                           const ResetBoundaryToken& saved) {
+        return !saved.DiffersFrom(current_generation);
+    }
+};
+
 class TeachRoute {
 public:
     TeachRoute(RobotUart* robot_uart, MissionManager* mission_manager);
@@ -138,7 +186,7 @@ private:
     float replay_bearing23_deg_ = 0.0f;
     float replay_turn_delta_deg_ = 0.0f;
     uint8_t replay_operation_ = 0;  // 0 NONE, 1 MOVE, 2 TURN, 3 HOLD.
-    uint32_t replay_reset_generation_ = 0;
+    ResetBoundaryToken replay_reset_generation_{};
 
     // Volatile obstacle-interrupted MOVE context. Never persisted to NVS.
     bool resume_valid_ = false;
@@ -150,7 +198,7 @@ private:
     float resume_hold_x_mm_ = 0.0f;
     float resume_hold_y_mm_ = 0.0f;
     float resume_hold_heading_rad_ = 0.0f;
-    uint32_t resume_reset_generation_ = 0;
+    ResetBoundaryToken resume_reset_generation_{};
 
     esp_timer_handle_t auto_timer_ = nullptr;
     std::atomic_bool auto_timer_enabled_{false};
