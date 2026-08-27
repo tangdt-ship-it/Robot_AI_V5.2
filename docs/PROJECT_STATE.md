@@ -5,9 +5,10 @@
 - Repository: `tangdt-ship-it/Robot_AI`
 - Stable / release branch: `main`
 - Development branch: `develop/robot-ai-v5.0`
-- Current development version: `5.0.0-alpha.5`
+- Current development version: `5.0.0-alpha.9`
 - Alpha.4 H0-tested firmware checkpoint: `08affa1997aa5e56cf5974540ded82dcbfc95fb3`.
 - Alpha.5 H1-tested firmware checkpoint: `dad0a5be9053b004aafce0125410226940afedff`.
+- Alpha.9 H2/final-motion tested firmware checkpoint: `7ec2349cb4878d8acba49c09de288cc95c3aef8c`.
 - Current V5 development head is the latest commit on `develop/robot-ai-v5.0`; documentation-only commits may follow a tested firmware checkpoint without changing firmware bytes.
 
 ## Stable baseline
@@ -32,9 +33,9 @@ Historical MAP/Replay commissioning details previously stored in this file were 
 
 `docs/MAP_REPLAY_COMMISSIONING_HISTORY.md`
 
-## V5 Alpha.5 status
+## V5 Alpha.9 status
 
-Implemented and host-tested:
+Implemented, host-tested and HIL-validated for the Alpha.3 hardening campaign:
 
 - fail-closed ultrasonic sensor-health classification;
 - motion-owner and motion-lease gates;
@@ -44,14 +45,16 @@ Implemented and host-tested:
 - automatic detour disabled by default;
 - strict non-zero `(SID, OP)` correlation for finite MOVE/TURN operations;
 - missing finite-operation correlation rejected with `CORRELATION_REQUIRED`;
-- stale/mismatched operation result rejection;
+- stale/mismatched/duplicate operation result rejection;
 - session/STOP/cancel/reset invalidation of pending operations;
-- passive negotiated SID logging for no-motion H0 evidence;
-- bounded RAM-only safety black-box;
+- hardware-random per-boot SID/OP seeding so the first correlation pair is not deterministically reused after ESP32 reboot;
+- passive negotiated SID and RAM-only safety black-box diagnostics;
 - cancellation-aware ESP32 STOP lifecycle for finite MOVE/TURN waiters;
 - STOP waiter release only after confirmed `DONE,STOP`;
 - finite-operation admission blocked while STOP is in progress;
-- deterministic V5 host/static/H0/H1 self-tests.
+- ESP32-observed STM32 boot epoch combined with raw `RESET_GEN` for Replay/HOLD reset-boundary protection;
+- automatic RobotLink HELLO/PING renegotiation after STM32 reboot without issuing motion commands;
+- deterministic V5 host/static/H0/H1/H2 self-tests.
 
 ## H0 Alpha.4 hardware validation
 
@@ -85,7 +88,7 @@ Validated on hardware:
 - odometry query = PASS;
 - no unexpected motion.
 
-H0 exit state: `READY_FOR_H1 = YES`.
+H0 exit state: `PASS`.
 
 ## H1 Alpha.4 / Alpha.5 hardware validation
 
@@ -118,7 +121,6 @@ Alpha.5 H1-B retest validated:
 - ESP32 application size = `3633712` bytes;
 - free app partition = `495056` bytes;
 - ESP32 flash = PASS;
-- RobotLink online, negotiated `SID = 1`;
 - finite turn command: `TURN,REL,LEFT,20,10,SID,1,OP,1`;
 - TURN ACK correlation = PASS;
 - operator STOP produced `ACK,STOP` and `DONE,STOP`;
@@ -134,7 +136,96 @@ Alpha.5 H1-B retest validated:
 
 Two follow-up idempotent STOP cleanups were observed after the operator STOP. They did not create motion, did not form a STOP loop, and did not block H1 PASS.
 
-H1 exit state: `READY_FOR_H2 = YES`.
+H1 exit state: `PASS`.
+
+## H2 Alpha.6 - Alpha.9 hardware validation
+
+Status: `PASS`.
+
+H2 progressively hardened observability, reboot boundaries and session recovery without enabling autonomous motion:
+
+- Alpha.6 added passive RAM-only black-box telemetry and passed idle ESP32 reset safety: RobotLink recovered, no automatic resume and motor remained zero;
+- Alpha.7 replaced deterministic reboot correlation seeds with independent ESP32 hardware-random SID/OP seeds; hardware observed non-fixed SID values;
+- an observed raw `RESET_GEN 3 -> 1` prompted source audit because raw reset generation can restart after STM32 boot;
+- Alpha.8 added an ESP32-observed `STM32_BOOT_EPOCH` and made Replay/HOLD boundary checks depend on the composite `(RESET_GEN, STM32_BOOT_EPOCH)` token;
+- controlled STM32 reset validated `RESET_GEN 1 -> 1` while `STM32_EPOCH 0 -> 1`, proving the composite boundary changes even when raw generation repeats;
+- Alpha.9 added fail-closed RobotLink auto-recovery after STM32 reboot using HELLO/PING only, with no motion re-arm.
+
+Final Alpha.9 RobotLink recovery HIL validated:
+
+- all V4/V4.2/V5 host/static/H0/H1/H2 tests = PASS;
+- ESP32-S3 build = PASS;
+- ESP32 application size = `3635568` bytes;
+- free app partition = `493200` bytes;
+- ESP32 flash = PASS;
+- startup session SID = `3935795156`;
+- controlled STM32 reboot observed and old session invalidated;
+- STM32 boot epoch changed `0 -> 1`;
+- automatic recovery issued HELLO/PING only;
+- recovered session SID = `3935795157`;
+- SID changed across the STM32 reboot;
+- STM32 boot to recovered session latency = approximately `476 ms`;
+- raw reset generation changed `3 -> 1`, while the composite reset boundary still passed because boot epoch changed;
+- read-only RobotLink GET path worked after recovery;
+- no recovery motion command was observed;
+- no automatic mission/replay resume occurred;
+- final motor state = `L=0`, `R=0`, `MOVE=0`;
+- final motion lease = `NONE`;
+- no watchdog/reboot loop and no unexpected motion.
+
+Host H2 regression tests additionally guard:
+
+- stale terminal cannot complete a new session;
+- duplicate terminal is rejected;
+- session invalidation clears an old correlation pair;
+- raw reset-generation change rejects Resume;
+- STM32 boot-epoch change rejects Resume even if raw reset generation repeats;
+- Alpha.9 protocol recovery is non-motion and runs outside the UART RX task.
+
+H2 exit state: `PASS`.
+
+## Final bounded-motion regression on Alpha.9
+
+Status: `PASS`.
+
+Tested firmware checkpoint:
+
+`7ec2349cb4878d8acba49c09de288cc95c3aef8c`
+
+The final hardware regression used the RobotLink session recovered by Alpha.9 after STM32 reboot:
+
+- recovered session expected/used: `SID = 3935795157`;
+- finite command: `MOVE,FWD,50,10,SID,3935795157,OP,277399117`;
+- ACK correlation = PASS;
+- all observed progress frames used the exact same `(SID, OP)`;
+- terminal: `DONE,MOVE,TARGET,50.0,TRAVEL,53.0,SID,3935795157,OP,277399117`;
+- internal travelled result = `53.0 mm` for a `50.0 mm` target;
+- measured odometry delta = `46.8 mm`;
+- reset generation remained `1 -> 1`;
+- final obstacle state remained `HEALTHY/CLEAR` at approximately `50.8 cm`;
+- final encoder velocities = `0 / 0`;
+- final navigation = `IDLE`;
+- final motion lease = `NONE`;
+- final motor state = `L=0`, `R=0`, `MOVE=0`;
+- no unexpected motion.
+
+## V5 Alpha.3 HIL campaign result
+
+The HIL campaign that started from `5.0.0-alpha.3` is closed with status:
+
+`PASS`
+
+Final gates:
+
+- `H0_FINAL = PASS`;
+- `H1_FINAL = PASS`;
+- `H2_FINAL = PASS`;
+- `FINAL_BOUNDED_MOTION_RESULT = PASS`;
+- `HIL_V5_ALPHA3_CAMPAIGN = PASS`.
+
+The tested final firmware checkpoint for this campaign is:
+
+`7ec2349cb4878d8acba49c09de288cc95c3aef8c` (`5.0.0-alpha.9`).
 
 ## HIL log handling
 
@@ -144,17 +235,19 @@ Current external HIL log root:
 
 `F:\Robot\Robot_AI_HIL_Logs`
 
-Historical Alpha.4 logs were preserved under the external archive before H1 Alpha.5 retest.
+Historical HIL logs were preserved under the external archive during the campaign.
 
-## Still requiring HIL / hardware validation
+## Remaining development / commissioning work
 
-- H2 stale/reset/fault handling;
-- physical left/right sensor mapping under controlled test geometry;
-- encoder and heading calibration/tolerance characterization;
-- Full Replay production commissioning under V5 gates;
-- automatic detour/rejoin commissioning.
+The Alpha.3 core HIL campaign is complete. The following are separate feature-development or commissioning gates and are not implied by the HIL campaign PASS:
 
-Until those gates pass, V5 remains `DEVELOPMENT / NOT PRODUCTION`.
+- physical left/right sensor mapping characterization under controlled test geometry;
+- encoder wheel-diameter / wheelbase and heading calibration/tolerance characterization;
+- Full Replay production commissioning under the hardened V5 gates;
+- automatic obstacle detour / rejoin / resume commissioning;
+- later V5 roadmap features such as closed-loop wheel-speed PID, calibration automation, patrol/waypoint actions and camera/landmark-assisted navigation.
+
+Until the production feature gates are completed, V5 remains `DEVELOPMENT / NOT PRODUCTION` even though the Alpha.3 safety/HIL hardening campaign is complete.
 
 ## Disabled by default
 
@@ -163,7 +256,7 @@ Until those gates pass, V5 remains `DEVELOPMENT / NOT PRODUCTION`.
 - automatic reverse;
 - automatic resume after AI obstacle analysis.
 
-These features must not be enabled only by changing a flag without completing their required HIL gates.
+These features must not be enabled only by changing a flag without completing their required commissioning gates.
 
 ## Naming / compatibility
 
@@ -184,6 +277,7 @@ Do not rename those identifiers casually unless the corresponding build/test ref
 - Active V5 development source: `develop/robot-ai-v5.0`.
 - H0-tested Alpha.4 firmware checkpoint: `08affa1997aa5e56cf5974540ded82dcbfc95fb3`.
 - H1-tested Alpha.5 firmware checkpoint: `dad0a5be9053b004aafce0125410226940afedff`.
+- H2/final-tested Alpha.9 firmware checkpoint: `7ec2349cb4878d8acba49c09de288cc95c3aef8c`.
 - Historical MAP/Replay evidence: `docs/MAP_REPLAY_COMMISSIONING_HISTORY.md`.
 - V5 scope and release gates: `docs/ROBOT_AI_V5_0_PROJECT.md`.
 - V5 HIL procedure: `docs/ROBOT_AI_V5_HIL_PLAN.md`.
