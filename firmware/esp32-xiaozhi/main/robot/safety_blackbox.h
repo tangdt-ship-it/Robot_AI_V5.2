@@ -41,6 +41,7 @@ struct SafetyBlackBoxEvent {
     uint32_t session_id = 0;
     uint32_t operation_id = 0;
     uint32_t reset_generation = 0;
+    uint32_t stm32_boot_epoch = 0;
     uint16_t route_index = 0;
     uint16_t segment_index = 0;
     SafetyEventType type = SafetyEventType::DIAGNOSTIC;
@@ -96,5 +97,11 @@ struct MotionDiagnosticSample {
 // calibration controller; thresholds are only honoured when explicitly known.
 MotionDiagnostic ClassifyMotionDiagnostic(const MotionDiagnosticSample& sample);
 SafetyBlackBox& GetSafetyBlackBox();
+
+// ESP32-local epoch of observed STM32 BOOT frames. It is deliberately volatile:
+// an ESP32 reboot also destroys all volatile Replay/HOLD resume contexts. While
+// the ESP32 remains alive, every STM32 reboot advances this value even when the
+// STM32's raw RESET_GEN restarts at the same numeric value.
+uint32_t GetStm32BootEpoch();
 
 #endif
