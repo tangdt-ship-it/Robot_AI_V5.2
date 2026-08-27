@@ -1,6 +1,7 @@
 #include "safety_blackbox.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 
@@ -9,6 +10,7 @@
 
 namespace {
 constexpr const char* kTag = "SafetyBlackBox";
+std::atomic<uint32_t> g_stm32_boot_epoch{0U};
 
 uint32_t NowMs() {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
@@ -40,17 +42,38 @@ const char* EventTypeName(SafetyEventType type) {
     }
     return "UNKNOWN";
 }
+
+void AdvanceStm32BootEpoch() {
+    uint32_t next = g_stm32_boot_epoch.fetch_add(1U, std::memory_order_relaxed) + 1U;
+    if (next == 0U) {
+        g_stm32_boot_epoch.store(1U, std::memory_order_relaxed);
+    }
+}
 }  // namespace
+
+uint32_t GetStm32BootEpoch() {
+    return g_stm32_boot_epoch.load(std::memory_order_relaxed);
+}
 
 void SafetyBlackBox::Record(SafetyEventType type, uint32_t session_id,
                             uint32_t operation_id, const char* reason,
                             uint32_t reset_generation, uint16_t route_index,
                             uint16_t segment_index) {
+    // RobotUart records exactly one LINK_LOSS/STM32_BOOT breadcrumb for every
+    // observed STM32 BOOT frame. Advance the ESP32-local epoch only on that
+    // specific event so InvalidateMotionCorrelation("STM32_BOOT") cannot
+    // double-count the same reboot.
+    if (type == SafetyEventType::LINK_LOSS && reason != nullptr &&
+        std::strcmp(reason, "STM32_BOOT") == 0) {
+        AdvanceStm32BootEpoch();
+    }
+
     SafetyBlackBoxEvent event{};
     event.timestamp_ms = NowMs();
     event.session_id = session_id;
     event.operation_id = operation_id;
     event.reset_generation = reset_generation;
+    event.stm32_boot_epoch = GetStm32BootEpoch();
     event.route_index = route_index;
     event.segment_index = segment_index;
     event.type = type;
@@ -65,17 +88,18 @@ void SafetyBlackBox::Record(SafetyEventType type, uint32_t session_id,
     size_ = std::min(size_ + 1U, kCapacity);
     portEXIT_CRITICAL(&lock_);
 
-    // Alpha.6 H2 observability: emit each forensic breadcrumb after it has
-    // been committed to the bounded RAM ring. This is telemetry only; it does
-    // not call RobotUart, acquire a motion lease or change actuator state.
+    // Alpha.8 H2 observability: emit each forensic breadcrumb after it has
+    // been committed to the bounded RAM ring. STM32_EPOCH is an ESP32-local
+    // reboot boundary token; this remains telemetry-only and never actuates.
     ESP_LOGI(kTag,
-             "ROBOT_BLACKBOX SEQ=%lu MS=%lu TYPE=%s SID=%lu OP=%lu RESET_GEN=%lu ROUTE=%u SEG=%u REASON=%s",
+             "ROBOT_BLACKBOX SEQ=%lu MS=%lu TYPE=%s SID=%lu OP=%lu RESET_GEN=%lu STM32_EPOCH=%lu ROUTE=%u SEG=%u REASON=%s",
              static_cast<unsigned long>(event.sequence),
              static_cast<unsigned long>(event.timestamp_ms),
              EventTypeName(event.type),
              static_cast<unsigned long>(event.session_id),
              static_cast<unsigned long>(event.operation_id),
              static_cast<unsigned long>(event.reset_generation),
+             static_cast<unsigned long>(event.stm32_boot_epoch),
              static_cast<unsigned>(event.route_index),
              static_cast<unsigned>(event.segment_index),
              event.reason[0] != '\0' ? event.reason : "-");
