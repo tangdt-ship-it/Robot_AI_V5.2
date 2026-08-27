@@ -1,11 +1,13 @@
-# Robot_AI_V5.0 Alpha.7 HIL readiness plan
+# Robot_AI_V5.0 Alpha.8 HIL readiness plan
 
-Alpha.7 is the H2 session-uniqueness hardening follow-up after H0 Alpha.4 and
-H1 Alpha.5 passed on hardware and Alpha.6 established passive black-box
-observability. It does not change STM32 motion control or the RobotLink wire
-format. Its firmware change removes deterministic cross-reboot reuse of the
-first `(SID, OP)` pair by seeding both correlation counters from the ESP32
-hardware RNG before the first protocol negotiation.
+Alpha.8 is the H2 reset-boundary hardening follow-up after H0 Alpha.4 and H1
+Alpha.5 passed on hardware, Alpha.6 established passive black-box observability,
+and Alpha.7 removed deterministic `(SID, OP)` reuse across ESP32 reboots.
+
+Alpha.8 does not change STM32 motion control or the RobotLink wire format. Its
+firmware change makes Replay/HOLD reset-boundary checks depend on both the raw
+STM32 `RESET_GEN` and an ESP32-observed STM32 boot epoch, so a reboot cannot be
+hidden by `RESET_GEN` restarting at the same numeric value.
 
 ## Passed gates
 
@@ -14,38 +16,72 @@ hardware RNG before the first protocol negotiation.
 - H1-B finite TURN + explicit STOP: PASS on Alpha.5 after the waiter lifecycle
   fix; waiter release improved from about 12.86 s to 3.5 ms after `DONE,STOP`.
 - H2 Alpha.6 idle ESP32 session boundary: PASS for physical safety, RobotLink
-  recovery, black-box observation and unchanged STM32 `RESET_GEN`.
+  recovery and passive black-box observation.
+- H2 Alpha.7 correlation seeding: host/static tests PASS and hardware observed a
+  non-fixed random SID after reboot (`3092733370`).
 
-The Alpha.6 boundary run also exposed a correlation issue: after ESP32 reboot,
-`SESSION_SID` returned to `1`, while the operation counter also restarted from
-its initial value. A stale pre-reboot frame could therefore collide with the
-first post-reboot correlation pair. Alpha.7 closes that gap.
+## H2 observations that motivated Alpha.8
+
+During the first Alpha.7 session-uniqueness run, operator reset only ESP32 but
+STM32 `RESET_GEN` changed from `3` to `1`. A later diagnostic ESP32 reset did not
+reproduce an STM32 reboot: `RESET_GEN` stayed `1 -> 1`, odometry/ticks were
+stable and no STM32 BOOT/reset event was observed.
+
+Source audit established two facts:
+
+1. STM32 `resetWheelCounts()` only increments `RESET_GEN`; it cannot change
+   `3 -> 1`.
+2. STM32 odometry `begin()/reset()` initializes a fresh runtime generation, so
+   a real STM32 reboot can restart the raw number and eventually reuse a value
+   that existed before the reboot.
+
+Replay/HOLD previously compared only raw `RESET_GEN`. That is fail-closed for an
+ordinary encoder reset, but it is not a complete reboot boundary if the raw
+number repeats.
 
 ## Alpha.6+ black-box observability
 
-Each `SafetyBlackBox::Record()` event is stored in the fixed 48-entry RAM-only
-ring and emitted as a passive serial breadcrumb:
+Each `SafetyBlackBox::Record()` event remains stored in the fixed 48-entry,
+RAM-only ring and emitted as passive serial telemetry. Alpha.8 adds the current
+STM32 boot epoch to the line:
 
-`ROBOT_BLACKBOX SEQ=<n> MS=<ms> TYPE=<type> SID=<sid> OP=<op> RESET_GEN=<g> ROUTE=<r> SEG=<s> REASON=<reason>`
+`ROBOT_BLACKBOX SEQ=<n> MS=<ms> TYPE=<type> SID=<sid> OP=<op> RESET_GEN=<g> STM32_EPOCH=<e> ROUTE=<r> SEG=<s> REASON=<reason>`
 
 The trace path has no RobotUart/actuator dependency and must never acquire a
 motion lease or issue MOVE/TURN/STOP.
 
-## Alpha.7 correlation seed hardening
+## Alpha.7 correlation seed hardening retained
 
 - `motion_session_id_` starts from a non-zero ESP32 hardware-random seed;
 - `next_operation_id_` starts from an independent non-zero hardware-random
   seed;
-- the existing successful HELLO/PING session advance remains in place;
+- successful HELLO/PING still advances the session;
 - zero remains invalid;
-- no NVS write is introduced, so there is no flash-wear penalty from session
-  negotiation;
-- the RobotLink STM32 protocol is unchanged: SID and OP remain 32-bit values.
+- no NVS write is introduced;
+- RobotLink SID/OP remain 32-bit values.
 
-The hardware authority for this change is the H2 session-uniqueness test: two
-successive ESP32 boots while STM32 remains powered and idle must negotiate
-non-zero SIDs that do not repeat in the observed run, and no motion may occur.
-The independently randomized OP seed further reduces stale-pair collision risk.
+## Alpha.8 STM32 boot epoch boundary
+
+`SafetyBlackBox` advances an ESP32-local `STM32_BOOT_EPOCH` only when RobotUart
+records the specific `LINK_LOSS / STM32_BOOT` breadcrumb generated from the
+STM32 BOOT frame. `InvalidateMotionCorrelation("STM32_BOOT")` cannot double-count
+the same reboot because it records a different event type.
+
+`TeachRoute` stores a `ResetBoundaryToken` instead of a bare reset generation.
+The token captures:
+
+- raw STM32 `RESET_GEN`;
+- current ESP32-observed `STM32_BOOT_EPOCH`.
+
+Existing replay/HOLD comparison sites remain fail-closed:
+
+- raw generation changes -> boundary mismatch;
+- STM32 BOOT epoch changes -> boundary mismatch even if raw generation repeats;
+- zero keeps its existing "no saved boundary" sentinel meaning.
+
+The epoch is deliberately RAM-only. If ESP32 itself reboots, volatile Replay and
+HOLD resume contexts are also destroyed, so no persistent resume context can
+survive with an old epoch.
 
 ## Preconditions
 
@@ -53,64 +89,55 @@ The independently randomized OP seed further reduces stale-pair collision risk.
 - Run all V4/V4.2/V5 host/static tests, including `tools/v5_h2_selftest.py`.
 - Store runtime HIL logs outside the repository under
   `F:\Robot\Robot_AI_HIL_Logs`.
-- Robot must be physically stopped, navigation idle, PS2 neutral and motors 0.
-- H2 must not create a MOVE/TURN merely to obtain evidence.
+- Robot must be stopped, navigation idle, PS2 neutral and motors 0.
+- H2 must not create MOVE/TURN merely to obtain evidence.
 
-## H0 — historical pass
+## H2 remaining gates
 
-H0 established RobotLink HELLO/PING, non-zero SID, strict finite-motion SID/OP
-guards, stopped motor state and no uncontrolled motion.
+1. **Alpha.8 passive/deployment regression**
+   - all tests/build/flash PASS;
+   - black-box includes `STM32_EPOCH`;
+   - normal ESP32 reset while STM32 stays alive does not change the epoch;
+   - no motion occurs.
 
-## H1 — historical pass
+2. **STM32 boot-boundary proof while idle**
+   - only an explicitly approved STM32 reset may be performed;
+   - ESP32 must observe `BOOT,STM32` and increment `STM32_EPOCH`;
+   - motors remain zero and no mission/replay resumes;
+   - raw `RESET_GEN` may restart, but the composite boundary must still change.
 
-H1-A established correlated bounded finite MOVE and matching ACK/progress/DONE.
-H1-B established physical STOP plus prompt finite-waiter cancellation, stale
-result rejection, lease release and final stopped state.
+3. **Stale/missing/duplicate host trace tests**
+   - stale `(SID, OP)` cannot complete a new operation;
+   - duplicate terminal is rejected;
+   - session invalidation clears an old pending pair.
 
-## H2 — fault/recovery observation, no autonomous motion
+4. **Reset generation / HOLD-Resume boundary**
+   - an idle encoder reset changes the saved boundary;
+   - a STM32 boot changes the saved boundary even if raw `RESET_GEN` repeats;
+   - old route/HOLD context is never silently resumed.
 
-1. **Host stale/missing/duplicate trace tests**
-   - stale `(SID, OP)` must not complete a new operation;
-   - duplicate terminal must be rejected;
-   - session invalidation must clear the old pending pair;
-   - reset-generation mismatch must block resume/preflight.
-
-2. **Passive black-box trace**
-   - capture `ROBOT_BLACKBOX` during boot/session negotiation and H2 checks;
-   - sequence values must advance within one boot and fields must be well formed;
-   - no black-box observation may create motion.
-
-3. **ESP32 session-boundary uniqueness**
-   - keep STM32 powered and robot idle;
-   - observe a negotiated SID, reset only ESP32 once, and observe the next SID;
-   - both SIDs must be non-zero and different in the HIL run;
-   - STM32 `RESET_GEN` must not change;
-   - no mission, lease or motor command may resume automatically.
-
-4. **Reset generation**
-   - observe `RESET_GEN` before and after any explicitly approved idle encoder
-     reset action;
-   - if generation changes, old route/hold context must not be silently resumed;
-   - no replay is started automatically in H2.
-
-5. **Diagnostic labels**
-   - `UNCALIBRATED`, `UNAVAILABLE`, `HEADING_UNRELIABLE` or similar labels are
-     observations only; they never authorize an automatic action.
+5. **Final bounded-motion regression**
+   - only after H2 safety gates PASS;
+   - one short finite MOVE may verify randomized SID/OP end-to-end on hardware;
+   - final motor state must be zero.
 
 ## H2 pass criteria
 
 - all host/static/H2 self-tests pass;
 - black-box telemetry is observable and passive;
-- cross-reboot SID reuse is not observed in the approved H2 run;
-- stale/duplicate/session/reset guards remain fail-closed;
-- any approved idle reset/session boundary leaves motors at zero and no active
-  motion lease;
+- Alpha.7 random SID/OP seeding remains intact;
+- STM32 BOOT epoch advances on an observed STM32 reboot and remains stable on an
+  ESP32-only reboot;
+- Replay/HOLD reset-boundary checks reject either raw-generation or boot-epoch
+  changes;
+- stale/duplicate/session guards remain fail-closed;
+- all approved reset boundaries leave motors at zero and no active motion lease;
 - no mission/replay resumes automatically;
 - no uncontrolled run occurs.
 
 ## Exit criteria
 
-Record host/build output, resource sizes, external log path, relevant
-`ROBOT_BLACKBOX` excerpts, pre/post-reset SIDs, reset-generation observations,
-anomalies and final safe state. Alpha.7 remains development firmware until H2
+Record tests/build output, resource sizes, external log paths, relevant
+`ROBOT_BLACKBOX` excerpts including `STM32_EPOCH`, reset/session observations,
+anomalies and final safe state. Alpha.8 remains development firmware until H2
 hardware evidence passes.
