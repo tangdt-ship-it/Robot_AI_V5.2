@@ -278,6 +278,8 @@ Do not rename those identifiers casually unless the corresponding build/test ref
 - H0-tested Alpha.4 firmware checkpoint: `08affa1997aa5e56cf5974540ded82dcbfc95fb3`.
 - H1-tested Alpha.5 firmware checkpoint: `dad0a5be9053b004aafce0125410226940afedff`.
 - H2/final-tested Alpha.9 firmware checkpoint: `7ec2349cb4878d8acba49c09de288cc95c3aef8c`.
+- Alpha.3 HIL closure report: `docs/V5_ALPHA3_HIL_CLOSURE_REPORT.md`.
+- HIL evidence/log manifest: `docs/V5_HIL_EVIDENCE_MANIFEST.md`.
 - Historical MAP/Replay evidence: `docs/MAP_REPLAY_COMMISSIONING_HISTORY.md`.
 - V5 scope and release gates: `docs/ROBOT_AI_V5_0_PROJECT.md`.
 - V5 HIL procedure: `docs/ROBOT_AI_V5_HIL_PLAN.md`.
