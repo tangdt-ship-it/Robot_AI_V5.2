@@ -3,7 +3,8 @@
 
 No serial port, actuator, reset or hardware access is performed. The tests
 exercise stale/session/reset semantics, preserve passive Alpha.6 black-box
-observability, and guard the Alpha.7 cross-reboot correlation seeding fix.
+observability, guard the Alpha.7 cross-reboot correlation seeding fix, and
+protect the Alpha.8 STM32-boot-aware Replay/HOLD reset boundary.
 """
 from __future__ import annotations
 
@@ -58,10 +59,12 @@ class Correlation:
 @dataclass
 class ResumeBoundary:
     saved_generation: int
+    saved_boot_epoch: int
     held: bool = True
 
-    def resume(self, current_generation: int) -> bool:
-        return self.held and current_generation == self.saved_generation
+    def resume(self, current_generation: int, current_boot_epoch: int) -> bool:
+        return (self.held and current_generation == self.saved_generation and
+                current_boot_epoch == self.saved_boot_epoch)
 
 
 class V5H2SelfTest(unittest.TestCase):
@@ -87,10 +90,14 @@ class V5H2SelfTest(unittest.TestCase):
         self.assertTrue(correlation.accept(1, 1))
         self.assertFalse(correlation.accept(1, 1))
 
-    def test_reset_generation_change_blocks_resume(self) -> None:
-        boundary = ResumeBoundary(saved_generation=3)
-        self.assertTrue(boundary.resume(3))
-        self.assertFalse(boundary.resume(4))
+    def test_reset_generation_or_stm32_boot_change_blocks_resume(self) -> None:
+        boundary = ResumeBoundary(saved_generation=3, saved_boot_epoch=7)
+        self.assertTrue(boundary.resume(3, 7))
+        self.assertFalse(boundary.resume(4, 7))
+        # Alpha.8 regression: a reboot may restart raw RESET_GEN at the same
+        # numeric value, but the ESP32-observed STM32 boot epoch must still
+        # invalidate the saved Replay/HOLD boundary.
+        self.assertFalse(boundary.resume(3, 8))
 
     def test_alpha6_blackbox_trace_is_passive(self) -> None:
         source = (ROOT / "firmware/esp32-xiaozhi/main/robot/safety_blackbox.cc").read_text()
@@ -130,11 +137,31 @@ class V5H2SelfTest(unittest.TestCase):
         self.assertIn("++motion_session_id_;", source)
         self.assertIn("if (motion_session_id_ == 0U)", source)
 
-    def test_version_is_alpha6_or_later(self) -> None:
+    def test_alpha8_stm32_boot_epoch_invalidates_reset_boundary(self) -> None:
+        blackbox_h = (ROOT / "firmware/esp32-xiaozhi/main/robot/safety_blackbox.h").read_text()
+        blackbox_cc = (ROOT / "firmware/esp32-xiaozhi/main/robot/safety_blackbox.cc").read_text()
+        teach_h = (ROOT / "firmware/esp32-xiaozhi/main/robot/teach_route.h").read_text()
+
+        self.assertIn("uint32_t stm32_boot_epoch = 0;", blackbox_h)
+        self.assertIn("uint32_t GetStm32BootEpoch();", blackbox_h)
+        self.assertIn("g_stm32_boot_epoch", blackbox_cc)
+        self.assertIn("AdvanceStm32BootEpoch()", blackbox_cc)
+        self.assertIn("type == SafetyEventType::LINK_LOSS", blackbox_cc)
+        self.assertIn('std::strcmp(reason, "STM32_BOOT") == 0', blackbox_cc)
+        self.assertIn("STM32_EPOCH=%lu", blackbox_cc)
+
+        self.assertIn("struct ResetBoundaryToken", teach_h)
+        self.assertIn("stm32_boot_epoch = generation == 0U ? 0U : GetStm32BootEpoch();",
+                      teach_h)
+        self.assertIn("stm32_boot_epoch != GetStm32BootEpoch()", teach_h)
+        self.assertIn("ResetBoundaryToken replay_reset_generation_", teach_h)
+        self.assertIn("ResetBoundaryToken resume_reset_generation_", teach_h)
+
+    def test_version_is_alpha8_or_later(self) -> None:
         version = (ROOT / "VERSION").read_text().strip()
         match = re.fullmatch(r"5\.0\.0-alpha\.(\d+)", version)
         self.assertIsNotNone(match)
-        self.assertGreaterEqual(int(match.group(1)), 6)
+        self.assertGreaterEqual(int(match.group(1)), 8)
 
 
 if __name__ == "__main__":
