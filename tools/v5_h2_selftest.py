@@ -3,8 +3,9 @@
 
 No serial port, actuator, reset or hardware access is performed. The tests
 exercise stale/session/reset semantics, preserve passive Alpha.6 black-box
-observability, guard the Alpha.7 cross-reboot correlation seeding fix, and
-protect the Alpha.8 STM32-boot-aware Replay/HOLD reset boundary.
+observability, guard the Alpha.7 cross-reboot correlation seeding fix, protect
+the Alpha.8 STM32-boot-aware Replay/HOLD reset boundary, and verify Alpha.9
+RobotLink renegotiation remains non-motion and outside the UART RX task.
 """
 from __future__ import annotations
 
@@ -157,11 +158,35 @@ class V5H2SelfTest(unittest.TestCase):
         self.assertIn("ResetBoundaryToken replay_reset_generation_", teach_h)
         self.assertIn("ResetBoundaryToken resume_reset_generation_", teach_h)
 
-    def test_version_is_alpha8_or_later(self) -> None:
+    def test_alpha9_background_protocol_recovery_is_non_motion(self) -> None:
+        header = (ROOT / "firmware/esp32-xiaozhi/main/robot/robot_uart.h").read_text()
+        self.assertIn("ProtocolRecoveryTaskEntry", header)
+        self.assertIn("void ProtocolRecoveryTask()", header)
+        self.assertIn("GetStm32BootEpoch()", header)
+        self.assertIn("current_epoch != observed_epoch", header)
+        self.assertIn("!motion_lease_active_", header)
+        self.assertIn("!motion_correlation_active_", header)
+        self.assertIn("!turn_waiting_", header)
+        self.assertIn("!distance_waiting_", header)
+        self.assertIn("CheckProtocol(700)", header)
+        self.assertIn("ROBOT_SESSION=RECOVERY,STATE=PASS", header)
+        self.assertIn("TaskHandle_t protocol_recovery_task_", header)
+
+        start = header.index("void ProtocolRecoveryTask()")
+        end = header.index("void HandleFrame", start)
+        recovery = header[start:end]
+        # Recovery may only renegotiate HELLO/PING via CheckProtocol. It must
+        # never re-arm a mode, acquire a lease or issue any actuator command.
+        for forbidden in ("SetMode(", "MoveForward(", "MoveDistance(",
+                          "TurnRelative(", "TurnAbsolute(", "Stop(",
+                          "StartContinuous(", "StartContinuousRotation("):
+            self.assertNotIn(forbidden, recovery)
+
+    def test_version_is_alpha9_or_later(self) -> None:
         version = (ROOT / "VERSION").read_text().strip()
         match = re.fullmatch(r"5\.0\.0-alpha\.(\d+)", version)
         self.assertIsNotNone(match)
-        self.assertGreaterEqual(int(match.group(1)), 8)
+        self.assertGreaterEqual(int(match.group(1)), 9)
 
 
 if __name__ == "__main__":
