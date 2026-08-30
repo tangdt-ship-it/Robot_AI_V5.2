@@ -156,6 +156,9 @@ public:
     // Navigate back through recorded odometry breadcrumbs. The robot turns
     // toward each waypoint and drives forward; STM32 safety remains supreme.
     bool StartReturnHome(int speed = 12, bool camera_guidance = true);
+    // Synchronize a completed operator-requested move into the HOME route.
+    // This does not start or stop motion; it only records the resulting pose.
+    bool SyncAfterExternalMotion();
     bool CancelMission();
     // AI Obstacle Assist V1 owns a confirmed STM32 STOP event. This only
     // suppresses the legacy automatic bypass; it never resumes motion.
@@ -202,6 +205,7 @@ private:
     };
 
     static void TaskEntry(void* context);
+    static void ReturnHomeTaskEntry(void* context);
     static void SemanticTaskEntry(void* context);
     void RunSemanticMonitor();
     bool StartSemanticMonitor();
@@ -254,9 +258,12 @@ private:
     void Finish(MissionState terminal_state);
     void ResetMapLocked();
     void UpdateHeading(float heading_deg);
+    bool LoadPersistentHome();
+    bool PersistHomeRoute();
+    bool RestoreOdometryReference();
     bool InitializeOdometryReference(bool reset_breadcrumbs);
     bool SyncPoseFromOdometry(bool record_breadcrumb);
-    void RecordBreadcrumbLocked();
+    bool RecordBreadcrumbLocked();
     bool DriveToBreadcrumb(float x_cm, float y_cm, int max_replans = 3);
     void ObserveRay(float heading_deg, float distance_cm, bool echo_valid);
 
@@ -289,6 +296,7 @@ private:
     float odom_origin_x_mm_ = 0.0f;
     float odom_origin_y_mm_ = 0.0f;
     bool home_valid_ = false;
+    bool persistent_home_ok_ = false;
     float home_heading_deg_ = 0.0f;
     std::vector<Breadcrumb> breadcrumbs_;
     int8_t occupancy_[kMapSize][kMapSize] = {};

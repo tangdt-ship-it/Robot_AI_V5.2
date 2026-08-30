@@ -10,7 +10,12 @@
 #include <vector>
 
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include <esp_rom_crc.h>
+#include <nvs.h>
+
+#include <freertos/idf_additions.h>
 
 #include "cJSON.h"
 
@@ -58,6 +63,34 @@ constexpr int kMinPassSegments = 12;
 constexpr int kMaxPassSegments = 16;    // 112 cm for a longer box.
 constexpr float kReturnClearanceMarginCm = 12.0f;
 constexpr uint32_t kSemanticVisionIntervalMs = 6000;
+// Return Home performs UART transactions, sensor checks and bounded replans,
+// but its large temporary buffers are heap-backed. Keep the task stack in
+// PSRAM so a normal Xiaozhi/audio/camera runtime cannot exhaust internal SRAM.
+constexpr uint32_t kReturnHomeTaskStackBytes = 32768;
+constexpr size_t kMaxPersistedBreadcrumbs = 128;
+constexpr const char* kHomeNvsNamespace = "mission_home";
+constexpr const char* kHomeNvsKey = "route";
+constexpr uint32_t kHomeStorageMagic = 0x4D485231U;  // "MHR1"
+constexpr uint16_t kHomeStorageVersion = 1;
+
+struct PersistentHomeHeader {
+    uint32_t magic = 0;
+    uint16_t version = 0;
+    uint16_t breadcrumb_count = 0;
+    float home_heading_deg = 0.0f;
+    uint32_t crc32 = 0;
+};
+
+struct PersistentBreadcrumb {
+    float x_cm = 0.0f;
+    float y_cm = 0.0f;
+    float heading_deg = 0.0f;
+};
+
+static_assert(sizeof(PersistentHomeHeader) == 16,
+              "persistent HOME header layout changed");
+static_assert(sizeof(PersistentBreadcrumb) == 12,
+              "persistent breadcrumb layout changed");
 
 uint32_t NowMs() {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
@@ -82,11 +115,14 @@ private:
 
 MissionManager::MissionManager(RobotUart* robot_uart)
     : robot_uart_(robot_uart), mutex_(xSemaphoreCreateMutex()) {
-    LockGuard lock(mutex_);
-    if (lock.locked()) {
-        ResetMapLocked();
-        planner_self_test_ok_ = PlannerSelfTest();
+    {
+        LockGuard lock(mutex_);
+        if (lock.locked()) {
+            ResetMapLocked();
+            planner_self_test_ok_ = PlannerSelfTest();
+        }
     }
+    LoadPersistentHome();
     ESP_LOGI(kShadowTag, "Planner self-test: %s; shadow-only=%d",
              planner_self_test_ok_ ? "PASS" : "FAIL", ShadowModeEnabled());
 }
@@ -286,6 +322,34 @@ bool MissionManager::StartReturnHome(int speed, bool camera_guidance) {
         return false;
     }
     speed = std::clamp(speed, 10, 20);
+    bool needs_reference_restore = false;
+    bool home_available = false;
+    bool mission_active = false;
+    {
+        LockGuard lock(mutex_);
+        if (lock.locked()) {
+            mission_active = active_;
+            home_available = home_valid_ && !breadcrumbs_.empty();
+            // Keep the live odometry reference after an operator move. Rebase
+            // only when invalidated by an ESP32/STM32 reboot.
+            needs_reference_restore = home_available && !odom_reference_valid_;
+        }
+    }
+    if (mission_active) {
+        SetFailure("mission_already_active");
+        return false;
+    }
+    if (!home_available) {
+        SetFailure("home_not_available");
+        return false;
+    }
+    const bool odom_ready = needs_reference_restore
+                                ? RestoreOdometryReference()
+                                : SyncPoseFromOdometry(false);
+    if (!odom_ready) {
+        SetFailure("return_home_odometry_restore_failed");
+        return false;
+    }
     {
         LockGuard lock(mutex_);
         if (!lock.locked() || active_ || !home_valid_ ||
@@ -306,8 +370,10 @@ bool MissionManager::StartReturnHome(int speed, bool camera_guidance) {
         cancel_requested_.store(false);
         active_ = true;
     }
-    if (xTaskCreatePinnedToCore(TaskEntry, "robot_return_home", 12288, this, 3,
-                                &task_, 1) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(
+            ReturnHomeTaskEntry, "robot_return_home",
+            kReturnHomeTaskStackBytes, this, 3, &task_, 1,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         SetFailure("cannot_start_return_home_task");
         Finish(MissionState::FAILED);
         return false;
@@ -1119,33 +1185,284 @@ void MissionManager::UpdateHeading(float heading_deg) {
     context_.last_update_ms = NowMs();
 }
 
+bool MissionManager::LoadPersistentHome() {
+    nvs_handle_t handle = 0;
+    const esp_err_t open_error =
+        nvs_open(kHomeNvsNamespace, NVS_READONLY, &handle);
+    if (open_error == ESP_ERR_NVS_NOT_FOUND) return false;
+    if (open_error != ESP_OK) {
+        ESP_LOGE(kTag, "HOME storage open failed: %s",
+                 esp_err_to_name(open_error));
+        return false;
+    }
+
+    size_t size = 0;
+    esp_err_t error = nvs_get_blob(handle, kHomeNvsKey, nullptr, &size);
+    if (error != ESP_OK || size < sizeof(PersistentHomeHeader) ||
+        size > sizeof(PersistentHomeHeader) +
+                    kMaxPersistedBreadcrumbs * sizeof(PersistentBreadcrumb)) {
+        nvs_close(handle);
+        if (error != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(kTag, "HOME storage unavailable or invalid size=%u",
+                     static_cast<unsigned>(size));
+        }
+        return false;
+    }
+
+    std::vector<uint8_t> bytes(size);
+    error = nvs_get_blob(handle, kHomeNvsKey, bytes.data(), &size);
+    nvs_close(handle);
+    if (error != ESP_OK || size != bytes.size()) {
+        ESP_LOGW(kTag, "HOME storage read failed: %s", esp_err_to_name(error));
+        return false;
+    }
+
+    PersistentHomeHeader header;
+    memcpy(&header, bytes.data(), sizeof(header));
+    const size_t expected_size = sizeof(header) +
+        static_cast<size_t>(header.breadcrumb_count) *
+            sizeof(PersistentBreadcrumb);
+    if (header.magic != kHomeStorageMagic ||
+        header.version != kHomeStorageVersion ||
+        header.breadcrumb_count == 0 ||
+        header.breadcrumb_count > kMaxPersistedBreadcrumbs ||
+        expected_size != bytes.size() || !std::isfinite(header.home_heading_deg)) {
+        ESP_LOGW(kTag, "HOME storage header validation failed");
+        return false;
+    }
+
+    const uint32_t expected_crc = header.crc32;
+    header.crc32 = 0;
+    uint32_t crc = esp_rom_crc32_le(
+        0, reinterpret_cast<const uint8_t*>(&header), sizeof(header));
+    crc = esp_rom_crc32_le(
+        crc, bytes.data() + sizeof(header),
+        static_cast<uint32_t>(bytes.size() - sizeof(header)));
+    if (crc != expected_crc) {
+        ESP_LOGW(kTag, "HOME storage CRC validation failed");
+        return false;
+    }
+
+    std::vector<Breadcrumb> restored;
+    restored.reserve(header.breadcrumb_count);
+    for (size_t i = 0; i < header.breadcrumb_count; ++i) {
+        PersistentBreadcrumb point;
+        memcpy(&point, bytes.data() + sizeof(header) +
+                   i * sizeof(point), sizeof(point));
+        if (!std::isfinite(point.x_cm) || !std::isfinite(point.y_cm) ||
+            !std::isfinite(point.heading_deg)) {
+            ESP_LOGW(kTag, "HOME storage point validation failed index=%u",
+                     static_cast<unsigned>(i));
+            return false;
+        }
+        restored.push_back({point.x_cm, point.y_cm,
+                            NormalizeHeading(point.heading_deg)});
+    }
+    if (std::fabs(restored.front().x_cm) > 1.0f ||
+        std::fabs(restored.front().y_cm) > 1.0f) {
+        ESP_LOGW(kTag, "HOME storage origin validation failed");
+        return false;
+    }
+
+    {
+        LockGuard lock(mutex_);
+        if (!lock.locked()) return false;
+        home_valid_ = true;
+        persistent_home_ok_ = true;
+        odom_reference_valid_ = false;
+        home_heading_deg_ = NormalizeHeading(header.home_heading_deg);
+        breadcrumbs_ = std::move(restored);
+        context_.pose.x_cm = breadcrumbs_.back().x_cm;
+        context_.pose.y_cm = breadcrumbs_.back().y_cm;
+        context_.pose.heading_deg = breadcrumbs_.back().heading_deg;
+        context_.pose.confidence_pct = 80.0f;
+    }
+    ESP_LOGI(kTag, "HOME_RESTORED breadcrumbs=%u heading=%.1f",
+             static_cast<unsigned>(header.breadcrumb_count),
+             home_heading_deg_);
+    return true;
+}
+
+bool MissionManager::SyncAfterExternalMotion() {
+    if (robot_uart_ == nullptr || mutex_ == nullptr) return false;
+
+    bool needs_reference_restore = false;
+    {
+        LockGuard lock(mutex_);
+        if (!lock.locked()) return false;
+        // Manual distance commands must never race an autonomous or
+        // return-home task. The UART layer serializes packets, but it cannot
+        // decide which motion owner is allowed to update the route.
+        if (active_) return false;
+        if (!home_valid_) return true;
+        needs_reference_restore = !odom_reference_valid_;
+    }
+    if (needs_reference_restore && !RestoreOdometryReference()) return false;
+
+    RobotOdometry odom;
+    if (!robot_uart_->GetOdometry(odom, 700) || !odom.valid) return false;
+    const float heading_deg = NormalizeHeading(odom.heading_rad * 180.0f / kPi);
+    bool breadcrumb_added = false;
+    {
+        LockGuard lock(mutex_);
+        if (!lock.locked() || !home_valid_ || !odom_reference_valid_) return false;
+        context_.pose.x_cm = (odom.x_mm - odom_origin_x_mm_) / 10.0f;
+        context_.pose.y_cm = (odom.y_mm - odom_origin_y_mm_) / 10.0f;
+        context_.pose.heading_deg = heading_deg;
+        context_.pose.confidence_pct = 95.0f;
+        context_.last_update_ms = NowMs();
+
+        // External moves may be shorter than the autonomous breadcrumb
+        // interval. Record a meaningful operator move so a 10 cm test move is
+        // still available after reboot and can be followed back to HOME.
+        constexpr float kExternalMoveRecordCm = 1.5f;
+        constexpr float kExternalHeadingRecordDeg = 2.0f;
+        const Breadcrumb current{context_.pose.x_cm, context_.pose.y_cm,
+                                 context_.pose.heading_deg};
+        if (breadcrumbs_.empty()) {
+            breadcrumbs_.push_back(current);
+            breadcrumb_added = true;
+        } else {
+            const Breadcrumb& last = breadcrumbs_.back();
+            const float dx = current.x_cm - last.x_cm;
+            const float dy = current.y_cm - last.y_cm;
+            const float distance = std::sqrt(dx * dx + dy * dy);
+            const float heading_delta = std::fabs(
+                NormalizeHeading(current.heading_deg - last.heading_deg));
+            if (distance >= kExternalMoveRecordCm ||
+                heading_delta >= kExternalHeadingRecordDeg) {
+                constexpr size_t kMaxBreadcrumbs = 512;
+                if (breadcrumbs_.size() >= kMaxBreadcrumbs) {
+                    breadcrumbs_.erase(breadcrumbs_.begin() + 1);
+                }
+                breadcrumbs_.push_back(current);
+                breadcrumb_added = true;
+            }
+        }
+    }
+    if (breadcrumb_added && !PersistHomeRoute()) {
+        LockGuard lock(mutex_);
+        if (lock.locked()) persistent_home_ok_ = false;
+        return false;
+    }
+    return true;
+}
+
+bool MissionManager::PersistHomeRoute() {
+    std::vector<Breadcrumb> route;
+    float home_heading = 0.0f;
+    {
+        LockGuard lock(mutex_);
+        if (!lock.locked() || !home_valid_ || breadcrumbs_.empty()) {
+            return false;
+        }
+        route = breadcrumbs_;
+        home_heading = home_heading_deg_;
+    }
+
+    // Keep HOME at index zero and retain the newest points if the in-memory
+    // route exceeds the compact NVS record. DriveToBreadcrumb already limits
+    // each physical leg and rechecks obstacles, so this bounded thinning is
+    // safe while keeping the record below the 16 KiB NVS partition budget.
+    if (route.size() > kMaxPersistedBreadcrumbs) {
+        std::vector<Breadcrumb> compact;
+        compact.reserve(kMaxPersistedBreadcrumbs);
+        compact.push_back(route.front());
+        const size_t first_newest = route.size() -
+                                     (kMaxPersistedBreadcrumbs - 1U);
+        compact.insert(compact.end(), route.begin() + first_newest,
+                       route.end());
+        route = std::move(compact);
+    }
+
+    PersistentHomeHeader header;
+    header.magic = kHomeStorageMagic;
+    header.version = kHomeStorageVersion;
+    header.breadcrumb_count = static_cast<uint16_t>(route.size());
+    header.home_heading_deg = NormalizeHeading(home_heading);
+    header.crc32 = 0;
+
+    std::vector<uint8_t> bytes(
+        sizeof(header) + route.size() * sizeof(PersistentBreadcrumb));
+    memcpy(bytes.data(), &header, sizeof(header));
+    for (size_t i = 0; i < route.size(); ++i) {
+        const PersistentBreadcrumb point{
+            route[i].x_cm, route[i].y_cm, NormalizeHeading(route[i].heading_deg)};
+        memcpy(bytes.data() + sizeof(header) + i * sizeof(point), &point,
+               sizeof(point));
+    }
+    uint32_t crc = esp_rom_crc32_le(0, bytes.data(), sizeof(header));
+    crc = esp_rom_crc32_le(crc, bytes.data() + sizeof(header),
+                           static_cast<uint32_t>(bytes.size() - sizeof(header)));
+    header.crc32 = crc;
+    memcpy(bytes.data(), &header, sizeof(header));
+
+    nvs_handle_t handle = 0;
+    esp_err_t error = nvs_open(kHomeNvsNamespace, NVS_READWRITE, &handle);
+    if (error == ESP_OK) {
+        error = nvs_set_blob(handle, kHomeNvsKey, bytes.data(), bytes.size());
+    }
+    if (error == ESP_OK) error = nvs_commit(handle);
+    if (handle != 0) nvs_close(handle);
+    if (error != ESP_OK) {
+        ESP_LOGE(kTag, "HOME storage write failed: %s", esp_err_to_name(error));
+        return false;
+    }
+    return true;
+}
+
+bool MissionManager::RestoreOdometryReference() {
+    if (robot_uart_ == nullptr) return false;
+    RobotOdometry odom;
+    if (!robot_uart_->GetOdometry(odom, 700) || !odom.valid) return false;
+    LockGuard lock(mutex_);
+    if (!lock.locked() || !home_valid_ || breadcrumbs_.empty()) return false;
+    const Breadcrumb& last = breadcrumbs_.back();
+    // Rebase against the last durable home-relative pose. This works both
+    // when STM32 rebooted and reset its odometry and when only ESP32 rebooted.
+    odom_origin_x_mm_ = odom.x_mm - last.x_cm * 10.0f;
+    odom_origin_y_mm_ = odom.y_mm - last.y_cm * 10.0f;
+    odom_reference_valid_ = true;
+    context_.pose.x_cm = last.x_cm;
+    context_.pose.y_cm = last.y_cm;
+    context_.pose.heading_deg = NormalizeHeading(
+        odom.heading_rad * 180.0f / kPi);
+    context_.pose.confidence_pct = 80.0f;
+    return true;
+}
+
 bool MissionManager::InitializeOdometryReference(bool reset_breadcrumbs) {
     if (robot_uart_ == nullptr) return false;
     RobotOdometry odom;
     if (!robot_uart_->GetOdometry(odom, 700) || !odom.valid) return false;
     const float heading_deg = NormalizeHeading(odom.heading_rad * 180.0f / kPi);
-    LockGuard lock(mutex_);
-    if (!lock.locked()) return false;
-    odom_origin_x_mm_ = odom.x_mm;
-    odom_origin_y_mm_ = odom.y_mm;
-    odom_reference_valid_ = true;
-    home_valid_ = true;
-    home_heading_deg_ = heading_deg;
-    context_.pose.x_cm = 0.0f;
-    context_.pose.y_cm = 0.0f;
-    context_.pose.heading_deg = heading_deg;
-    context_.pose.confidence_pct = 95.0f;
-    if (reset_breadcrumbs) {
-        breadcrumbs_.clear();
-        breadcrumbs_.push_back({0.0f, 0.0f, heading_deg});
+    {
+        LockGuard lock(mutex_);
+        if (!lock.locked()) return false;
+        odom_origin_x_mm_ = odom.x_mm;
+        odom_origin_y_mm_ = odom.y_mm;
+        odom_reference_valid_ = true;
+        home_valid_ = true;
+        home_heading_deg_ = heading_deg;
+        context_.pose.x_cm = 0.0f;
+        context_.pose.y_cm = 0.0f;
+        context_.pose.heading_deg = heading_deg;
+        context_.pose.confidence_pct = 95.0f;
+        if (reset_breadcrumbs) {
+            breadcrumbs_.clear();
+            breadcrumbs_.push_back({0.0f, 0.0f, heading_deg});
+        }
+        context_.last_update_ms = NowMs();
     }
-    context_.last_update_ms = NowMs();
     ESP_LOGI(kTag, "HOME_SET odom=(%.1f,%.1f) heading=%.1f",
              odom_origin_x_mm_, odom_origin_y_mm_, home_heading_deg_);
-    return true;
+    const bool persisted = PersistHomeRoute();
+    persistent_home_ok_ = persisted;
+    if (!persisted) ESP_LOGE(kTag, "HOME_PERSIST_FAILED");
+    return persisted;
 }
 
-void MissionManager::RecordBreadcrumbLocked() {
+bool MissionManager::RecordBreadcrumbLocked() {
     constexpr float kBreadcrumbDistanceCm = 12.5f;
     constexpr float kBreadcrumbHeadingDeg = 12.0f;
     constexpr size_t kMaxBreadcrumbs = 512;
@@ -1153,7 +1470,7 @@ void MissionManager::RecordBreadcrumbLocked() {
                              context_.pose.heading_deg};
     if (breadcrumbs_.empty()) {
         breadcrumbs_.push_back(current);
-        return;
+        return true;
     }
     const Breadcrumb& last = breadcrumbs_.back();
     const float dx = current.x_cm - last.x_cm;
@@ -1163,13 +1480,14 @@ void MissionManager::RecordBreadcrumbLocked() {
         NormalizeHeading(current.heading_deg - last.heading_deg));
     if (distance < kBreadcrumbDistanceCm &&
         heading_delta < kBreadcrumbHeadingDeg) {
-        return;
+        return false;
     }
     if (breadcrumbs_.size() >= kMaxBreadcrumbs) {
         // Preserve HOME at index 0 while thinning the oldest travelled points.
         breadcrumbs_.erase(breadcrumbs_.begin() + 1);
     }
     breadcrumbs_.push_back(current);
+    return true;
 }
 
 bool MissionManager::SyncPoseFromOdometry(bool record_breadcrumb) {
@@ -1177,15 +1495,22 @@ bool MissionManager::SyncPoseFromOdometry(bool record_breadcrumb) {
     RobotOdometry odom;
     if (!robot_uart_->GetOdometry(odom, 700) || !odom.valid) return false;
     const float heading_deg = NormalizeHeading(odom.heading_rad * 180.0f / kPi);
-    LockGuard lock(mutex_);
-    if (!lock.locked() || !odom_reference_valid_) return false;
-    context_.pose.x_cm = (odom.x_mm - odom_origin_x_mm_) / 10.0f;
-    context_.pose.y_cm = (odom.y_mm - odom_origin_y_mm_) / 10.0f;
-    context_.pose.heading_deg = heading_deg;
-    context_.pose.confidence_pct = 95.0f;
-    context_.last_update_ms = NowMs();
-    if (record_breadcrumb && context_.type != MissionType::RETURN_HOME) {
-        RecordBreadcrumbLocked();
+    bool breadcrumb_added = false;
+    {
+        LockGuard lock(mutex_);
+        if (!lock.locked() || !odom_reference_valid_) return false;
+        context_.pose.x_cm = (odom.x_mm - odom_origin_x_mm_) / 10.0f;
+        context_.pose.y_cm = (odom.y_mm - odom_origin_y_mm_) / 10.0f;
+        context_.pose.heading_deg = heading_deg;
+        context_.pose.confidence_pct = 95.0f;
+        context_.last_update_ms = NowMs();
+        if (record_breadcrumb && context_.type != MissionType::RETURN_HOME) {
+            breadcrumb_added = RecordBreadcrumbLocked();
+        }
+    }
+    if (breadcrumb_added && !PersistHomeRoute()) {
+        LockGuard lock(mutex_);
+        if (lock.locked()) persistent_home_ok_ = false;
     }
     return true;
 }
@@ -1400,8 +1725,11 @@ MissionManager::MotionResult MissionManager::DriveDistanceCm(
 }
 
 bool MissionManager::DriveToBreadcrumb(float x_cm, float y_cm,
-                                       int max_replans) {
-    constexpr float kWaypointToleranceCm = 12.0f;
+                                        int max_replans) {
+    // A 12 cm tolerance made a 10 cm operator test move look like HOME and
+    // skipped the only return leg. Keep this below the smallest commissioned
+    // move while allowing normal encoder settling.
+    constexpr float kWaypointToleranceCm = 4.0f;
     constexpr float kMaxReturnStepCm = 60.0f;
     int replans = 0;
     for (int advance = 0; advance < 10 && !CancelRequested(); ++advance) {
@@ -2199,6 +2527,14 @@ void MissionManager::RunReturnHome() {
     ESP_LOGI(kTag, "Return-home task ended: %s", StateName(final_state));
 }
 
+void MissionManager::ReturnHomeTaskEntry(void* context) {
+    MissionManager* manager = static_cast<MissionManager*>(context);
+    manager->RunReturnHome();
+    // The stack was allocated from PSRAM by the WithCaps API and must be
+    // released by its matching deleter.
+    vTaskDeleteWithCaps(nullptr);
+}
+
 void MissionManager::TaskEntry(void* context) {
     MissionManager* manager = static_cast<MissionManager*>(context);
     if (manager->ai_obstacle_hold_.load()) {
@@ -2217,8 +2553,6 @@ void MissionManager::TaskEntry(void* context) {
         manager->RunShadowScan();
     } else if (type == MissionType::BYPASS_ONCE) {
         manager->RunBypassOnce();
-    } else if (type == MissionType::RETURN_HOME) {
-        manager->RunReturnHome();
     } else {
         manager->RunAutonomous();
     }
@@ -2241,12 +2575,19 @@ void MissionManager::RunAutonomous() {
         if (lock.locked()) motion_speed = context_.speed;
     }
     bool need_home = true;
+    bool need_reference_restore = false;
     {
         LockGuard lock(mutex_);
-        if (lock.locked()) need_home = !home_valid_;
+        if (lock.locked()) {
+            need_home = !home_valid_;
+            need_reference_restore = home_valid_ && !odom_reference_valid_;
+        }
     }
-    const bool odom_ready = need_home ? InitializeOdometryReference(true)
-                                      : SyncPoseFromOdometry(true);
+    const bool odom_ready = need_home
+                                ? InitializeOdometryReference(true)
+                                : (need_reference_restore
+                                       ? RestoreOdometryReference()
+                                       : SyncPoseFromOdometry(true));
     if (!odom_ready) {
         SetFailure("odometry_not_ready");
         Finish(MissionState::FAILED);
@@ -2474,8 +2815,9 @@ std::string MissionManager::StatusJson() const {
     if (!result.empty() && result.back() == '}') {
         char extra[160];
         snprintf(extra, sizeof(extra),
-                 ",\"home_valid\":%s,\"breadcrumbs\":%u,\"home_heading_deg\":%.1f",
+                 ",\"home_valid\":%s,\"home_persisted\":%s,\"breadcrumbs\":%u,\"home_heading_deg\":%.1f",
                  home_valid_ ? "true" : "false",
+                 persistent_home_ok_ ? "true" : "false",
                  static_cast<unsigned>(breadcrumbs_.size()), home_heading_deg_);
         result.insert(result.size() - 1U, extra);
     }
@@ -2487,8 +2829,9 @@ std::string MissionManager::HomeJson() const {
     if (!lock.locked()) return "{\"ok\":false,\"error\":\"lock_timeout\"}";
     char json[320];
     snprintf(json, sizeof(json),
-             "{\"ok\":true,\"home_valid\":%s,\"home_heading_deg\":%.1f,\"breadcrumbs\":%u,\"pose\":{\"x_cm\":%.1f,\"y_cm\":%.1f,\"heading_deg\":%.1f},\"localization\":\"stm32_encoder_plus_fused_heading\"}",
-             home_valid_ ? "true" : "false", home_heading_deg_,
+             "{\"ok\":true,\"home_valid\":%s,\"home_persisted\":%s,\"home_heading_deg\":%.1f,\"breadcrumbs\":%u,\"pose\":{\"x_cm\":%.1f,\"y_cm\":%.1f,\"heading_deg\":%.1f},\"localization\":\"stm32_encoder_plus_fused_heading\"}",
+             home_valid_ ? "true" : "false",
+             persistent_home_ok_ ? "true" : "false", home_heading_deg_,
              static_cast<unsigned>(breadcrumbs_.size()), context_.pose.x_cm,
              context_.pose.y_cm, context_.pose.heading_deg);
     return std::string(json);

@@ -579,6 +579,14 @@ private:
             "Di chuyển thẳng theo quãng đường encoder thực đo. Dùng khi người dùng yêu cầu tiến hoặc lùi một số mm/cm/m cụ thể. Robot tự dừng khi đạt mục tiêu, khi gặp vật cản, timeout, PS2 override hoặc link lỗi. Không khẳng định đã đi đủ quãng đường nếu completed=false.",
             distance_motion_property,
             [this](const PropertyList& properties) -> ReturnValue {
+                // move_distance is an operator-owned, closed-loop motion.
+                // Reject it while a mission owns the STM32 motion channel so
+                // two callers cannot wait on or overwrite the same terminal
+                // DONE/ERROR response.
+                if (mission_manager_.IsActive()) {
+                    return std::string(
+                        "{\"completed\":false,\"error\":\"autonomous_mission_active\"}");
+                }
                 const int distance_mm = properties["distance_mm"].value<int>();
                 const bool forward = properties["forward"].value<bool>();
                 const int speed = properties["speed"].value<int>();
@@ -587,12 +595,14 @@ private:
                     robot_uart_.MoveDistance(forward, distance_mm, speed,
                                               result, 31000);
                 robot_uart_.SetMode(false, 700);
-                char json[192];
+                const bool pose_synced = mission_manager_.SyncAfterExternalMotion();
+                char json[224];
                 snprintf(json, sizeof(json),
-                         "{\"completed\":%s,\"direction\":\"%s\",\"target_mm\":%.1f,\"travelled_mm\":%.1f}",
+                         "{\"completed\":%s,\"direction\":\"%s\",\"target_mm\":%.1f,\"travelled_mm\":%.1f,\"pose_synced\":%s}",
                          completed ? "true" : "false",
                          forward ? "forward" : "backward",
-                         result.target_mm, result.travelled_mm);
+                         result.target_mm, result.travelled_mm,
+                         pose_synced ? "true" : "false");
                 return std::string(json);
             });
         mcp_server.AddTool(
