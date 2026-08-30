@@ -1,5 +1,7 @@
 #include "system_info.h"
 
+#include <cstring>
+#include <esp_heap_caps.h>
 #include <freertos/task.h>
 #include <esp_log.h>
 #include <esp_flash.h>
@@ -14,6 +16,56 @@
 #endif
 
 #define TAG "SystemInfo"
+
+namespace {
+
+struct TaskStackProfile {
+    const char* name;
+    size_t allocated_bytes;
+    const char* memory;
+};
+
+constexpr TaskStackProfile kTaskStackProfiles[] = {
+    {"activation", 8192, "INTERNAL"},
+    {"acoustic_wifi", 4096, "INTERNAL"},
+    {"wifi_cfg_delay", 4096, "INTERNAL"},
+    {"ml307_net", 4096, "INTERNAL"},
+    {"CameraInitTask", 4096, "INTERNAL"},
+    {"audio_input", 6144, "INTERNAL"},
+    {"audio_output", 4096, "INTERNAL"},
+    {"opus_codec", 24576, "INTERNAL"},
+    {"audio_communication", 4096, "INTERNAL"},
+    {"audio_detection", 4096, "INTERNAL"},
+    {"encode_wake_word", 28672, "PSRAM"},
+    {"LedEvent", 2048, "INTERNAL"},
+    {"robot_navigation", 10240, "INTERNAL"},
+    {"robot_return_home", 32768, "PSRAM"},
+    {"robot_shadow_scan", 8192, "INTERNAL"},
+    {"robot_bypass_once", 12288, "INTERNAL"},
+    {"road_ai_upload", 4608, "INTERNAL"},
+    {"robot_proto_recovery", 3072, "INTERNAL"},
+    {"robot_uart_rx", 4096, "INTERNAL"},
+    {"robot_link_test", 3072, "INTERNAL"},
+    {"robot_heartbeat", 2048, "INTERNAL"},
+    {"robot_diag_turn", 4096, "INTERNAL"},
+    {"robot_diag_console", 4096, "INTERNAL"},
+    {"blufi_deinit", 4096, "INTERNAL"},
+    {"blufi_wifi_conn", 4096, "INTERNAL"},
+    {"map_replay_b1", 4096, "INTERNAL"},
+    {"map_replay_b2", 4096, "INTERNAL"},
+    {"map_replay_b3", 4096, "INTERNAL"},
+    {"map_replay_full", 6144, "INTERNAL"},
+    {"map_replay_resume", 6144, "INTERNAL"},
+};
+
+const TaskStackProfile* FindTaskStackProfile(const char* name) {
+    for (const auto& profile : kTaskStackProfiles) {
+        if (std::strcmp(profile.name, name) == 0) return &profile;
+    }
+    return nullptr;
+}
+
+}  // namespace
 
 size_t SystemInfo::GetFlashSize() {
     uint32_t flash_size;
@@ -145,10 +197,61 @@ void SystemInfo::PrintTaskList() {
     ESP_LOGI(TAG, "Task list: \n%s", buffer);
 }
 
+void SystemInfo::PrintTaskStackHighWaterMarks() {
+    static uint32_t sample_count = 0;
+    if (++sample_count % 3 != 0) return;
+
+    const UBaseType_t capacity = uxTaskGetNumberOfTasks() + 5;
+    auto* tasks = static_cast<TaskStatus_t*>(heap_caps_malloc(
+        sizeof(TaskStatus_t) * capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (tasks == nullptr) {
+        ESP_LOGW(TAG, "TASK_STACK sampler allocation failed");
+        return;
+    }
+
+    const UBaseType_t count = uxTaskGetSystemState(tasks, capacity, nullptr);
+    for (UBaseType_t i = 0; i < count; ++i) {
+        const TaskStackProfile* profile = FindTaskStackProfile(tasks[i].pcTaskName);
+        if (profile == nullptr) continue;
+
+        const size_t min_free_bytes =
+            static_cast<size_t>(tasks[i].usStackHighWaterMark) * sizeof(StackType_t);
+        const size_t peak_used_bytes = profile->allocated_bytes > min_free_bytes
+            ? profile->allocated_bytes - min_free_bytes : 0;
+        ESP_LOGI(TAG,
+                 "TASK_STACK,NAME=%s,ALLOCATED=%u,MIN_FREE=%u,PEAK_USED=%u,MEMORY=%s,PRIORITY=%u",
+                 tasks[i].pcTaskName,
+                 static_cast<unsigned>(profile->allocated_bytes),
+                 static_cast<unsigned>(min_free_bytes),
+                 static_cast<unsigned>(peak_used_bytes), profile->memory,
+                 static_cast<unsigned>(tasks[i].uxCurrentPriority));
+    }
+    heap_caps_free(tasks);
+}
+
 void SystemInfo::PrintHeapStats() {
-    int free_sram = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    int min_free_sram = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGI(TAG, "free sram: %u minimal sram: %u", free_sram, min_free_sram);
+    const size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const size_t internal_min = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    const size_t internal_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    const size_t dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    const size_t dma_min = heap_caps_get_minimum_free_size(MALLOC_CAP_DMA);
+    const size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    const size_t psram_min = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+    const size_t psram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+
+    ESP_LOGI(TAG,
+             "HEAP,INTERNAL_FREE=%u,INTERNAL_MIN=%u,INTERNAL_LARGEST=%u,"
+             "DMA_FREE=%u,DMA_MIN=%u,PSRAM_FREE=%u,PSRAM_MIN=%u,"
+             "PSRAM_LARGEST=%u",
+             static_cast<unsigned>(internal_free),
+             static_cast<unsigned>(internal_min),
+             static_cast<unsigned>(internal_largest),
+             static_cast<unsigned>(dma_free),
+             static_cast<unsigned>(dma_min),
+             static_cast<unsigned>(psram_free),
+             static_cast<unsigned>(psram_min),
+             static_cast<unsigned>(psram_largest));
+    PrintTaskStackHighWaterMarks();
 }
 
 void SystemInfo::PrintPmLocks() {

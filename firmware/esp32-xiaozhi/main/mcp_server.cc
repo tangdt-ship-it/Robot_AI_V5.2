@@ -258,7 +258,10 @@ void McpServer::AddUserOnlyTools() {
                 }
 
                 size_t content_length = http->GetBodyLength();
-                char* data = (char*)heap_caps_malloc(content_length, MALLOC_CAP_8BIT);
+                // The preview image is retained by LvglAllocatedImage and is
+                // not used by a DMA or realtime path; keep it in PSRAM.
+                char* data = (char*)heap_caps_malloc(
+                    content_length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
                 if (data == nullptr) {
                     throw std::runtime_error("Failed to allocate memory for image: " + url);
                 }

@@ -16,6 +16,7 @@ public:
     static std::string GetUserAgent();
     static esp_err_t PrintTaskCpuUsage(TickType_t xTicksToWait);
     static void PrintTaskList();
+    static void PrintTaskStackHighWaterMarks();
     static void PrintHeapStats();
     static void PrintPmLocks();
 };
