@@ -18,6 +18,7 @@ public:
     static void PrintTaskList();
     static void PrintTaskStackHighWaterMarks();
     static void PrintHeapStats();
+    static void PrintMemoryCheckpoint(const char* checkpoint);
     static void PrintPmLocks();
 };
 

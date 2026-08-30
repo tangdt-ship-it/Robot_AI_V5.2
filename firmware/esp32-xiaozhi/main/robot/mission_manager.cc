@@ -300,8 +300,9 @@ bool MissionManager::StartAutonomousForward(int speed,
         active_ = true;
     }
 
-    if (xTaskCreatePinnedToCore(TaskEntry, "robot_navigation", 10240, this, 3,
-                                &task_, 1) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(
+            TaskEntry, "robot_navigation", 10240, this, 3, &task_, 1,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         SetFailure("cannot_start_navigation_task");
         Finish(MissionState::FAILED);
         return false;
@@ -428,8 +429,9 @@ bool MissionManager::StartShadowScan(float scan_angle_deg) {
         cancel_requested_.store(false);
         active_ = true;
     }
-    if (xTaskCreatePinnedToCore(TaskEntry, "robot_shadow_scan", 8192, this, 3,
-                                &task_, 1) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(
+            TaskEntry, "robot_shadow_scan", 8192, this, 3, &task_, 1,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         SetFailure("cannot_start_shadow_scan_task");
         Finish(MissionState::FAILED);
         return false;
@@ -462,8 +464,9 @@ bool MissionManager::StartBypassOnce() {
         cancel_requested_.store(false);
         active_ = true;
     }
-    if (xTaskCreatePinnedToCore(TaskEntry, "robot_bypass_once", 12288, this, 3,
-                                &task_, 1) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(
+            TaskEntry, "robot_bypass_once", 12288, this, 3, &task_, 1,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         SetFailure("cannot_start_bypass_task");
         Finish(MissionState::FAILED);
         return false;
@@ -1243,7 +1246,7 @@ bool MissionManager::LoadPersistentHome() {
         return false;
     }
 
-    std::vector<Breadcrumb> restored;
+    BreadcrumbList restored;
     restored.reserve(header.breadcrumb_count);
     for (size_t i = 0; i < header.breadcrumb_count; ++i) {
         PersistentBreadcrumb point;
@@ -1349,7 +1352,7 @@ bool MissionManager::SyncAfterExternalMotion() {
 }
 
 bool MissionManager::PersistHomeRoute() {
-    std::vector<Breadcrumb> route;
+    BreadcrumbList route;
     float home_heading = 0.0f;
     {
         LockGuard lock(mutex_);
@@ -1365,7 +1368,7 @@ bool MissionManager::PersistHomeRoute() {
     // each physical leg and rechecks obstacles, so this bounded thinning is
     // safe while keeping the record below the 16 KiB NVS partition budget.
     if (route.size() > kMaxPersistedBreadcrumbs) {
-        std::vector<Breadcrumb> compact;
+        BreadcrumbList compact;
         compact.reserve(kMaxPersistedBreadcrumbs);
         compact.push_back(route.front());
         const size_t first_newest = route.size() -
@@ -2460,7 +2463,7 @@ void MissionManager::RunReturnHome() {
         return;
     }
 
-    std::vector<Breadcrumb> trail;
+    BreadcrumbList trail;
     float final_heading = 0.0f;
     bool home_available = false;
     {
@@ -2541,7 +2544,7 @@ void MissionManager::TaskEntry(void* context) {
         ESP_LOGI("AI_OBS", "SUPPRESS_MISSION_START=TASK_ENTRY,HOLD_EVENT_ID=%lu",
                  static_cast<unsigned long>(manager->ai_obstacle_hold_event_id_.load()));
         manager->Finish(MissionState::CANCELLED);
-        vTaskDelete(nullptr);
+        vTaskDeleteWithCaps(nullptr);
         return;
     }
     MissionType type = MissionType::NONE;
@@ -2556,7 +2559,7 @@ void MissionManager::TaskEntry(void* context) {
     } else {
         manager->RunAutonomous();
     }
-    vTaskDelete(nullptr);
+    vTaskDeleteWithCaps(nullptr);
 }
 
 void MissionManager::RunAutonomous() {

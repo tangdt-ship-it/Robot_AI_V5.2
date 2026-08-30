@@ -246,7 +246,8 @@ bool MqttProtocol::OpenAudioChannel() {
          * |type 1u|flags 1u|payload_len 2u|ssrc 4u|timestamp 4u|sequence 4u|
          * |payload payload_len|
          */
-        if (data.size() < sizeof(aes_nonce_)) {
+        constexpr size_t kAudioHeaderSize = 16;
+        if (aes_nonce_.size() != kAudioHeaderSize || data.size() < kAudioHeaderSize) {
             ESP_LOGE(TAG, "Invalid audio packet size: %u", data.size());
             return;
         }
@@ -254,14 +255,36 @@ bool MqttProtocol::OpenAudioChannel() {
             ESP_LOGE(TAG, "Invalid audio packet type: %x", data[0]);
             return;
         }
-        uint32_t timestamp = ntohl(*(uint32_t*)&data[8]);
-        uint32_t sequence = ntohl(*(uint32_t*)&data[12]);
-        if (sequence < remote_sequence_) {
-            ESP_LOGW(TAG, "Received audio packet with old sequence: %lu, expected: %lu", sequence, remote_sequence_);
+        uint16_t payload_size = 0;
+        memcpy(&payload_size, data.data() + 2, sizeof(payload_size));
+        payload_size = ntohs(payload_size);
+        if (data.size() - kAudioHeaderSize != payload_size) {
+            ESP_LOGE(TAG, "Invalid audio payload size: header=%u actual=%u",
+                     payload_size, data.size() - kAudioHeaderSize);
             return;
         }
-        if (sequence != remote_sequence_ + 1) {
-            ESP_LOGW(TAG, "Received audio packet with wrong sequence: %lu, expected: %lu", sequence, remote_sequence_ + 1);
+
+        uint32_t timestamp = ntohl(*(uint32_t*)&data[8]);
+        uint32_t sequence = ntohl(*(uint32_t*)&data[12]);
+        if (remote_sequence_valid_) {
+            // Sequence numbers are uint32_t and must be compared modulo 2^32.
+            const uint32_t delta = sequence - remote_sequence_;
+            if (delta == 0 || delta > 0x80000000U) {
+                ESP_LOGD(TAG, "Dropping old/duplicate audio packet: %lu, latest: %lu",
+                         sequence, remote_sequence_);
+                return;
+            }
+            if (delta != 1) {
+                const uint32_t missing = delta - 1;
+                remote_sequence_gap_count_ += missing;
+                const int64_t now_us = esp_timer_get_time();
+                if (last_remote_sequence_warning_us_ == 0 ||
+                    now_us - last_remote_sequence_warning_us_ >= 1000000) {
+                    ESP_LOGW(TAG, "Audio UDP sequence gap: got %lu, expected %lu, missing=%lu, total_missing=%lu",
+                             sequence, remote_sequence_ + 1, missing, remote_sequence_gap_count_);
+                    last_remote_sequence_warning_us_ = now_us;
+                }
+            }
         }
 
         size_t decrypted_size = data.size() - aes_nonce_.size();
@@ -283,6 +306,7 @@ bool MqttProtocol::OpenAudioChannel() {
             on_incoming_audio_(std::move(packet));
         }
         remote_sequence_ = sequence;
+        remote_sequence_valid_ = true;
         last_incoming_time_ = std::chrono::steady_clock::now();
     });
 
@@ -362,6 +386,9 @@ void MqttProtocol::ParseServerHello(const cJSON* root) {
     mbedtls_aes_setkey_enc(&aes_ctx_, (const unsigned char*)DecodeHexString(key).c_str(), 128);
     local_sequence_ = 0;
     remote_sequence_ = 0;
+    remote_sequence_valid_ = false;
+    remote_sequence_gap_count_ = 0;
+    last_remote_sequence_warning_us_ = 0;
     xEventGroupSetBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);
 }
 

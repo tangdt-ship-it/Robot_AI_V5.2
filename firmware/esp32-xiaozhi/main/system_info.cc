@@ -26,22 +26,25 @@ struct TaskStackProfile {
 };
 
 constexpr TaskStackProfile kTaskStackProfiles[] = {
+    {"main", 6144, "INTERNAL"},
+    {"sys_evt", 4096, "INTERNAL"},
+    {"esp_timer", 3584, "INTERNAL"},
     {"activation", 8192, "INTERNAL"},
     {"acoustic_wifi", 4096, "INTERNAL"},
     {"wifi_cfg_delay", 4096, "INTERNAL"},
     {"ml307_net", 4096, "INTERNAL"},
     {"CameraInitTask", 4096, "INTERNAL"},
-    {"audio_input", 6144, "INTERNAL"},
+    {"audio_input", 5120, "INTERNAL"},
     {"audio_output", 4096, "INTERNAL"},
     {"opus_codec", 24576, "INTERNAL"},
     {"audio_communication", 4096, "INTERNAL"},
     {"audio_detection", 4096, "INTERNAL"},
     {"encode_wake_word", 28672, "PSRAM"},
     {"LedEvent", 2048, "INTERNAL"},
-    {"robot_navigation", 10240, "INTERNAL"},
+    {"robot_navigation", 10240, "PSRAM"},
     {"robot_return_home", 32768, "PSRAM"},
-    {"robot_shadow_scan", 8192, "INTERNAL"},
-    {"robot_bypass_once", 12288, "INTERNAL"},
+    {"robot_shadow_scan", 8192, "PSRAM"},
+    {"robot_bypass_once", 12288, "PSRAM"},
     {"road_ai_upload", 4608, "INTERNAL"},
     {"robot_proto_recovery", 3072, "INTERNAL"},
     {"robot_uart_rx", 4096, "INTERNAL"},
@@ -116,7 +119,9 @@ esp_err_t SystemInfo::PrintTaskCpuUsage(TickType_t xTicksToWait) {
 
     //Allocate array to store current task states
     start_array_size = uxTaskGetNumberOfTasks() + ARRAY_SIZE_OFFSET;
-    start_array = (TaskStatus_t*)malloc(sizeof(TaskStatus_t) * start_array_size);
+    start_array = (TaskStatus_t*)heap_caps_malloc(
+        sizeof(TaskStatus_t) * start_array_size,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (start_array == NULL) {
         ret = ESP_ERR_NO_MEM;
         goto exit;
@@ -132,7 +137,9 @@ esp_err_t SystemInfo::PrintTaskCpuUsage(TickType_t xTicksToWait) {
 
     //Allocate array to store tasks states post delay
     end_array_size = uxTaskGetNumberOfTasks() + ARRAY_SIZE_OFFSET;
-    end_array = (TaskStatus_t*)malloc(sizeof(TaskStatus_t) * end_array_size);
+    end_array = (TaskStatus_t*)heap_caps_malloc(
+        sizeof(TaskStatus_t) * end_array_size,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (end_array == NULL) {
         ret = ESP_ERR_NO_MEM;
         goto exit;
@@ -186,8 +193,8 @@ esp_err_t SystemInfo::PrintTaskCpuUsage(TickType_t xTicksToWait) {
     ret = ESP_OK;
 
 exit:    //Common return path
-    free(start_array);
-    free(end_array);
+    heap_caps_free(start_array);
+    heap_caps_free(end_array);
     return ret;
 }
 
@@ -219,11 +226,13 @@ void SystemInfo::PrintTaskStackHighWaterMarks() {
         const size_t peak_used_bytes = profile->allocated_bytes > min_free_bytes
             ? profile->allocated_bytes - min_free_bytes : 0;
         ESP_LOGI(TAG,
-                 "TASK_STACK,NAME=%s,ALLOCATED=%u,MIN_FREE=%u,PEAK_USED=%u,MEMORY=%s,PRIORITY=%u",
+                 "TASK_STACK,NAME=%s,ALLOCATED=%u,MIN_FREE=%u,PEAK_USED=%u,HEADROOM=%u,MEMORY=%s,PRIORITY=%u",
                  tasks[i].pcTaskName,
                  static_cast<unsigned>(profile->allocated_bytes),
                  static_cast<unsigned>(min_free_bytes),
-                 static_cast<unsigned>(peak_used_bytes), profile->memory,
+                 static_cast<unsigned>(peak_used_bytes),
+                 static_cast<unsigned>(min_free_bytes),
+                 profile->memory,
                  static_cast<unsigned>(tasks[i].uxCurrentPriority));
     }
     heap_caps_free(tasks);
@@ -252,6 +261,29 @@ void SystemInfo::PrintHeapStats() {
              static_cast<unsigned>(psram_min),
              static_cast<unsigned>(psram_largest));
     PrintTaskStackHighWaterMarks();
+}
+
+void SystemInfo::PrintMemoryCheckpoint(const char* checkpoint) {
+    const size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const size_t internal_min = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    const size_t internal_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    const size_t dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    const size_t dma_min = heap_caps_get_minimum_free_size(MALLOC_CAP_DMA);
+    const size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    const size_t psram_min = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+
+    ESP_LOGI(TAG,
+             "MEM_CHECKPOINT,NAME=%s,INTERNAL_FREE=%u,INTERNAL_MIN=%u,"
+             "INTERNAL_LARGEST=%u,DMA_FREE=%u,DMA_MIN=%u,PSRAM_FREE=%u,"
+             "PSRAM_MIN=%u",
+             checkpoint != nullptr ? checkpoint : "UNKNOWN",
+             static_cast<unsigned>(internal_free),
+             static_cast<unsigned>(internal_min),
+             static_cast<unsigned>(internal_largest),
+             static_cast<unsigned>(dma_free),
+             static_cast<unsigned>(dma_min),
+             static_cast<unsigned>(psram_free),
+             static_cast<unsigned>(psram_min));
 }
 
 void SystemInfo::PrintPmLocks() {

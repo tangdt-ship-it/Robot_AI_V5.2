@@ -82,6 +82,12 @@ void Application::Initialize() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_WAKE_WORD_DETECTED);
     };
     callbacks.on_vad_change = [this](bool speaking) {
+        if (speaking) {
+            SystemInfo::PrintMemoryCheckpoint("USER_AUDIO_START");
+        } else {
+            SystemInfo::PrintMemoryCheckpoint("USER_AUDIO_END");
+            SystemInfo::PrintMemoryCheckpoint("WAIT_SERVER");
+        }
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
     };
     audio_service_.SetCallbacks(callbacks);
@@ -161,6 +167,7 @@ void Application::Initialize() {
 
     // Update the status bar immediately to show the network state
     display->UpdateStatusBar(true);
+    SystemInfo::PrintMemoryCheckpoint("BOOT");
 }
 
 void Application::Run() {
@@ -282,6 +289,7 @@ void Application::HandleNetworkConnectedEvent() {
     // Update the status bar immediately to show the network state
     auto display = Board::GetInstance().GetDisplay();
     display->UpdateStatusBar(true);
+    SystemInfo::PrintMemoryCheckpoint("WIFI_READY");
 }
 
 void Application::HandleNetworkDisconnectedEvent() {
@@ -497,12 +505,16 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
+        if (tts_first_packet_pending_.exchange(false)) {
+            SystemInfo::PrintMemoryCheckpoint("FIRST_TTS_PACKET");
+        }
         if (GetDeviceState() == kDeviceStateSpeaking) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
     
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
+        SystemInfo::PrintMemoryCheckpoint("WS_OPEN_OK");
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
             ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
@@ -527,10 +539,13 @@ void Application::InitializeProtocol() {
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
                     aborted_ = false;
+                    tts_first_packet_pending_.store(true);
+                    SystemInfo::PrintMemoryCheckpoint("TTS_PLAYING");
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
+                    SystemInfo::PrintMemoryCheckpoint("TTS_END");
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
@@ -779,6 +794,7 @@ void Application::HandleWakeWordDetectedEvent() {
         return;
     }
 
+    SystemInfo::PrintMemoryCheckpoint("WAKE_WORD");
     auto state = GetDeviceState();
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
@@ -862,6 +878,8 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
+            SystemInfo::PrintMemoryCheckpoint("XIAOZHI_IDLE");
+            SystemInfo::PrintMemoryCheckpoint("BACK_TO_IDLE");
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
@@ -874,6 +892,7 @@ void Application::HandleStateChangedEvent() {
             display->SetChatMessage("system", "");
             break;
         case kDeviceStateListening:
+            SystemInfo::PrintMemoryCheckpoint("LISTENING");
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
 

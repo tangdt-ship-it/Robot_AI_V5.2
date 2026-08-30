@@ -51,6 +51,9 @@ private:
     int udp_port_;
     uint32_t local_sequence_;
     uint32_t remote_sequence_;
+    bool remote_sequence_valid_ = false;
+    uint32_t remote_sequence_gap_count_ = 0;
+    int64_t last_remote_sequence_warning_us_ = 0;
     esp_timer_handle_t reconnect_timer_;
 
     bool StartMqttClient(bool report_error=false);

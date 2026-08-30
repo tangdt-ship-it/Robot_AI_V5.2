@@ -1,10 +1,13 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <new>
 #include <string>
 #include <vector>
 
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -12,6 +15,48 @@
 #include "camera.h"
 
 class RobotUart;
+
+template <typename T>
+class RobotPsramAllocator {
+public:
+    using value_type = T;
+
+    RobotPsramAllocator() noexcept = default;
+
+    template <typename U>
+    RobotPsramAllocator(const RobotPsramAllocator<U>&) noexcept {}
+
+    T* allocate(std::size_t count) {
+        if (count > static_cast<std::size_t>(-1) / sizeof(T)) {
+            throw std::bad_alloc();
+        }
+        void* memory = heap_caps_malloc(
+            count * sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (memory == nullptr) throw std::bad_alloc();
+        return static_cast<T*>(memory);
+    }
+
+    void deallocate(T* memory, std::size_t) noexcept {
+        heap_caps_free(memory);
+    }
+
+    template <typename U>
+    struct rebind {
+        using other = RobotPsramAllocator<U>;
+    };
+};
+
+template <typename T, typename U>
+bool operator==(const RobotPsramAllocator<T>&,
+                const RobotPsramAllocator<U>&) noexcept {
+    return true;
+}
+
+template <typename T, typename U>
+bool operator!=(const RobotPsramAllocator<T>&,
+                const RobotPsramAllocator<U>&) noexcept {
+    return false;
+}
 
 enum class MissionType : uint8_t {
     NONE,
@@ -298,6 +343,8 @@ private:
     bool home_valid_ = false;
     bool persistent_home_ok_ = false;
     float home_heading_deg_ = 0.0f;
-    std::vector<Breadcrumb> breadcrumbs_;
+    using BreadcrumbList =
+        std::vector<Breadcrumb, RobotPsramAllocator<Breadcrumb>>;
+    BreadcrumbList breadcrumbs_;
     int8_t occupancy_[kMapSize][kMapSize] = {};
 };
