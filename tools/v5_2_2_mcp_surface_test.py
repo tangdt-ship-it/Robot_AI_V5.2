@@ -3,7 +3,8 @@
 
 This test does not move hardware. It verifies that the AI-facing MCP policy keeps
 one clear finite MOVE path, one clear relative TURN path, STOP/HOME tools, and
-hides the legacy overlapping motion aliases while automatic detour is disabled.
+hides/disables the legacy overlapping motion aliases while automatic detour is
+disabled.
 """
 
 from pathlib import Path
@@ -44,8 +45,10 @@ def main() -> int:
     ):
         require(board, f'"{name}"', f"registered canonical tool {name}")
 
-    # Legacy aliases stay implemented for compatibility but must be hidden from
-    # normal AI discovery by the V5.2.2 policy in McpTool.
+    # Legacy aliases remain visible in source history for rollback/audit, but
+    # V5.2.2 must both hide them from normal tools/list and replace their
+    # callback with a fail-closed response so a stale/hallucinated direct call
+    # cannot issue motor commands.
     for name in (
         "self.robot.turn_and_move",
         "self.robot.navigate_autonomously",
@@ -57,8 +60,9 @@ def main() -> int:
         "self.robot.rotate_continuous",
     ):
         require(header, f'name == "{name}"', f"AI-hidden policy {name}")
-        require(board, f'"{name}"', f"legacy callback retained {name}")
+        require(board, f'"{name}"', f"legacy source retained {name}")
 
+    require(header, "legacy_motion_tool_disabled", "fail-closed legacy callback")
     require(header, "1 bước=5 cm=50 mm", "voice step conversion policy")
     require(header, "Quay đầu", "180-degree turn language policy")
     require(header, "PHYSICAL MOTION", "body-scan motion warning")
@@ -77,7 +81,7 @@ def main() -> int:
     print("V5.2.2 MCP surface static guard: PASS")
     print("  canonical finite motion: move_distance + turn_relative")
     print("  stop/home: retained")
-    print("  overlapping motion aliases: hidden from normal AI tools/list")
+    print("  overlapping aliases: hidden + fail-closed")
     print("  automatic detour: remains disabled")
     return 0
 
