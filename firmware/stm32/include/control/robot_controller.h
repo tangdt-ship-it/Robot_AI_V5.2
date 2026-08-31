@@ -2,6 +2,7 @@
 #define ROBOT_CONTROLLER_H
 
 #include <Arduino.h>
+#include <compass/compass_controller.h>
 #include <control/heading_controller.h>
 #include <display/lcd_display.h>
 #include <encoders/wheel_odometry.h>
@@ -50,7 +51,7 @@ struct AiDistanceResult {
 class RobotController {
  public:
   RobotController(MotorController& motors, Ps2Controller& ps2,
-                  LcdDisplay& display,
+                  CompassController& compass, LcdDisplay& display,
                   HeadingController& heading, UltrasonicSensor& ultrasonic,
                   WheelOdometry& odometry, Mpu6050& imu,
                   HeadingFusion& fusion, Print& debugStream);
@@ -116,6 +117,7 @@ class RobotController {
 
   MotorController& motors_;
   Ps2Controller& ps2_;
+  CompassController& compass_;
   LcdDisplay& display_;
   HeadingController& heading_;
   UltrasonicSensor& ultrasonic_;
@@ -141,15 +143,17 @@ class RobotController {
   bool obstacleLimited_ = false;
   float obstacleReleaseDistanceCm_ = 0.0f;
   bool freeStop_ = false;
-  bool headingResetHeld_ = false;
+  bool compassResetHeld_ = false;
   bool speedHolding_ = false;
   int8_t speedDirection_ = 0;
   uint32_t speedHoldStartMs_ = 0;
   uint32_t speedNextRepeatMs_ = 0;
   uint32_t lastControlMs_ = 0;
+  uint32_t lastCompassDebugMs_ = 0;
   uint32_t lastPs2DebugMs_ = 0;
   uint32_t lastMotorDebugMs_ = 0;
   uint32_t lastUltrasonicDebugMs_ = 0;
+  uint32_t lastCompassSequence_ = 0;
   uint32_t lastHeadingSequence_ = 0;
   int16_t lastHeadingCorrection_ = 0;
   bool headingSuppressed_ = false;

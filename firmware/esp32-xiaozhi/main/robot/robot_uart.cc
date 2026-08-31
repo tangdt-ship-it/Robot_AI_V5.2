@@ -614,14 +614,27 @@ bool RobotUart::GetHeading(float& heading_deg, uint32_t timeout_ms) {
     return true;
 }
 
-bool RobotUart::ResetHeading(uint32_t timeout_ms) {
+bool RobotUart::GetCompassStatus(RobotCompassStatus& status,
+                                 uint32_t timeout_ms) {
+    if (!SendAndWait("GET,COMPASS_STATUS", kResponseValue, timeout_ms)) {
+        return false;
+    }
+    if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+    status = compass_status_;
+    xSemaphoreGive(state_mutex_);
+    return status.valid;
+}
+
+bool RobotUart::ResetCompass(uint32_t timeout_ms) {
     if (!started_ ||
         xSemaphoreTake(transaction_mutex_, pdMS_TO_TICKS(timeout_ms)) !=
             pdTRUE) {
         return false;
     }
-    xEventGroupClearBits(response_events_, kResponseAck | kResponseNack);
-    bool success = SendFrame("HEADING,RESET");
+    xEventGroupClearBits(response_events_,
+                         kResponseAck | kResponseNack |
+                             kResponseCompassZeroed);
+    bool success = SendFrame("COMPASS,RESET");
     EventBits_t bits = 0;
     if (success) {
         bits = xEventGroupWaitBits(response_events_,
@@ -629,6 +642,17 @@ bool RobotUart::ResetHeading(uint32_t timeout_ms) {
                                    pdFALSE, pdMS_TO_TICKS(700));
         success = (bits & kResponseAck) != 0 &&
                   (bits & kResponseNack) == 0;
+    }
+    // The STM32 applies the same resetZero()/heading.reset() operation used
+    // by the physical L2 button before it emits the ACK.  A disconnected
+    // compass cannot produce the optional ZEROED sample event and may later
+    // emit COMPASS,LOST, but that must not turn an already acknowledged reset
+    // into a voice-tool failure.  ACK is the authoritative result here.
+    if (success) {
+        (void)xEventGroupWaitBits(response_events_,
+                                  kResponseCompassZeroed | kResponseNack,
+                                  pdTRUE, pdFALSE,
+                                  pdMS_TO_TICKS(120));
     }
     xSemaphoreGive(transaction_mutex_);
     return success;
@@ -1114,6 +1138,16 @@ void RobotUart::HandleFrame(const char* frame) {
         xEventGroupSetBits(response_events_, kResponseCalibration);
         return;
     }
+    float zero_heading = 0.0f;
+    if (sscanf(frame, "EVENT,COMPASS,ZEROED,H,%f", &zero_heading) == 1) {
+        if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
+            value_heading_deg_ = zero_heading;
+            xSemaphoreGive(state_mutex_);
+        }
+        xEventGroupSetBits(response_events_, kResponseCompassZeroed);
+        return;
+    }
+
     int int_value = 0;
     float float_value = 0.0f;
     char text_value[8] = {};
@@ -1144,6 +1178,19 @@ void RobotUart::HandleFrame(const char* frame) {
     if (sscanf(frame, "VALUE,HEADING,%f", &float_value) == 1) {
         if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
             value_heading_deg_ = float_value;
+            xSemaphoreGive(state_mutex_);
+        }
+        xEventGroupSetBits(response_events_, kResponseValue);
+        return;
+    }
+    int calibrating = 0;
+    if (sscanf(frame, "VALUE,COMPASS,%7[^,],CAL,%d,H,%f", text_value,
+               &calibrating, &float_value) == 3) {
+        if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
+            compass_status_.valid = true;
+            compass_status_.connected = strcmp(text_value, "OK") == 0;
+            compass_status_.calibrating = calibrating != 0;
+            compass_status_.heading_deg = float_value;
             xSemaphoreGive(state_mutex_);
         }
         xEventGroupSetBits(response_events_, kResponseValue);
@@ -1363,6 +1410,7 @@ void RobotUart::HandleFrame(const char* frame) {
     char brake[4] = {};
     char ramp[4] = {};
     char ps2[8] = {};
+    char compass[8] = {};
     char ai_link[8] = {};
     int speed = 0;
     int left = 0;
@@ -1371,9 +1419,9 @@ void RobotUart::HandleFrame(const char* frame) {
     float heading = 0.0f;
     char owner[12] = {};
     if (sscanf(frame,
-               "STATE,MODE,%7[^,],SPEED,%d,BRAKE,%3[^,],RAMP,%3[^,],H,%f,L,%d,R,%d,MOVE,%d,PS2,%7[^,],AI_LINK,%7[^,],OWNER,%11s",
+               "STATE,MODE,%7[^,],SPEED,%d,BRAKE,%3[^,],RAMP,%3[^,],H,%f,L,%d,R,%d,MOVE,%d,PS2,%7[^,],COMPASS,%7[^,],AI_LINK,%7[^,],OWNER,%11s",
                mode, &speed, brake, ramp, &heading, &left, &right, &moving,
-               ps2, ai_link, owner) == 11) {
+               ps2, compass, ai_link, owner) == 12) {
         if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
             state_.valid = true;
             state_.ai_mode = strcmp(mode, "AI") == 0;
@@ -1385,6 +1433,7 @@ void RobotUart::HandleFrame(const char* frame) {
             state_.brake_enabled = strcmp(brake, "ON") == 0;
             state_.ramp_enabled = strcmp(ramp, "ON") == 0;
             state_.ps2_ok = strcmp(ps2, "LOST") != 0;
+            state_.compass_sensor_ok = strcmp(compass, "OK") == 0;
             strncpy(state_.motion_owner, owner,
                     sizeof(state_.motion_owner) - 1);
             state_.motion_owner[sizeof(state_.motion_owner) - 1] = '\0';
@@ -1395,9 +1444,9 @@ void RobotUart::HandleFrame(const char* frame) {
         return;
     }
     if (sscanf(frame,
-               "STATE,MODE,%7[^,],SPEED,%d,BRAKE,%3[^,],RAMP,%3[^,],H,%f,L,%d,R,%d,MOVE,%d,PS2,%7[^,],AI_LINK,%7s",
+               "STATE,MODE,%7[^,],SPEED,%d,BRAKE,%3[^,],RAMP,%3[^,],H,%f,L,%d,R,%d,MOVE,%d,PS2,%7[^,],COMPASS,%7[^,],AI_LINK,%7s",
                mode, &speed, brake, ramp, &heading, &left, &right, &moving,
-               ps2, ai_link) == 10) {
+               ps2, compass, ai_link) == 11) {
         if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
             state_.valid = true;
             state_.ai_mode = strcmp(mode, "AI") == 0;
@@ -1409,6 +1458,7 @@ void RobotUart::HandleFrame(const char* frame) {
             state_.brake_enabled = strcmp(brake, "ON") == 0;
             state_.ramp_enabled = strcmp(ramp, "ON") == 0;
             state_.ps2_ok = strcmp(ps2, "LOST") != 0;
+            state_.compass_sensor_ok = strcmp(compass, "OK") == 0;
             snprintf(state_.motion_owner, sizeof(state_.motion_owner), "%s",
                      "UNKNOWN");
             state_.received_at_ms = NowMs();
@@ -1553,6 +1603,12 @@ void RobotUart::RunLinkTest() {
     ESP_LOGI(kTag, "SELFTEST GET HEADING: %s value=%.1f",
              heading_ok ? "PASS" : "FAIL", heading);
 
+    RobotCompassStatus compass;
+    const bool compass_status_ok = GetCompassStatus(compass, 700);
+    ESP_LOGI(kTag, "SELFTEST COMPASS STATUS: %s connected=%d cal=%d",
+             compass_status_ok ? "PASS" : "FAIL", compass.connected,
+             compass.calibrating);
+
     RobotPs2Status ps2;
     const bool ps2_ok = GetPs2Status(ps2, 700);
     ESP_LOGI(kTag,
@@ -1588,9 +1644,10 @@ void RobotUart::RunLinkTest() {
                  "SELFTEST OBSTACLE FORWARD GUARD: SKIP (path clear/no echo)");
     }
 
-    const bool heading_reset_ok = heading_ok && ResetHeading(700);
-    ESP_LOGI(kTag, "SELFTEST HEADING RESET: %s",
-             heading_reset_ok ? "PASS" : "FAIL");
+    const bool compass_reset_ok = compass_status_ok && compass.connected &&
+                                  ResetCompass(2200);
+    ESP_LOGI(kTag, "SELFTEST COMPASS RESET/ZERO EVENT: %s",
+             compass_reset_ok ? "PASS" : "FAIL");
 
     const bool mode_ack = SetMode(true, 700);
     RobotState ai_state;

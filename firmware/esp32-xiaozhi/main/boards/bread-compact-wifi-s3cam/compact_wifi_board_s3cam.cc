@@ -559,13 +559,14 @@ private:
                 }
                 char json[256];
                 snprintf(json, sizeof(json),
-                         "{\"connected\":true,\"mode\":\"%s\",\"heading\":%.1f,\"speed\":%d,\"brake\":%s,\"ramp\":%s,\"left\":%d,\"right\":%d,\"moving\":%s,\"ps2_ok\":%s}",
+                         "{\"connected\":true,\"mode\":\"%s\",\"heading\":%.1f,\"speed\":%d,\"brake\":%s,\"ramp\":%s,\"left\":%d,\"right\":%d,\"moving\":%s,\"compass_sensor_connected\":%s,\"ps2_ok\":%s}",
                          state.ai_mode ? "AI" : "MANUAL", state.heading_deg,
                          state.speed,
                          state.brake_enabled ? "true" : "false",
                          state.ramp_enabled ? "true" : "false",
                          state.left, state.right,
                          state.moving ? "true" : "false",
+                         state.compass_sensor_ok ? "true" : "false",
                          state.ps2_ok ? "true" : "false");
                 return std::string(json);
             });
@@ -619,7 +620,7 @@ private:
             });
         mcp_server.AddTool(
             "self.robot.get_fusion_status",
-            "Đọc Heading fusion STM32 từ Encoder + MPU6050 Gyro Z; gồm heading, yaw rate, confidence và nguồn cảm biến đang tham gia. Tool chỉ đọc.",
+            "Đọc Heading fusion STM32 từ Encoder + MPU6050 Gyro Z, có thể được hiệu chỉnh thêm bởi cảm biến Compass tùy chọn; gồm heading, yaw rate, confidence và nguồn cảm biến đang tham gia. Tool chỉ đọc.",
             PropertyList(),
             [this](const PropertyList&) -> ReturnValue {
                 RobotFusionStatus fusion;
@@ -654,7 +655,7 @@ private:
 #endif
         mcp_server.AddTool(
             "self.robot.get_diagnostics",
-            "Read robot diagnostics without moving. target=state,encoder,heading,imu,fusion,obstacle,ps2, or all.",
+            "Read robot diagnostics without moving. target=state,encoder,heading,compass_sensor,imu,fusion,obstacle,ps2, or all. Compass is optional sensor telemetry and is never a motion preflight requirement.",
             PropertyList({Property("target", kPropertyTypeString, "all")}),
             [this](const PropertyList& properties) -> ReturnValue {
                 const std::string target = properties["target"].value<std::string>();
@@ -678,6 +679,12 @@ private:
                     RobotEncoderStatus e; const bool ok = robot_uart_.GetEncoderStatus(e, 700);
                     json += ",\"encoder_ok\":" + std::string(ok ? "true" : "false") +
                         ",\"encoder_health\":\"" + std::string(e.health) + "\"";
+                }
+                if (all || target == "compass" || target == "compass_sensor") {
+                    RobotCompassStatus c; const bool ok = robot_uart_.GetCompassStatus(c, 700);
+                    json += ",\"compass_status_query_ok\":" + std::string(ok ? "true" : "false") +
+                        ",\"compass_sensor_connected\":" + std::string(c.connected ? "true" : "false") +
+                        ",\"compass_sensor_heading_deg\":" + std::to_string(c.heading_deg);
                 }
                 if (all || target == "imu") {
                     RobotImuStatus i; const bool ok = robot_uart_.GetImuStatus(i, 700);
@@ -972,7 +979,7 @@ private:
             });
         mcp_server.AddTool(
             "self.robot.get_heading",
-            "Đọc Heading hợp nhất mới nhất trực tiếp từ STM32. Phải dùng công cụ này khi người dùng hỏi robot đang ở hướng/góc bao nhiêu.",
+            "Đọc Heading hợp nhất mới nhất trực tiếp từ STM32. Phải dùng công cụ này khi người dùng hỏi robot đang ở hướng/góc bao nhiêu; không đọc giá trị riêng của cảm biến Compass.",
             PropertyList(),
             [this](const PropertyList&) -> ReturnValue {
                 float heading = 0.0f;
@@ -984,8 +991,24 @@ private:
                 return std::string(json);
             });
         mcp_server.AddTool(
+            "self.robot.get_compass_status",
+            "Đọc riêng trạng thái của cảm biến Compass tùy chọn trực tiếp từ STM32. Đây không phải Heading dùng để quyết định chuyển động; hãy dùng get_heading hoặc get_diagnostics(target=fusion) để đọc Heading.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                RobotCompassStatus status;
+                const bool ok = robot_uart_.GetCompassStatus(status, 700);
+                char json[128];
+                snprintf(json, sizeof(json),
+                         "{\"ok\":%s,\"connected\":%s,\"calibrating\":%s,\"heading_deg\":%.1f}",
+                         ok ? "true" : "false",
+                         status.connected ? "true" : "false",
+                         status.calibrating ? "true" : "false",
+                         status.heading_deg);
+                return std::string(json);
+            });
+        mcp_server.AddTool(
             "self.robot.reset",
-            "Reset các reference của robot mà không di chuyển. target=heading đặt lại Heading về 0; target=encoder reset hai bộ đếm encoder El và Er. Voice: reset Heading, đưa Heading về 0, reset encoder hai bánh.",
+            "Reset các reference của robot mà không di chuyển. target=heading đặt lại Heading về 0 và đồng bộ các nguồn heading, trong đó có cảm biến Compass nếu đang khả dụng; target=encoder reset hai bộ đếm encoder El và Er. Voice: reset la ban, đưa Heading về 0, reset encoder hai bánh.",
             PropertyList({Property("target", kPropertyTypeString, "heading")}),
             [this](const PropertyList& properties) -> ReturnValue {
                 const auto target = properties["target"].value<std::string>();
@@ -1005,12 +1028,12 @@ private:
                     ESP_LOGI(TAG, "ESP32_TOOL_RESULT=%s target=encoder", verified ? "PASS" : "FAIL");
                     return std::string(json);
                 }
-                const bool ok = robot_uart_.ResetHeading(700);
+                const bool ok = robot_uart_.ResetCompass(2200);
                 float heading = 0.0f;
                 const bool verified = ok && robot_uart_.GetHeading(heading, 700);
                 char json[96];
                 snprintf(json, sizeof(json),
-                         "{\"ok\":%s,\"target\":\"heading\",\"heading_reset\":%s,\"heading_deg\":%.1f}",
+                         "{\"ok\":%s,\"target\":\"heading\",\"zero_event\":%s,\"heading_deg\":%.1f}",
                          verified ? "true" : "false", ok ? "true" : "false",
                          heading);
                 ESP_LOGI(TAG, "ESP32_TOOL_RESULT=%s target=heading ACK=%s HDG_AFTER=%.1f",
@@ -1192,7 +1215,7 @@ private:
             });
         mcp_server.AddTool(
             "self.robot.turn_relative",
-            "Yêu cầu STM32 quay tương đối trái hoặc phải bằng vòng kín Heading hợp nhất từ Encoder + MPU6050 Gyro Z; chờ DONE. Dùng cho câu có góc như quay trái 45 độ. Chỉ được nói đã quay xong khi completed=true; nếu false phải nói robot chưa hoàn thành góc quay.",
+            "Yêu cầu STM32 quay tương đối trái hoặc phải bằng vòng kín Heading hợp nhất. Heading ưu tiên Encoder + MPU6050 Gyro Z và chỉ dùng cảm biến Compass như hiệu chỉnh tùy chọn; chờ DONE. Dùng cho câu có góc như quay trái 45 độ. Chỉ được nói đã quay xong khi completed=true; nếu false phải nói robot chưa hoàn thành góc quay.",
             PropertyList({
                 Property("direction", kPropertyTypeString),
                 Property("degrees", kPropertyTypeInteger, 1, 180),
@@ -1237,7 +1260,7 @@ private:
             });
         mcp_server.AddTool(
             "self.robot.turn_to_heading",
-            "Yêu cầu STM32 quay tới Heading tuyệt đối -180..180 độ bằng vòng kín Heading hợp nhất từ Encoder + MPU6050 Gyro Z; chờ DONE. Dùng cho câu như quay về hướng 0 độ. Chỉ xác nhận hoàn tất khi completed=true.",
+            "Yêu cầu STM32 quay tới Heading tuyệt đối -180..180 độ bằng vòng kín Heading hợp nhất. Heading ưu tiên Encoder + MPU6050 Gyro Z và chỉ dùng cảm biến Compass như hiệu chỉnh tùy chọn; chờ DONE. Dùng cho câu như quay về hướng 0 độ. Chỉ xác nhận hoàn tất khi completed=true.",
             PropertyList({
                 Property("heading", kPropertyTypeInteger, -180, 180),
                 Property("speed", kPropertyTypeInteger, 15, 10, 20),

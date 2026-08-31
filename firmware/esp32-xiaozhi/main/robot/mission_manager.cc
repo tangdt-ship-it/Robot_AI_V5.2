@@ -487,8 +487,9 @@ bool MissionManager::StartBypassOnce() {
     return true;
 }
 
-// Shadow-mode body turn: switch STM32 to AI mode, use closed-loop fused Heading
-// (encoder + gyro), then wait for heading settle. Never timed turn.
+// Shadow-mode body turn: switch STM32 to AI mode, use closed-loop fused heading
+// (encoder + gyro when the optional compass is unavailable), then wait for
+// heading settle. Never timed turn.
 bool MissionManager::TurnToShadow(float heading_deg, int speed) {
     if (CancelRequested()) return false;
     RobotTurnResult result;
@@ -1025,6 +1026,10 @@ void MissionManager::RunShadowScan() {
         robot_uart_->SetMode(false, 700);
         Finish(MissionState::FAILED);
         return;
+    }
+    if (!state.compass_sensor_ok) {
+        ESP_LOGW(kShadowTag,
+                 "Optional Compass sensor unavailable; shadow scan uses fused Heading");
     }
     original_heading = NormalizeHeading(original_heading);
     {

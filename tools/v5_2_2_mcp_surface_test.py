@@ -20,7 +20,6 @@ BOARD = ROOT / (
 )
 SDK_DEFAULTS = ROOT / "firmware/esp32-xiaozhi/sdkconfig.robot_ai.defaults"
 VERSION = ROOT / "VERSION"
-FIRMWARE_ROOT = ROOT / "firmware"
 
 
 def require(text: str, needle: str, label: str) -> None:
@@ -35,19 +34,6 @@ def main() -> int:
     board = BOARD.read_text(encoding="utf-8")
     defaults = SDK_DEFAULTS.read_text(encoding="utf-8")
     version = VERSION.read_text(encoding="utf-8").strip()
-
-    # Compass was removed from the active firmware contract. Keep this guard
-    # broad enough to cover both MCU trees, while excluding generated build
-    # output and historical host audit scripts.
-    for path in FIRMWARE_ROOT.rglob("*"):
-        if (not path.is_file() or ".pio" in path.parts or
-                "build" in path.parts or "managed_components" in path.parts):
-            continue
-        if path.suffix.lower() not in {".cc", ".cpp", ".h", ".ini", ".md"}:
-            continue
-        active_text = path.read_text(encoding="utf-8", errors="replace")
-        if "compass" in active_text.lower():
-            raise AssertionError(f"Compass reference remains in firmware: {path}")
 
     require(version, "5.2.2", "V5.2.2 version")
 
@@ -87,8 +73,6 @@ def main() -> int:
 
     # Do not advertise autonomous detour while firmware still rejects it.
     require(defaults, "CONFIG_AUTOMATIC_DETOUR=n", "detour disabled gate")
-    if 'ResetHeading' not in uart_source or 'ResetCompass' in uart_source:
-        raise AssertionError("Heading reset must not depend on Compass")
 
     # Finite move/turn cancellation coverage must remain in the board provider.
     for name in (

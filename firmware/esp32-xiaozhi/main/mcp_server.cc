@@ -460,7 +460,8 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
     // Xiaozhi currently accepts at most 32 tools in one tools/list response.
     // Keep the local registry larger (so diagnostics/calls remain available),
     // but advertise only the first 32 tools and do not paginate beyond the
-    // cloud limit. Common motion/diagnostic tools are inserted first.
+    // cloud limit.  Common tools are inserted first and reset_compass (which
+    // also handles encoder reset via target=encoder) is within this window.
     constexpr size_t kMaxAdvertisedTools = 32;
     std::string json = "{\"tools\":[";
     

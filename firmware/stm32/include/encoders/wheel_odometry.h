@@ -47,7 +47,7 @@ struct WheelOdometryData {
   float xMm = 0.0f;
   float yMm = 0.0f;
   // Navigation heading used for X/Y integration. V4.2 feeds this from the
-  // fused Encoder + MPU6050 estimator.
+  // fused Encoder + MPU6050 + Compass estimator.
   float headingRad = 0.0f;
   // Independent encoder-only yaw is kept for fusion and diagnostics.
   float encoderHeadingRad = 0.0f;

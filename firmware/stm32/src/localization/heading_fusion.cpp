@@ -29,10 +29,11 @@ void HeadingFusion::begin() {
   encoderDisagreementDeg_ = 0.0f;
   effectiveEncoderWeight_ = 0.0f;
   lastImuSequence_ = 0;
+  lastCompassSequence_ = 0;
   lastImuConsumeMs_ = millis();
   sampleSequence_ = 0;
   health_ = FusionHealth::NO_SOURCE;
-  usingImu_ = usingEncoder_ = false;
+  usingCompass_ = usingImu_ = usingEncoder_ = false;
   sourceText_ = "NONE";
 }
 
@@ -49,7 +50,10 @@ void HeadingFusion::reset(float referenceHeadingDeg, float encoderHeadingRad) {
   ++sampleSequence_;
 }
 
-void HeadingFusion::update(float gyroZDegS, bool imuOk, uint32_t imuSequence,
+void HeadingFusion::update(float compassHeadingDeg, bool compassOk,
+                           uint32_t compassSequence,
+                           float gyroZDegS, bool imuOk,
+                           uint32_t imuSequence,
                            float encoderHeadingRad, bool encoderOk,
                            bool robotMoving) {
   const uint32_t now = millis();
@@ -73,13 +77,18 @@ void HeadingFusion::update(float gyroZDegS, bool imuOk, uint32_t imuSequence,
 
   const bool newImuSample = imuOk && imuSequence != 0U &&
                             imuSequence != lastImuSequence_;
+  const bool newCompassSample = compassOk && compassSequence != 0U &&
+                                compassSequence != lastCompassSequence_;
+
   if (!initialized_) {
-    if (encoderOk) {
+    if (compassOk) {
+      headingDeg_ = normalize(compassHeadingDeg);
+    } else if (encoderOk) {
       headingDeg_ = encoderHeadingDeg;
     } else {
       headingDeg_ = 0.0f;
     }
-    initialized_ = imuOk || encoderOk;
+    initialized_ = compassOk || imuOk || encoderOk;
     changed = initialized_;
   }
 
@@ -93,8 +102,8 @@ void HeadingFusion::update(float gyroZDegS, bool imuOk, uint32_t imuSequence,
     const float gyroDeltaDeg = gyroZDegS * dt;
     if (encoderOk) {
       encoderDisagreementDeg_ = fabsf(pendingEncoderDeltaDeg_ - gyroDeltaDeg);
-      // Integrating a small gyro-Z bias while both motors are stopped makes a
-      // saved HOME heading
+      // With the Compass intentionally unavailable, integrating a small
+      // gyro-Z bias while both motors are stopped makes a saved HOME heading
       // drift away from the physical chassis.  Encoder yaw is authoritative
       // for the stationary condition: retain the heading until either a
       // commanded/coasting turn produces encoder yaw or the chassis moves.
@@ -135,6 +144,24 @@ void HeadingFusion::update(float gyroZDegS, bool imuOk, uint32_t imuSequence,
     headingDeg_ = normalize(headingDeg_ + motionDeltaDeg);
   }
 
+  // Apply a Compass correction once per new Compass sample, never once per
+  // main-loop iteration. This prevents repeated correction of stale data.
+  if (initialized_ && newCompassSample) {
+    lastCompassSequence_ = compassSequence;
+    const float compassError = shortestDelta(compassHeadingDeg, headingDeg_);
+    const bool acceptCorrection = !robotMoving ||
+        fabsf(compassError) <= FUSION_COMPASS_MOVING_GATE_DEG;
+    if (acceptCorrection) {
+      const float gain = robotMoving ? FUSION_COMPASS_GAIN_MOVING
+                                     : FUSION_COMPASS_GAIN_STATIONARY;
+      const float correction = constrain(compassError * gain,
+                                         -FUSION_COMPASS_MAX_STEP_DEG,
+                                         FUSION_COMPASS_MAX_STEP_DEG);
+      headingDeg_ = normalize(headingDeg_ + correction);
+    }
+    changed = true;
+  }
+
   if (newImuSample) {
     yawRateDegS_ += FUSION_YAW_RATE_FILTER *
                     (rateSampleDegS - yawRateDegS_);
@@ -142,9 +169,11 @@ void HeadingFusion::update(float gyroZDegS, bool imuOk, uint32_t imuSequence,
     yawRateDegS_ *= 0.95f;
   }
 
+  usingCompass_ = compassOk;
   usingImu_ = imuOk;
   usingEncoder_ = encoderOk;
-  const uint8_t sourceCount = static_cast<uint8_t>(imuOk) +
+  const uint8_t sourceCount = static_cast<uint8_t>(compassOk) +
+                              static_cast<uint8_t>(imuOk) +
                               static_cast<uint8_t>(encoderOk);
   if (!initialized_ || sourceCount == 0U) {
     health_ = FusionHealth::NO_SOURCE;
@@ -152,16 +181,19 @@ void HeadingFusion::update(float gyroZDegS, bool imuOk, uint32_t imuSequence,
     sourceText_ = "NONE";
   } else if (sourceCount >= 2U) {
     health_ = FusionHealth::FUSED;
-    confidencePct_ = 84.0f;
+    confidencePct_ = sourceCount == 3U ? 96.0f : 84.0f;
     if (imuOk && encoderOk && effectiveEncoderWeight_ < FUSION_ENCODER_DELTA_WEIGHT) {
       confidencePct_ = 84.0f + 12.0f * effectiveEncoderWeight_ /
                                      FUSION_ENCODER_DELTA_WEIGHT;
     }
-    sourceText_ = "I+E";
+    if (imuOk && encoderOk && compassOk) sourceText_ = "I+E+C";
+    else if (imuOk && encoderOk) sourceText_ = "I+E";
+    else if (imuOk && compassOk) sourceText_ = "I+C";
+    else sourceText_ = "E+C";
   } else {
     health_ = FusionHealth::DEGRADED;
     confidencePct_ = 62.0f;
-    sourceText_ = imuOk ? "IMU" : "ENC";
+    sourceText_ = imuOk ? "IMU" : (encoderOk ? "ENC" : "COMP");
   }
   if (changed) ++sampleSequence_;
 }

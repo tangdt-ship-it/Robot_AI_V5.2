@@ -53,7 +53,7 @@ bool RequiresIntegrity(const char* frame) {
          strncmp(frame, "SET,", 4) == 0 ||
          strncmp(frame, "CAL,", 4) == 0 ||
          strncmp(frame, "MAP,UI,", 7) == 0 ||
-         strcmp(frame, "HEADING,RESET") == 0 ||
+         strcmp(frame, "COMPASS,RESET") == 0 ||
          strcmp(frame, "ENCODER,RESET") == 0 ||
          strcmp(frame, "HB") == 0 || strcmp(frame, "KEEPALIVE") == 0;
 }
@@ -267,7 +267,8 @@ bool RobotLinkServer::takeConfigRequest(RobotLinkConfigRequest& request) {
 }
 
 void RobotLinkServer::completeConfigRequest(
-    const RobotLinkConfigRequest& request, bool success) {
+    const RobotLinkConfigRequest& request, bool success,
+    uint32_t compassZeroGeneration) {
   if (!configRequestInFlight_ || request.type != configRequest_.type) return;
   configRequestInFlight_ = false;
   configRequest_ = {};
@@ -289,8 +290,11 @@ void RobotLinkServer::completeConfigRequest(
       serial_.print(request.value ? "<ACK,SET,RAMP,ON>\r\n"
                                   : "<ACK,SET,RAMP,OFF>\r\n");
       break;
-    case RobotLinkConfigType::RESET_HEADING:
-      serial_.print("<ACK,HEADING,RESET>\r\n");
+    case RobotLinkConfigType::RESET_COMPASS:
+      serial_.print("<ACK,COMPASS,RESET>\r\n");
+      compassResetAwaitingSample_ = true;
+      compassResetGeneration_ = compassZeroGeneration;
+      compassResetStartedMs_ = millis();
       break;
     case RobotLinkConfigType::RESET_ENCODERS:
       serial_.print("<ACK,ENCODER,RESET>\r\n");
@@ -411,6 +415,8 @@ void RobotLinkServer::sendAsciiStateDetailed(const RobotTelemetry& telemetry) {
                     : 0);
   serial_.print(",PS2,");
   serial_.print(telemetry.ps2Connected ? "RX" : "LOST");
+  serial_.print(",COMPASS,");
+  serial_.print(telemetry.compassConnected ? "OK" : "LOST");
   serial_.print(",AI_LINK,");
   serial_.print(connected() ? "OK" : "WAIT");
   serial_.print(",OWNER,");
@@ -549,6 +555,16 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     serial_.print(telemetry.fusionEncoderDisagreementDeg, 2);
     serial_.print(",EW,");
     serial_.print(telemetry.fusionEffectiveEncoderWeight, 3);
+    serial_.print(">\r\n");
+    return;
+  }
+  if (strcmp(frame, "GET,COMPASS_STATUS") == 0) {
+    serial_.print("<VALUE,COMPASS,");
+    serial_.print(telemetry.compassConnected ? "OK" : "LOST");
+    serial_.print(",CAL,");
+    serial_.print(telemetry.compassCalibrating ? 1 : 0);
+    serial_.print(",H,");
+    serial_.print(telemetry.compassHeadingDeg, 1);
     serial_.print(">\r\n");
     return;
   }
@@ -706,7 +722,8 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     calibration.type = RobotLinkCalibrationType::ABORT;
   }
   if (calibration.type != RobotLinkCalibrationType::NONE) {
-    if (calibrationRequestInFlight_ || configRequestInFlight_) {
+    if (calibrationRequestInFlight_ || configRequestInFlight_ ||
+        compassResetAwaitingSample_) {
       serial_.print("<ERR,BUSY>\r\n");
       return;
     }
@@ -740,14 +757,14 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     config.value = 1;
   } else if (strcmp(frame, "SET,RAMP,OFF") == 0) {
     config.type = RobotLinkConfigType::SET_RAMP;
-  } else if (strcmp(frame, "HEADING,RESET") == 0) {
-    debug_.println("STM32_COMMAND_RECEIVED=HEADING,RESET");
-    config.type = RobotLinkConfigType::RESET_HEADING;
+  } else if (strcmp(frame, "COMPASS,RESET") == 0) {
+    debug_.println("STM32_COMMAND_RECEIVED=COMPASS,RESET");
+    config.type = RobotLinkConfigType::RESET_COMPASS;
   } else if (strcmp(frame, "ENCODER,RESET") == 0) {
     config.type = RobotLinkConfigType::RESET_ENCODERS;
   }
   if (config.type != RobotLinkConfigType::NONE) {
-    if (configRequestInFlight_) {
+    if (configRequestInFlight_ || compassResetAwaitingSample_) {
       serial_.print("<ERR,BUSY>\r\n");
       return;
     }
@@ -1092,6 +1109,21 @@ void RobotLinkServer::update(const RobotTelemetry& telemetry) {
     }
   } else if (!encoderFault) {
     encoderFaultReported_ = false;
+  }
+  if (compassResetAwaitingSample_) {
+    if (telemetry.compassConnected &&
+        telemetry.compassZeroGeneration > compassResetGeneration_) {
+      compassResetAwaitingSample_ = false;
+      serial_.print("<EVENT,COMPASS,ZEROED,H,");
+      serial_.print(telemetry.headingDeg, 1);
+      serial_.print(">\r\n");
+    } else if ((now - compassResetStartedMs_) >
+               COMPASS_RESET_EVENT_TIMEOUT_MS) {
+      compassResetAwaitingSample_ = false;
+      // Compass is an optional sensor. A missing zero sample is diagnostic
+      // information only; it must not be reported as a heading failure.
+      serial_.print("<EVENT,COMPASS,UNAVAILABLE>\r\n");
+    }
   }
   if (aiMode_ && telemetry.ps2CommandActive) {
     aiMode_ = false;

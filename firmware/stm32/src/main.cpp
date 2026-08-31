@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <communication/robot_link_server.h>
+#include <compass/compass_controller.h>
 #include <control/heading_controller.h>
 #include <control/robot_controller.h>
 #include <debug/debug_output.h>
@@ -20,6 +21,7 @@ DebugOutput robotDebug(robotDebugSerial, robotRtt);
 RobotLinkServer robotLink(robotAiSerial, robotDebug);
 MotorController motors;
 Ps2Controller ps2;
+CompassController compass;
 LcdDisplay display(LCD_SCL_PIN, LCD_SDA_PIN, LCD_ADDRESS);
 HeadingController heading;
 UltrasonicSensor ultrasonic;
@@ -27,7 +29,7 @@ WheelOdometry wheelOdometry;
 Mpu6050 imu(MPU6050_SCL_PIN, MPU6050_SDA_PIN, MPU6050_ADDRESS);
 HeadingFusion headingFusion;
 SafetyWatchdog safetyWatchdog;
-RobotController robot(motors, ps2, display, heading, ultrasonic,
+RobotController robot(motors, ps2, compass, display, heading, ultrasonic,
                       wheelOdometry, imu, headingFusion, robotDebug);
 
 void setup() {
@@ -60,6 +62,7 @@ void setup() {
   return;
 #endif
   (void)display.begin();
+  compass.begin();
   headingFusion.begin();
   const bool imuOk = imu.begin();
 #if ROBOT_DEBUG
@@ -69,6 +72,10 @@ void setup() {
   robotDebug.println(MPU6050_ADDRESS, HEX);
 #endif
   ultrasonic.begin();
+#if ROBOT_COMPASS_MOTOR_TEST
+  robotDebug.println("TEST,COMPASS_MOTOR=START,RAISED_WHEELS=1");
+  return;
+#endif
   ps2.begin();
   robot.begin();
   robotLink.begin(ROBOT_LINK_BAUD);
@@ -144,25 +151,95 @@ void loop() {
   yield();
   return;
 #endif
+#if ROBOT_COMPASS_MOTOR_TEST
+  static uint32_t startedMs = millis();
+  static uint32_t lastLogMs = 0;
+  static uint8_t lastPhase = 255;
+  const uint32_t elapsed = millis() - startedMs;
+  uint8_t phase = 0;
+  int16_t command = 0;
+  if (elapsed < 12000U) {
+    phase = 0;  // warm-up / idle
+  } else if (elapsed < 24000U) {
+    phase = 1; command = 20;
+  } else if (elapsed < 30000U) {
+    phase = 2;
+  } else if (elapsed < 42000U) {
+    phase = 3; command = -20;
+  } else if (elapsed < 48000U) {
+    phase = 4;
+  } else if (elapsed < 60000U) {
+    phase = 5; command = 60;
+  } else if (elapsed < 66000U) {
+    phase = 6;
+  } else if (elapsed < 78000U) {
+    phase = 7; command = -60;
+  } else if (elapsed < 84000U) {
+    phase = 8;
+  } else {
+    phase = 9;
+  }
+  if (phase != lastPhase) {
+    // Exercise the real non-blocking brake at every drive-to-stop boundary.
+    if (command == 0 &&
+        (motors.leftSpeed() != 0 || motors.rightSpeed() != 0)) {
+      motors.brake();
+    } else {
+      motors.stop();
+      if (command != 0) motors.setSpeeds(command, command);
+    }
+    compass.setMotionMode(command == 0 ? CompassMotionMode::STATIONARY
+                                      : CompassMotionMode::STRAIGHT);
+    robotDebug.print("TEST,PHASE="); robotDebug.print(phase);
+    robotDebug.print(",CMD="); robotDebug.println(command);
+    lastPhase = phase;
+  }
+  compass.update();
+  if ((millis() - lastLogMs) >= 50U) {
+    lastLogMs = millis();
+    robotDebug.print("TEST,SAMPLE,T="); robotDebug.print(elapsed);
+    robotDebug.print(",PHASE="); robotDebug.print(phase);
+    robotDebug.print(",CMD="); robotDebug.print(command);
+    robotDebug.print(",RAW="); robotDebug.print(compass.getRaw());
+    robotDebug.print(",RAW_DEG="); robotDebug.print(compass.getRawAngle(), 3);
+    robotDebug.print(",OUT="); robotDebug.print(compass.getAngle(), 3);
+    robotDebug.print(",DRIFT="); robotDebug.print(compass.driftRateDegS(), 4);
+    robotDebug.print(",REJ="); robotDebug.print(compass.rejectedSamples());
+    robotDebug.print(",M_L="); robotDebug.print(motors.leftSpeed());
+    robotDebug.print(",M_R="); robotDebug.print(motors.rightSpeed());
+    robotDebug.print(",PWM_L="); robotDebug.print(motors.leftPwm());
+    robotDebug.print(",PWM_R="); robotDebug.print(motors.rightPwm());
+    robotDebug.print(",BRAKING="); robotDebug.println(motors.isBraking() ? 1 : 0);
+  }
+  motors.update();
+  if (phase == 9) motors.stop();
+  yield();
+  return;
+#endif
   if (ENCODER_ENABLED) wheelOdometry.update(motors.leftSpeed(), motors.rightSpeed());
   ultrasonic.update();
   ps2.update();
-  // Sample localization sensors before motion control. Encoder travel is
-  // integrated only after the fused Heading for this loop has been computed.
+  // Sample all localization sensors before motion control. Encoder travel is
+  // integrated only after the fused heading for this loop has been computed.
+  compass.update();
   imu.update();
+  static uint32_t lastCompassZeroGeneration = 0;
+  if (compass.zeroGeneration() != lastCompassZeroGeneration) {
+    lastCompassZeroGeneration = compass.zeroGeneration();
+    headingFusion.reset(compass.getAngle(),
+                        wheelOdometry.data().encoderHeadingRad);
+  }
   const bool chassisMoving = motors.leftSpeed() != 0 || motors.rightSpeed() != 0;
   headingFusion.update(
-      imu.data().gyroZDps, imu.ready(), imu.data().sampleSequence,
-      wheelOdometry.data().encoderHeadingRad,
+      compass.getAngle(), compass.isConnected() && !compass.isCalibrating(),
+      compass.sampleSequence(), imu.data().gyroZDps, imu.ready(),
+      imu.data().sampleSequence, wheelOdometry.data().encoderHeadingRad,
       wheelOdometry.healthy(), chassisMoving);
   wheelOdometry.integratePose(headingFusion.headingDeg(), headingFusion.ready());
   robot.updateFast();
   robot.updateControl();
   RobotTelemetry telemetry;
-  telemetry.headingDeg = headingFusion.ready()
-                           ? headingFusion.headingDeg()
-                           : wheelOdometry.data().encoderHeadingRad *
-                                 57.29577951308232f;
+  telemetry.headingDeg = headingFusion.ready() ? headingFusion.headingDeg() : compass.getAngle();
   telemetry.leftCommand = motors.leftSpeed();
   telemetry.rightCommand = motors.rightSpeed();
   telemetry.speedSetting = robot.speedSetting();
@@ -176,7 +253,11 @@ void loop() {
   telemetry.ps2Buttons = ps2.rawButtons();
   telemetry.ps2Errors = ps2.consecutiveErrors();
   for (uint8_t i = 0; i < 9U; ++i) telemetry.ps2Raw[i] = ps2.rawByte(i);
-  telemetry.headingReady = headingFusion.ready() || wheelOdometry.healthy();
+  telemetry.compassConnected = compass.isConnected();
+  telemetry.compassCalibrating = compass.isCalibrating();
+  telemetry.compassHeadingDeg = compass.getAngle();
+  telemetry.headingReady = headingFusion.ready() || compass.isConnected() ||
+                           wheelOdometry.healthy();
   telemetry.imuConnected = imu.connected();
   telemetry.imuCalibrated = imu.calibrated();
   telemetry.imuHealth = static_cast<uint8_t>(imu.health());
@@ -195,6 +276,7 @@ void loop() {
   telemetry.rampEnabled = robot.rampEnabled();
   telemetry.brakeEnabled = robot.brakeEnabled();
   telemetry.ps2FrameAgeMs = ps2.frameAgeMs(millis());
+  telemetry.compassZeroGeneration = compass.zeroGeneration();
   telemetry.aiTurnActive = robot.aiTurnActive();
   telemetry.aiTurnTargetDeg = robot.aiTurnTarget();
   telemetry.aiTurnErrorDeg = robot.aiTurnError();
@@ -301,6 +383,7 @@ void loop() {
   RobotLinkConfigRequest configRequest;
   if (robotLink.takeConfigRequest(configRequest)) {
     bool applied = false;
+    uint32_t compassGeneration = 0;
     switch (configRequest.type) {
       case RobotLinkConfigType::SET_SPEED:
         applied = robot.setSpeedSetting(configRequest.value);
@@ -313,7 +396,8 @@ void loop() {
         robot.setRampEnabled(configRequest.value != 0);
         applied = true;
         break;
-      case RobotLinkConfigType::RESET_HEADING:
+      case RobotLinkConfigType::RESET_COMPASS:
+        compassGeneration = compass.zeroGeneration();
         robot.resetHeadingReference();
         applied = true;
         break;
@@ -337,7 +421,8 @@ void loop() {
       case RobotLinkConfigType::NONE:
         break;
     }
-    robotLink.completeConfigRequest(configRequest, applied);
+    robotLink.completeConfigRequest(configRequest, applied,
+                                    compassGeneration);
   }
   RobotLinkCalibrationRequest calibrationRequest;
   if (robotLink.takeCalibrationRequest(calibrationRequest)) {

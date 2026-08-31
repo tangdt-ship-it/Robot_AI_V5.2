@@ -2,12 +2,12 @@
 #include <robot_config.h>
 
 RobotController::RobotController(MotorController& motors, Ps2Controller& ps2,
-                                 LcdDisplay& display,
+                                 CompassController& compass, LcdDisplay& display,
                                  HeadingController& heading,
                                  UltrasonicSensor& ultrasonic,
                                  WheelOdometry& odometry, Mpu6050& imu,
                                  HeadingFusion& fusion, Print& debugStream)
-    : motors_(motors), ps2_(ps2), display_(display),
+    : motors_(motors), ps2_(ps2), compass_(compass), display_(display),
       heading_(heading), ultrasonic_(ultrasonic), odometry_(odometry),
       imu_(imu), fusion_(fusion), debug_(debugStream) {}
 
@@ -32,19 +32,22 @@ void RobotController::begin() {
   motionOwner_ = MotionOwner::NONE;
   lastControlMs_ = millis();
   motors_.stop();
+  compass_.setRobotMoving(false);
 }
 
 bool RobotController::headingAvailable() const {
-  return fusion_.ready() || odometry_.healthy();
+  return fusion_.ready() || compass_.isConnected() || odometry_.healthy();
 }
 
 float RobotController::currentHeadingDeg() const {
   if (fusion_.ready()) return fusion_.headingDeg();
+  if (compass_.isConnected()) return compass_.getAngle();
   return odometry_.data().encoderHeadingRad * 57.29577951308232f;
 }
 
 uint32_t RobotController::currentHeadingSequence() const {
-  return fusion_.sampleSequence();
+  if (fusion_.ready()) return fusion_.sampleSequence();
+  return compass_.sampleSequence();
 }
 
 void RobotController::changeSpeed(int8_t direction) {
@@ -73,6 +76,7 @@ void RobotController::setBrakeEnabled(bool enabled) {
   heading_.reset();
   lastHeadingCorrection_ = 0;
   state_ = RobotState::STOP;
+  compass_.setRobotMoving(false);
   if (enabled) {
     stopPwmLatched_ = false;
     motors_.brake();
@@ -114,7 +118,7 @@ void RobotController::handleFunctionButtons() {
       ps2_.buttonReleased(Ps2Button::L1)) {
     speedHolding_ = false; speedDirection_ = 0;
   }
-  // Keep the legacy L2 heading-zero command, but detect the edge locally.
+  // Keep the legacy L2 compass-zero command, but detect the edge locally.
   // Some PS2 receiver firmwares do not preserve ButtonPressed() edge state
   // across a frame while another task is servicing the bus.
   // PS2 protocol buttons are active-low. Keep a raw-frame fallback because
@@ -122,13 +126,13 @@ void RobotController::handleFunctionButtons() {
   // convenience Button() state; 0xFEFF is the canonical L2-down frame.
   const bool l2RawDown = (ps2_.rawButtons() & PSB_L2) == 0U;
   const bool l2Down = ps2_.state().l2 || l2RawDown;
-  if (l2Down && !headingResetHeld_) {
+  if (l2Down && !compassResetHeld_) {
     resetHeadingReference();
 #if ROBOT_DEBUG
-    debug_.println("HEADING,RESET=PS2_L2");
+    debug_.println("COMPASS,RESET=PS2_L2");
 #endif
   }
-  headingResetHeld_ = l2Down;
+  compassResetHeld_ = l2Down;
   if (ps2_.buttonPressed(Ps2Button::R2)) {
     // Counter zeroing is a generation boundary.  Replay must never combine
     // samples from before and after this operation into one segment.
@@ -147,8 +151,10 @@ void RobotController::handleFunctionButtons() {
 
 void RobotController::resetHeadingReference() {
   const float before = currentHeadingDeg();
+  compass_.resetZero();
   heading_.reset();
-  // Reset the fused heading reference and refresh the display immediately.
+  // Keep this identical to the proven L2 behavior, including the fusion
+  // reference and immediate LCD refresh while the compass may be LOST.
   fusion_.reset(0.0f, odometry_.data().encoderHeadingRad);
   display_.forceRefresh();
 #if ROBOT_DEBUG
@@ -278,6 +284,7 @@ void RobotController::applyMotorCommand() {
     straightCommand_ = false;
     heading_.reset();
     lastHeadingCorrection_ = 0;
+    compass_.setRobotMoving(false);
     motors_.brake();
     return;
   }
@@ -312,6 +319,7 @@ void RobotController::applyMotorCommand() {
             static_cast<float>(OBSTACLE_CAUTION_CM + OBSTACLE_HYSTERESIS_CM),
             ultrasonic_.stoppingDistanceCm(forward) +
                 OBSTACLE_HYSTERESIS_CM);
+        compass_.setRobotMoving(false);
         motors_.brake();
 #if ROBOT_DEBUG
         debug_.print("OBSTACLE,ACTION=BRAKE,DIST=");
@@ -351,7 +359,9 @@ void RobotController::applyMotorCommand() {
     right = constrain(right - lastHeadingCorrection_, -255, 255);
   } else if (straightCommand_) {
     lastHeadingCorrection_ = 0;
-    // Continue open-loop only when every Heading source is unavailable.
+    // Continue open-loop only when every heading source is unavailable.
+    // A missing optional Compass no longer disables steering when the fused
+    // Heading source is healthy.
     headingSuppressed_ = !headingAvailable();
   }
   if (aiMotionMode_ == AiMotionMode::DISTANCE) {
@@ -361,6 +371,7 @@ void RobotController::applyMotorCommand() {
     right = constrain(right + direction * balance, -255, 255);
   }
   if (left == 0 && right == 0) {
+    compass_.setRobotMoving(false);
     if (stopPwmLatched_) {
       motors_.stop();
     } else if (brakeEnabled_ && !freeStop_) {
@@ -370,6 +381,8 @@ void RobotController::applyMotorCommand() {
     }
   } else {
     obstacleBrakeActive_ = false;
+    compass_.setMotionMode(straightCommand_ ? CompassMotionMode::STRAIGHT
+                                           : CompassMotionMode::ROTATING);
     motors_.setSpeeds(left, right);
   }
 }
@@ -400,6 +413,7 @@ void RobotController::stopImmediately() {
   } else {
     motors_.stop();
   }
+  compass_.setRobotMoving(false);
 }
 
 bool RobotController::canStartAiMotion(uint32_t nowMs) const {
@@ -500,7 +514,7 @@ bool RobotController::startAiTurnRelative(bool left, float degrees,
   // Physical measurement shows LEFT increases Heading and RIGHT decreases it.
   const float startHeading = currentHeadingDeg();
   const float delta = left ? degrees : -degrees;
-  const float target = HeadingFusion::normalize(startHeading + delta);
+  const float target = CompassController::normalize(startHeading + delta);
 #if ROBOT_DEBUG
   debug_.print("TURN,MODE=REL,DIR=");
   debug_.print(left ? "LEFT" : "RIGHT");
@@ -518,8 +532,8 @@ bool RobotController::startAiTurnAbsolute(float targetHeading,
   motionOwner_ = MotionOwner::MCP;
   aiMotionMode_ = AiMotionMode::TURN;
   aiMotionDeadlineMs_ = now + TURN_TIMEOUT_MS;
-  aiTurnTargetDeg_ = HeadingFusion::normalize(targetHeading);
-  aiTurnErrorDeg_ = HeadingFusion::shortestDelta(
+  aiTurnTargetDeg_ = CompassController::normalize(targetHeading);
+  aiTurnErrorDeg_ = CompassController::shortestDelta(
       aiTurnTargetDeg_, currentHeadingDeg());
   aiTurnMaxSpeed_ = constrain(maxSpeed, TURN_MIN_SPEED, TURN_MAX_SPEED);
   aiTurnCommandSpeed_ = 0;
@@ -545,7 +559,7 @@ bool RobotController::startAiTurnAbsolute(float targetHeading,
 void RobotController::finishAiTurn(AiTurnResultCode code) {
   const float headingNow = currentHeadingDeg();
   const float target = aiTurnTargetDeg_;
-  const float error = HeadingFusion::shortestDelta(target, headingNow);
+  const float error = CompassController::shortestDelta(target, headingNow);
   stopImmediately();
   aiTurnResult_.code = code;
   aiTurnResult_.headingDeg = headingNow;
@@ -616,7 +630,7 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     const float headingNow = currentHeadingDeg();
     const uint32_t dtMs = nowMs - aiTurnPreviousSampleMs_;
     if (dtMs >= 5U && dtMs <= 200U) {
-      const float rawRate = HeadingFusion::shortestDelta(
+      const float rawRate = CompassController::shortestDelta(
           headingNow, aiTurnPreviousHeadingDeg_) * 1000.0f /
           static_cast<float>(dtMs);
       aiTurnYawRateDegS_ +=
@@ -624,7 +638,7 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     }
     aiTurnPreviousHeadingDeg_ = headingNow;
     aiTurnPreviousSampleMs_ = nowMs;
-    aiTurnErrorDeg_ = HeadingFusion::shortestDelta(
+    aiTurnErrorDeg_ = CompassController::shortestDelta(
         aiTurnTargetDeg_, headingNow);
     const int8_t errorSign = aiTurnErrorDeg_ < 0.0f ? -1 : 1;
     if (fabsf(aiTurnErrorDeg_) > TURN_TOLERANCE_DEG &&
@@ -646,6 +660,10 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     aiTurnCommandSpeed_ = 0;
     aiTurnPulseDriving_ = false;
     motors_.stop();
+    // Keep raw Compass tracking active during settle even though PWM is STOP.
+    // This exposes mechanical coast/overshoot; leaving stationary hold active
+    // here could hide a slow overshoot and incorrectly declare DONE.
+    compass_.setMotionMode(CompassMotionMode::ROTATING);
     if (aiTurnSettleStartMs_ == 0U) aiTurnSettleStartMs_ = nowMs;
     if ((nowMs - aiTurnSettleStartMs_) >= TURN_SETTLE_MS) {
       finishAiTurn(AiTurnResultCode::DONE);
@@ -654,6 +672,8 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   }
 
   aiTurnSettleStartMs_ = 0;
+  compass_.setMotionMode(CompassMotionMode::ROTATING);
+
   auto stopTurnDrive = [&]() {
     targetLeft_ = targetRight_ = currentLeft_ = currentRight_ = 0;
     aiTurnCommandSpeed_ = 0;
@@ -688,9 +708,9 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   }
 
   // Inside the final zone, never hold continuous torque. A short drive pulse
-  // followed by a longer observation interval lets the fused Heading measure
-  // the actual response before choosing the next direction, including
-  // reversal after overshoot.
+  // followed by a longer observation interval lets the Compass measure the
+  // actual response before choosing the next direction, including reversal
+  // after overshoot.
   if (absError <= TURN_PULSE_ZONE_DEG) {
     if (aiTurnPulseDriving_) {
       if (static_cast<int32_t>(nowMs - aiTurnPulseUntilMs_) < 0) return;
@@ -847,6 +867,19 @@ void RobotController::emitDiagnostics(uint32_t nowMs) {
     debug_.print(",W="); debug_.println(odometry_.data().angularVelocityRadS, 3);
     return;
   }
+  if (compass_.sampleSequence() != lastCompassSequence_ &&
+      (nowMs - lastCompassDebugMs_) >= 100U) {
+    lastCompassSequence_ = compass_.sampleSequence();
+    lastCompassDebugMs_ = nowMs;
+    debug_.print("COMPASS,RAW="); debug_.print(compass_.getRaw());
+    debug_.print(",ANGLE="); debug_.print(compass_.getAngle(), 2);
+    debug_.print(",DRIFT="); debug_.print(compass_.driftRateDegS(), 4);
+    debug_.print(",DT="); debug_.print(compass_.lastSampleDtMs());
+    debug_.print(",REJ="); debug_.print(compass_.rejectedSamples());
+    debug_.print(",REJ_SEQ=");
+    debug_.println(compass_.consecutiveRejectedSamples());
+    return;
+  }
   static uint32_t lastEncoderLcdDebugMs = 0;
   if ((nowMs - lastEncoderLcdDebugMs) >= 250U) {
     lastEncoderLcdDebugMs = nowMs;
@@ -984,6 +1017,7 @@ void RobotController::updateControl() {
     } else {
       motors_.stop();
     }
+    compass_.setRobotMoving(false);
     currentLeft_ = currentRight_ = targetLeft_ = targetRight_ = 0;
     straightCommand_ = false;
     reversing_ = false;
