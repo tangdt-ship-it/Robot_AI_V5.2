@@ -1,0 +1,51 @@
+name: V5.2.2 MCP Build
+
+on:
+  push:
+    branches:
+      - Robot_AI_V5.2.2
+  pull_request:
+    branches:
+      - Robot_AI_V5.2.1
+  workflow_dispatch:
+
+jobs:
+  static-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: V5.2.2 MCP surface guard
+        run: python3 tools/v5_2_2_mcp_surface_test.py
+      - name: Existing V5 host self-tests
+        run: python3 tools/v5_host_selftest.py
+
+  esp32-build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: V5.2.2 MCP surface guard
+        run: python3 tools/v5_2_2_mcp_surface_test.py
+      - name: Build ESP32-S3 firmware
+        working-directory: firmware/esp32-xiaozhi
+        run: |
+          idf.py fullclean
+          idf.py build
+      - name: Record firmware sizes
+        working-directory: firmware/esp32-xiaozhi
+        run: |
+          idf.py size
+          idf.py size-components
+      - name: Upload ESP32 build outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: Robot_AI_V5.2.2-esp32-build
+          path: |
+            firmware/esp32-xiaozhi/build/*.bin
+            firmware/esp32-xiaozhi/build/*.elf
+            firmware/esp32-xiaozhi/build/*.map
+            firmware/esp32-xiaozhi/build/bootloader/*.bin
+            firmware/esp32-xiaozhi/build/partition_table/*.bin
+          if-no-files-found: error
