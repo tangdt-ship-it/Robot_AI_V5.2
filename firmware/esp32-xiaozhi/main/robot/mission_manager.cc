@@ -1670,7 +1670,7 @@ bool MissionManager::TurnTo(float heading_deg) {
     if (CancelRequested()) return false;
     RobotTurnResult result;
     const int target = static_cast<int>(std::lround(NormalizeHeading(heading_deg)));
-    int speed = 10;
+    int speed = 15;
     {
         LockGuard lock(mutex_);
         if (lock.locked()) speed = context_.speed;

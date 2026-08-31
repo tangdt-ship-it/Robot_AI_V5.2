@@ -424,6 +424,87 @@ void loop() {
     robotLink.completeConfigRequest(configRequest, applied,
                                     compassGeneration);
   }
+  RobotLinkCalibrationRequest calibrationRequest;
+  if (robotLink.takeCalibrationRequest(calibrationRequest)) {
+    const bool idle = !robot.aiMotionActive() && motors.leftSpeed() == 0 &&
+                      motors.rightSpeed() == 0;
+    bool applied = false;
+    switch (calibrationRequest.type) {
+      case RobotLinkCalibrationType::STATUS:
+        applied = true;
+        break;
+      case RobotLinkCalibrationType::BEGIN_STRAIGHT:
+        applied = idle && wheelOdometry.startCalibrationStraight();
+        break;
+      case RobotLinkCalibrationType::END_STRAIGHT:
+        applied = idle &&
+                  wheelOdometry.finishCalibrationStraight(
+                      calibrationRequest.reference);
+        break;
+      case RobotLinkCalibrationType::BEGIN_TURN:
+        applied = idle && wheelOdometry.startCalibrationTurn();
+        break;
+      case RobotLinkCalibrationType::END_TURN:
+        applied = idle &&
+                  wheelOdometry.finishCalibrationTurn(
+                      calibrationRequest.reference);
+        break;
+      case RobotLinkCalibrationType::COMMIT:
+        applied = idle && wheelOdometry.commitCalibration();
+        if (applied) {
+          // A committed scale changes the meaning of future encoder deltas.
+          // Reset the navigation segment so no pose mixes old and new units.
+          wheelOdometry.reset();
+          robotDebug.println("CALIBRATION,COMMITTED,ODOMETRY_REBASED=1");
+        }
+        break;
+      case RobotLinkCalibrationType::ABORT:
+        applied = idle;
+        if (applied) wheelOdometry.abortCalibration();
+        break;
+      case RobotLinkCalibrationType::NONE:
+        break;
+    }
+    if (!applied) {
+      robotDebug.print("CALIBRATION,REJECTED,TYPE=");
+      robotDebug.print(static_cast<uint8_t>(calibrationRequest.type));
+      robotDebug.print(",IDLE=");
+      robotDebug.print(idle ? 1 : 0);
+      robotDebug.print(",AI=");
+      robotDebug.print(robot.aiMotionActive() ? 1 : 0);
+      robotDebug.print(",MOTOR_L=");
+      robotDebug.print(motors.leftSpeed());
+      robotDebug.print(",MOTOR_R=");
+      robotDebug.print(motors.rightSpeed());
+      robotDebug.print(",ENC_HEALTH=");
+      robotDebug.print(static_cast<uint8_t>(wheelOdometry.health()));
+      robotDebug.print(",L_TICKS=");
+      robotDebug.print(wheelOdometry.data().leftTicks);
+      robotDebug.print(",R_TICKS=");
+      robotDebug.print(wheelOdometry.data().rightTicks);
+      robotDebug.print(",DELTA_L=");
+      robotDebug.print(wheelOdometry.calibrationLastLeftDelta());
+      robotDebug.print(",DELTA_R=");
+      robotDebug.print(wheelOdometry.calibrationLastRightDelta());
+      robotDebug.print(",REF=");
+      robotDebug.print(calibrationRequest.reference, 3);
+      robotDebug.print(",REASON=");
+      robotDebug.println(wheelOdometry.calibrationLastError());
+    }
+    const WheelCalibrationStatus calibration =
+        wheelOdometry.calibrationStatus();
+    RobotLinkCalibrationStatus status;
+    status.phase = static_cast<uint8_t>(calibration.phase);
+    status.valid = calibration.valid;
+    status.persisted = calibration.persisted;
+    status.leftMmPerTick = calibration.leftMmPerTick;
+    status.rightMmPerTick = calibration.rightMmPerTick;
+    status.trackMm = calibration.trackMm;
+    status.straightSamples = calibration.straightSamples;
+    status.turnSamples = calibration.turnSamples;
+    robotLink.completeCalibrationRequest(calibrationRequest, applied,
+                                         status);
+  }
   AiTurnResult turnResult;
   if (robot.takeAiTurnResult(turnResult)) {
     robotLink.reportTurnResult(static_cast<uint8_t>(turnResult.code),

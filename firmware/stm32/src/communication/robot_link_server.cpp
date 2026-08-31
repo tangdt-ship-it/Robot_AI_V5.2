@@ -2,6 +2,8 @@
 #include <display/lcd_display.h>
 #include <robot_config.h>
 
+#include <stdlib.h>
+
 extern LcdDisplay display;
 
 namespace {
@@ -49,10 +51,24 @@ bool RequiresIntegrity(const char* frame) {
          strncmp(frame, "CMD,", 4) == 0 ||
          strncmp(frame, "TURN,", 5) == 0 ||
          strncmp(frame, "SET,", 4) == 0 ||
+         strncmp(frame, "CAL,", 4) == 0 ||
          strncmp(frame, "MAP,UI,", 7) == 0 ||
          strcmp(frame, "COMPASS,RESET") == 0 ||
          strcmp(frame, "ENCODER,RESET") == 0 ||
          strcmp(frame, "HB") == 0 || strcmp(frame, "KEEPALIVE") == 0;
+}
+
+bool ParseCalibrationReference(const char* frame, const char* prefix,
+                               float& reference) {
+  const size_t prefixLength = strlen(prefix);
+  if (strncmp(frame, prefix, prefixLength) != 0) return false;
+  const char* valueStart = frame + prefixLength;
+  if (*valueStart == '\0') return false;
+  char* valueEnd = nullptr;
+  const float parsed = strtof(valueStart, &valueEnd);
+  if (valueEnd == valueStart || *valueEnd != '\0') return false;
+  reference = parsed;
+  return true;
 }
 
 void PrintCorrelation(HardwareSerial& serial, uint32_t sessionId,
@@ -286,6 +302,76 @@ void RobotLinkServer::completeConfigRequest(
     case RobotLinkConfigType::NONE:
       break;
   }
+}
+
+bool RobotLinkServer::takeCalibrationRequest(
+    RobotLinkCalibrationRequest& request) {
+  if (!calibrationRequestReady_) return false;
+  request = calibrationRequest_;
+  calibrationRequestReady_ = false;
+  return true;
+}
+
+void RobotLinkServer::completeCalibrationRequest(
+    const RobotLinkCalibrationRequest& request, bool success,
+    const RobotLinkCalibrationStatus& status) {
+  if (!calibrationRequestInFlight_ ||
+      request.type != calibrationRequest_.type) {
+    return;
+  }
+  calibrationRequestInFlight_ = false;
+  calibrationRequest_ = {};
+  if (!success) {
+    // Signal failure first so SendAndWait() cannot return successfully on the
+    // diagnostic snapshot before the NACK/ERR is observed. The snapshot then
+    // refreshes the ESP32 cache with the actual current phase/candidate.
+    serial_.print("<ERR,CALIBRATION,REJECTED>\r\n");
+    // Preserve the current phase/candidate snapshot even on rejection so the
+    // ESP32 console cannot display a stale ACTIVE state after a bad sample.
+    const char* phase = status.phase == 1U ? "STRAIGHT"
+                        : status.phase == 2U ? "TURN" : "NONE";
+    serial_.print("<VALUE,CALIBRATION,PHASE,");
+    serial_.print(phase);
+    serial_.print(",VALID,");
+    serial_.print(status.valid ? 1 : 0);
+    serial_.print(",PERSISTED,");
+    serial_.print(status.persisted ? 1 : 0);
+    serial_.print(",ACTIVE,");
+    serial_.print(status.phase != 0U ? 1 : 0);
+    serial_.print(",LEFT_MPT,");
+    serial_.print(status.leftMmPerTick, 6);
+    serial_.print(",RIGHT_MPT,");
+    serial_.print(status.rightMmPerTick, 6);
+    serial_.print(",TRACK_MM,");
+    serial_.print(status.trackMm, 2);
+    serial_.print(",STRAIGHT_SAMPLES,");
+    serial_.print(status.straightSamples);
+    serial_.print(",TURN_SAMPLES,");
+    serial_.print(status.turnSamples);
+    serial_.print(">\r\n");
+    return;
+  }
+  const char* phase = status.phase == 1U ? "STRAIGHT"
+                      : status.phase == 2U ? "TURN" : "NONE";
+  serial_.print("<VALUE,CALIBRATION,PHASE,");
+  serial_.print(phase);
+  serial_.print(",VALID,");
+  serial_.print(status.valid ? 1 : 0);
+  serial_.print(",PERSISTED,");
+  serial_.print(status.persisted ? 1 : 0);
+  serial_.print(",ACTIVE,");
+  serial_.print(status.phase != 0U ? 1 : 0);
+  serial_.print(",LEFT_MPT,");
+  serial_.print(status.leftMmPerTick, 6);
+  serial_.print(",RIGHT_MPT,");
+  serial_.print(status.rightMmPerTick, 6);
+  serial_.print(",TRACK_MM,");
+  serial_.print(status.trackMm, 2);
+  serial_.print(",STRAIGHT_SAMPLES,");
+  serial_.print(status.straightSamples);
+  serial_.print(",TURN_SAMPLES,");
+  serial_.print(status.turnSamples);
+  serial_.print(">\r\n");
 }
 
 void RobotLinkServer::sendAsciiState(const RobotTelemetry& telemetry) {
@@ -614,6 +700,36 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
                          static_cast<uint32_t>(replayTravelMm),
                          static_cast<uint32_t>(replayErrorMm),
                          static_cast<uint8_t>(replayOperation));
+    return;
+  }
+
+  RobotLinkCalibrationRequest calibration;
+  if (strcmp(frame, "CAL,STATUS") == 0) {
+    calibration.type = RobotLinkCalibrationType::STATUS;
+  } else if (strcmp(frame, "CAL,BEGIN,STRAIGHT") == 0) {
+    calibration.type = RobotLinkCalibrationType::BEGIN_STRAIGHT;
+  } else if (ParseCalibrationReference(frame, "CAL,END,STRAIGHT,",
+                                       calibration.reference)) {
+    calibration.type = RobotLinkCalibrationType::END_STRAIGHT;
+  } else if (strcmp(frame, "CAL,BEGIN,TURN") == 0) {
+    calibration.type = RobotLinkCalibrationType::BEGIN_TURN;
+  } else if (ParseCalibrationReference(frame, "CAL,END,TURN,",
+                                       calibration.reference)) {
+    calibration.type = RobotLinkCalibrationType::END_TURN;
+  } else if (strcmp(frame, "CAL,COMMIT") == 0) {
+    calibration.type = RobotLinkCalibrationType::COMMIT;
+  } else if (strcmp(frame, "CAL,ABORT") == 0) {
+    calibration.type = RobotLinkCalibrationType::ABORT;
+  }
+  if (calibration.type != RobotLinkCalibrationType::NONE) {
+    if (calibrationRequestInFlight_ || configRequestInFlight_ ||
+        compassResetAwaitingSample_) {
+      serial_.print("<ERR,BUSY>\r\n");
+      return;
+    }
+    calibrationRequest_ = calibration;
+    calibrationRequestReady_ = true;
+    calibrationRequestInFlight_ = true;
     return;
   }
 

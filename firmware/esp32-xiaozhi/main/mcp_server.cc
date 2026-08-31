@@ -573,6 +573,9 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
     }
 
     // Use main thread to call the tool
+    if (request_generation_provider_) {
+        arguments.SetRequestGeneration(request_generation_provider_(tool_name));
+    }
     auto& app = Application::GetInstance();
     app.Schedule([this, id, tool_iter, arguments = std::move(arguments)]() {
         try {

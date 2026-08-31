@@ -68,6 +68,7 @@ class UltrasonicSensor {
   void handleEchoEdge(uint8_t index); void acceptPulse(uint8_t index,uint32_t pulseUs,uint32_t nowMs);
   void acceptTimeout(uint8_t index,uint32_t nowMs); void updateChannelZone(uint8_t index,float distanceCm);
   float medianHistory(const Channel& channel) const; bool channelFresh(const Channel& channel,uint32_t nowMs) const;
+  bool degradedClearWindow(uint32_t nowMs) const;
   void recomputeObstacleModel(uint32_t nowMs);
   UltrasonicReading frontLeft_,frontRight_; float nearestDistanceCm_=0,nearestRawDistanceCm_=0,nearestRateCmS_=0;
   bool overallEchoValid_=false,overallFresh_=false; SensorHealth overallHealth_=SensorHealth::UNKNOWN;

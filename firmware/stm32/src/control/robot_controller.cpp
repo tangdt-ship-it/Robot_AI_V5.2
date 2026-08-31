@@ -595,10 +595,23 @@ void RobotController::updateAiDistance(uint32_t nowMs) {
 
 void RobotController::updateAiTurn(uint32_t nowMs) {
   if (aiMotionMode_ != AiMotionMode::TURN) return;
-  // Turning is allowed only with a fresh, clear ultrasonic assessment. A
-  // no-echo sample remains valid when the sensor reports FRESH+CLEAR.
-  if (!ultrasonic_.isFresh() ||
-      ultrasonic_.overallZone() != ObstacleZone::CLEAR) {
+  // A turn-in-place does not add forward travel. Permit it when at least one
+  // fresh sector is explicitly clear, even if the other ultrasonic channel is
+  // temporarily unknown/timeout. Keep every caution/blocked/emergency result
+  // as a hard stop, and do not turn when no sector is trustworthy.
+  const ObstacleZone turnZone = ultrasonic_.overallZone();
+  const bool oneSectorClear =
+      turnZone == ObstacleZone::CLEAR ||
+      (turnZone == ObstacleZone::UNKNOWN &&
+       (ultrasonic_.frontLeftZone() == ObstacleZone::CLEAR ||
+        ultrasonic_.frontRightZone() == ObstacleZone::CLEAR));
+  if (!ultrasonic_.isFresh() || !oneSectorClear) {
+#if ROBOT_DEBUG
+    debug_.print("TURN,STOP=OBSTACLE,ZONE=");
+    debug_.print(UltrasonicSensor::zoneText(turnZone));
+    debug_.print(",FRESH=");
+    debug_.println(ultrasonic_.isFresh() ? 1 : 0);
+#endif
     finishAiTurn(AiTurnResultCode::OBSTACLE);
     return;
   }
@@ -711,7 +724,8 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
       stopTurnDrive();
       return;
     }
-    aiTurnCommandSpeed_ = TURN_MIN_SPEED;
+    aiTurnCommandSpeed_ = constrain(TURN_CORRECTION_SPEED, TURN_MIN_SPEED,
+                                    aiTurnMaxSpeed_);
     aiTurnPulseDriving_ = true;
     // Short 45 ms pulses are precise near target but do not consistently
     // overcome static friction on this chassis when 5..8 degrees remain.

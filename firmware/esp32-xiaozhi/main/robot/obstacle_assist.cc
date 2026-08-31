@@ -19,6 +19,12 @@
 namespace {
 constexpr const char* kTag = "AI_OBS";
 uint32_t NowMs() { return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL); }
+bool VisionActionableZone(const char* zone) {
+    return zone != nullptr &&
+           (strcmp(zone, "CAUTION") == 0 ||
+            strcmp(zone, "BLOCKED") == 0 ||
+            strcmp(zone, "EMERGENCY") == 0);
+}
 void Mem(const char* stage) {
     ESP_LOGI(kTag, "MEM_%s,INTERNAL_FREE=%u,INTERNAL_LARGEST=%u,PSRAM_FREE=%u",
              stage, static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
@@ -32,6 +38,15 @@ void ObstacleAssist::OnStopped(void* context, const RobotObstacleStatus& event,
     auto* self = static_cast<ObstacleAssist*>(context);
     if (self == nullptr || !was_motion_active || self->camera_ == nullptr ||
         strcmp(event.zone, "CLEAR") == 0) return;
+    if (!event.valid || !event.fresh || !event.echo_valid ||
+        !VisionActionableZone(event.zone)) {
+        ESP_LOGW(kTag,
+                 "OBSTACLE_EVENT=STOPPED,SKIP_CAMERA=SR04_NOT_ACTIONABLE,"
+                 "ZONE=%s,VALID=%d,FRESH=%d,ECHO=%d",
+                 event.zone, event.valid ? 1 : 0, event.fresh ? 1 : 0,
+                 event.echo_valid ? 1 : 0);
+        return;
+    }
     const uint32_t now = NowMs();
     // Check cooldown before acquiring active_.  The previous exchange-first
     // order left active_ latched forever when a repeated-zone event arrived

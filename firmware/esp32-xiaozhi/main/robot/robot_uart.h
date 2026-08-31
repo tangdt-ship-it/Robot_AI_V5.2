@@ -140,6 +140,18 @@ struct RobotFusionStatus {
     char source[20] = {};
 };
 
+struct RobotCalibrationStatus {
+    bool valid = false;
+    bool persisted = false;
+    bool active = false;
+    char phase[12] = "NONE";
+    float left_mm_per_tick = 0.0f;
+    float right_mm_per_tick = 0.0f;
+    float track_mm = 0.0f;
+    uint16_t straight_samples = 0;
+    uint16_t turn_samples = 0;
+};
+
 class RobotUart {
 public:
     using ObstacleStoppedCallback = void (*)(void*, const RobotObstacleStatus&, bool);
@@ -177,12 +189,26 @@ public:
                                  uint32_t timeout_ms = 700);
     bool MoveDistance(bool forward, int distance_mm, int speed,
                       RobotDistanceResult& result,
-                      uint32_t timeout_ms = 31000);
+                      uint32_t timeout_ms = 31000,
+                      uint32_t cancellation_token = 0);
     bool TurnRelative(bool left, int angle_deg, int speed,
                       RobotTurnResult& result,
-                      uint32_t timeout_ms = 13000);
+                      uint32_t timeout_ms = 13000,
+                      uint32_t cancellation_token = 0);
     bool TurnAbsolute(int heading_deg, int speed, RobotTurnResult& result,
-                      uint32_t timeout_ms = 13000);
+                      uint32_t timeout_ms = 13000,
+                      uint32_t cancellation_token = 0);
+
+    // A motion callback may be queued behind a STOP in the MCP executor.  The
+    // token lets the callback prove that STOP has not invalidated its start
+    // before it sends MODE/MOVE/TURN to STM32.
+    uint32_t MotionCancellationToken() const {
+        return motion_cancel_generation_.load();
+    }
+    bool MotionCancellationCurrent(uint32_t token) const {
+        return token != 0U && token == motion_cancel_generation_.load() &&
+               !stop_in_progress_;
+    }
 
     // Public STOP is cancellation-aware. The transport-level uint32_t overload
     // remains private so normal callers cannot accidentally bypass waiter
@@ -191,6 +217,10 @@ public:
     bool Stop(int timeout_ms = 500) {
         const bool wake_turn = turn_waiting_;
         const bool wake_distance = distance_waiting_;
+        uint32_t next_generation = motion_cancel_generation_.fetch_add(1U) + 1U;
+        if (next_generation == 0U) {
+            motion_cancel_generation_.store(1U);
+        }
         stop_in_progress_ = true;
         const uint32_t bounded_timeout =
             timeout_ms > 0 ? static_cast<uint32_t>(timeout_ms) : 0U;
@@ -228,6 +258,22 @@ public:
     bool GetImuStatus(RobotImuStatus& status, uint32_t timeout_ms = 500);
     bool GetFusionStatus(RobotFusionStatus& status,
                          uint32_t timeout_ms = 500);
+    bool GetCalibrationStatus(RobotCalibrationStatus& status,
+                              uint32_t timeout_ms = 700);
+    bool BeginCalibrationStraight(RobotCalibrationStatus& status,
+                                  uint32_t timeout_ms = 700);
+    bool EndCalibrationStraight(float reference_mm,
+                                RobotCalibrationStatus& status,
+                                uint32_t timeout_ms = 700);
+    bool BeginCalibrationTurn(RobotCalibrationStatus& status,
+                              uint32_t timeout_ms = 700);
+    bool EndCalibrationTurn(float reference_deg,
+                            RobotCalibrationStatus& status,
+                            uint32_t timeout_ms = 700);
+    bool CommitCalibration(RobotCalibrationStatus& status,
+                           uint32_t timeout_ms = 1200);
+    bool AbortCalibration(RobotCalibrationStatus& status,
+                          uint32_t timeout_ms = 700);
     bool GetCachedObstacle(RobotObstacleStatus& status);
     void SetObstacleStoppedCallback(ObstacleStoppedCallback callback, void* context) {
         obstacle_stopped_callback_ = callback;
@@ -265,6 +311,7 @@ private:
     static constexpr EventBits_t kResponseDistanceDone = BIT13;
     static constexpr EventBits_t kResponseDistanceError = BIT14;
     static constexpr EventBits_t kResponseOdometry = BIT15;
+    static constexpr EventBits_t kResponseCalibration = BIT16;
 
     static uint32_t RandomCorrelationSeed() {
         uint32_t value = 0U;
@@ -345,11 +392,15 @@ private:
     void DispatchMapEvent(const char* action, uint8_t slot);
     bool SendFrame(const char* body);
     bool SendAndWait(const char* body, EventBits_t expected,
-                     uint32_t timeout_ms);
+                     uint32_t timeout_ms,
+                     uint32_t cancellation_token = 0);
+    bool CalibrationCommand(const char* body, RobotCalibrationStatus& status,
+                            uint32_t timeout_ms);
     // Raw STOP transport primitive. Use the public int overload so finite
     // operation waiters are released only after physical STOP confirmation.
     bool Stop(uint32_t timeout_ms);
-    bool BeginMotionCorrelation(uint32_t& session_id, uint32_t& operation_id);
+    bool BeginMotionCorrelation(uint32_t& session_id, uint32_t& operation_id,
+                                uint32_t cancellation_token = 0);
     void EndMotionCorrelation();
     void InvalidateMotionCorrelation(const char* reason);
     bool MatchMotionCorrelation(uint32_t session_id,
@@ -378,6 +429,7 @@ private:
     RobotEncoderStatus encoder_status_;
     RobotImuStatus imu_status_;
     RobotFusionStatus fusion_status_;
+    RobotCalibrationStatus calibration_status_;
     char rx_frame_[256] = {};
     size_t rx_length_ = 0;
     bool receiving_ = false;
@@ -390,6 +442,7 @@ private:
     volatile bool distance_waiting_ = false;
     volatile bool motion_ack_waiting_ = false;
     volatile bool motion_correlation_active_ = false;
+    std::atomic<uint32_t> motion_cancel_generation_{1U};
     // Alpha.7 seeds both halves of the correlation pair from the ESP32
     // hardware RNG at construction. CheckProtocol() still advances SID on
     // each successful negotiation, preserving the existing session-boundary

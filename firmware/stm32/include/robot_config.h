@@ -148,20 +148,24 @@ static constexpr int16_t TURN_MIN_SPEED = 10;
 static constexpr int16_t TURN_MAX_SPEED = 20;
 static constexpr float TURN_SLOW_ZONE_DEG = 25.0f;
 static constexpr float TURN_PULSE_ZONE_DEG = 8.0f;
-// Field test: the chassis repeatedly settled at 2.2..2.8 degrees and spent
-// another 3-5 seconds pulsing to enter a 2-degree window. Three degrees is
-// sufficiently accurate for a 35-degree obstacle dogleg and removes that lag.
-static constexpr float TURN_TOLERANCE_DEG = 3.0f;
+// Angle-command turns are required to settle within half a degree. The
+// controller therefore uses short correction pulses close to target instead
+// of declaring DONE in the old 3-degree window.
+static constexpr float TURN_TOLERANCE_DEG = 0.5f;
 static constexpr float TURN_RATE_FILTER = 0.30f;
 static constexpr float TURN_PREDICT_TIME_S = 0.18f;
-static constexpr float TURN_SETTLE_RATE_DEG_S = 3.0f;
+static constexpr float TURN_SETTLE_RATE_DEG_S = 1.0f;
 static constexpr float TURN_CORRECTION_START_RATE_DEG_S = 2.5f;
-static constexpr uint32_t TURN_CORRECTION_PULSE_NEAR_MS = 45;
-static constexpr uint32_t TURN_CORRECTION_PULSE_MID_MS = 100;
-static constexpr uint32_t TURN_CORRECTION_PULSE_FAR_MS = 180;
-static constexpr uint32_t TURN_CORRECTION_COAST_MS = 110;
-static constexpr uint32_t TURN_OVERSHOOT_COAST_MS = 140;
-static constexpr uint32_t TURN_SETTLE_MS = 180;
+// Speed 10 was not sufficient to overcome static friction on the tested
+// chassis. Keep the final correction short, but give it the same torque as
+// the normal angle command.
+static constexpr int16_t TURN_CORRECTION_SPEED = 15;
+static constexpr uint32_t TURN_CORRECTION_PULSE_NEAR_MS = 25;
+static constexpr uint32_t TURN_CORRECTION_PULSE_MID_MS = 50;
+static constexpr uint32_t TURN_CORRECTION_PULSE_FAR_MS = 100;
+static constexpr uint32_t TURN_CORRECTION_COAST_MS = 80;
+static constexpr uint32_t TURN_OVERSHOOT_COAST_MS = 120;
+static constexpr uint32_t TURN_SETTLE_MS = 250;
 static constexpr uint32_t TURN_TIMEOUT_MS = 12000;
 static constexpr uint32_t TURN_PROGRESS_MS = 250;
 static constexpr int16_t TURN_MAX_RELATIVE_DEG = 180;
@@ -185,6 +189,13 @@ static constexpr uint32_t ULTRASONIC_SAMPLE_PERIOD_MS = 60;
 static constexpr uint32_t ULTRASONIC_INTER_SENSOR_GUARD_MS = 8;
 static constexpr uint32_t ULTRASONIC_ECHO_TIMEOUT_US = 30000;
 static constexpr uint32_t ULTRASONIC_FRESH_MS = 350;
+// A single HC-SR04 timeout can be caused by an echo collision or a narrow
+// electrical glitch.  Keep the fail-safe stop, but allow only a very short,
+// slow continuation when both channels recently proved a wide clear path.
+static constexpr uint32_t ULTRASONIC_DEGRADED_GRACE_MS = 300;
+static constexpr uint32_t ULTRASONIC_DEGRADED_MAX_TIMEOUTS = 2;
+static constexpr float ULTRASONIC_DEGRADED_CLEAR_CM = 50.0f;
+static constexpr int16_t ULTRASONIC_DEGRADED_MAX_FORWARD_COMMAND = 8;
 static constexpr float ULTRASONIC_MIN_CM = 2.0f;
 static constexpr float ULTRASONIC_MAX_CM = 400.0f;
 // Tuned for the 35 x 40 cm chassis. EMERGENCY is intentionally below 10 cm as

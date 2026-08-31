@@ -2,6 +2,9 @@
 #include <robot_config.h>
 
 #include <math.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
 
 namespace {
 bool configureEncoder(TIM_HandleTypeDef& timer, TIM_TypeDef* instance) {
@@ -26,6 +29,38 @@ bool configureEncoder(TIM_HandleTypeDef& timer, TIM_TypeDef* instance) {
 }
 constexpr float kDegToRad = 0.017453292519943295f;
 constexpr float kPi = 3.14159265358979323846f;
+constexpr uint32_t kCalibrationFlashAddress = 0x0807F800UL;
+constexpr uint32_t kCalibrationMagic = 0x5743414CUL;  // "WCAL"
+constexpr uint16_t kCalibrationVersion = 1U;
+
+struct CalibrationFlashRecord {
+  uint32_t magic = 0;
+  uint16_t version = 0;
+  uint16_t size = 0;
+  float leftMmPerTick = 0.0f;
+  float rightMmPerTick = 0.0f;
+  float trackMm = 0.0f;
+  uint16_t straightSamples = 0;
+  uint16_t turnSamples = 0;
+  uint32_t crc = 0;
+};
+
+static_assert(sizeof(CalibrationFlashRecord) <= 2048U,
+              "calibration record must fit in one STM32F1 flash page");
+
+uint32_t CalibrationCrc(const CalibrationFlashRecord& record) {
+  const auto* bytes = reinterpret_cast<const uint8_t*>(&record);
+  constexpr size_t kCrcOffset = offsetof(CalibrationFlashRecord, crc);
+  uint32_t crc = 0xFFFFFFFFUL;
+  for (size_t i = 0; i < kCrcOffset; ++i) {
+    crc ^= bytes[i];
+    for (uint8_t bit = 0; bit < 8U; ++bit) {
+      crc = (crc >> 1U) ^ (0xEDB88320UL & (0U - (crc & 1U)));
+    }
+  }
+  return crc;
+}
+
 }  // namespace
 
 bool WheelOdometry::begin() {
@@ -49,6 +84,7 @@ bool WheelOdometry::begin() {
   __HAL_TIM_SET_COUNTER(&rightTimer_, 0);
   initialized_ = true;
   health_ = EncoderHealth::OK;
+  loadCalibration();
   reset();
   return true;
 }
@@ -113,9 +149,9 @@ void WheelOdometry::update(int16_t leftCommand, int16_t rightCommand) {
   if (dtMs > 0U && dtMs <= 250U) {
     const float scale = 1000.0f / static_cast<float>(dtMs);
     const float leftInstant = static_cast<float>(leftDelta) *
-                              ENCODER_LEFT_MM_PER_TICK * scale;
+                              leftMmPerTick_ * scale;
     const float rightInstant = static_cast<float>(rightDelta) *
-                               ENCODER_RIGHT_MM_PER_TICK * scale;
+                               rightMmPerTick_ * scale;
     data_.leftVelocityMmS += ENCODER_VELOCITY_FILTER_ALPHA *
                             (leftInstant - data_.leftVelocityMmS);
     data_.rightVelocityMmS += ENCODER_VELOCITY_FILTER_ALPHA *
@@ -123,7 +159,7 @@ void WheelOdometry::update(int16_t leftCommand, int16_t rightCommand) {
     data_.linearVelocityMmS =
         (data_.leftVelocityMmS + data_.rightVelocityMmS) * 0.5f;
     data_.angularVelocityRadS =
-        (data_.rightVelocityMmS - data_.leftVelocityMmS) / WHEEL_TRACK_MM;
+        (data_.rightVelocityMmS - data_.leftVelocityMmS) / trackMm_;
   }
 
   updateStallHealth(nowMs, leftDelta, rightDelta, leftCommand, rightCommand);
@@ -131,12 +167,12 @@ void WheelOdometry::update(int16_t leftCommand, int16_t rightCommand) {
 
   data_.leftTicks += leftDelta;
   data_.rightTicks += rightDelta;
-  const float leftMm = static_cast<float>(leftDelta) * ENCODER_LEFT_MM_PER_TICK;
-  const float rightMm = static_cast<float>(rightDelta) * ENCODER_RIGHT_MM_PER_TICK;
+  const float leftMm = static_cast<float>(leftDelta) * leftMmPerTick_;
+  const float rightMm = static_cast<float>(rightDelta) * rightMmPerTick_;
   data_.leftDistanceMm += leftMm;
   data_.rightDistanceMm += rightMm;
   const float travelMm = (leftMm + rightMm) * 0.5f;
-  const float headingDelta = (rightMm - leftMm) / WHEEL_TRACK_MM;
+  const float headingDelta = (rightMm - leftMm) / trackMm_;
   data_.encoderHeadingRad = normalizeRad(data_.encoderHeadingRad + headingDelta);
   data_.distanceMm += travelMm;
   pendingTravelMm_ += travelMm;
@@ -154,6 +190,259 @@ void WheelOdometry::integratePose(float headingDeg, bool externalHeadingValid) {
     pendingTravelMm_ = 0.0f;
   }
   data_.headingRad = newHeading;
+}
+
+bool WheelOdometry::calibrationValuesValid(float leftMmPerTick,
+                                           float rightMmPerTick,
+                                           float trackMm) const {
+  return isfinite(leftMmPerTick) && isfinite(rightMmPerTick) &&
+         isfinite(trackMm) && leftMmPerTick >= 0.02f &&
+         leftMmPerTick <= 0.20f && rightMmPerTick >= 0.02f &&
+         rightMmPerTick <= 0.20f && trackMm >= 100.0f &&
+         trackMm <= 500.0f;
+}
+
+bool WheelOdometry::loadCalibration() {
+  const auto* record = reinterpret_cast<const CalibrationFlashRecord*>(
+      kCalibrationFlashAddress);
+  if (record->magic != kCalibrationMagic ||
+      record->version != kCalibrationVersion ||
+      record->size != sizeof(CalibrationFlashRecord) ||
+      record->crc != CalibrationCrc(*record) ||
+      !calibrationValuesValid(record->leftMmPerTick,
+                              record->rightMmPerTick, record->trackMm)) {
+    calibrationPersisted_ = false;
+    return false;
+  }
+  leftMmPerTick_ = record->leftMmPerTick;
+  rightMmPerTick_ = record->rightMmPerTick;
+  trackMm_ = record->trackMm;
+  calibrationCandidateLeftMmPerTick_ = leftMmPerTick_;
+  calibrationCandidateRightMmPerTick_ = rightMmPerTick_;
+  calibrationCandidateTrackMm_ = trackMm_;
+  calibrationStraightSamples_ = record->straightSamples;
+  calibrationTurnSamples_ = record->turnSamples;
+  committedStraightSamples_ = calibrationStraightSamples_;
+  committedTurnSamples_ = calibrationTurnSamples_;
+  calibrationPersisted_ = true;
+  return true;
+}
+
+bool WheelOdometry::saveCalibration() const {
+  CalibrationFlashRecord record;
+  record.magic = kCalibrationMagic;
+  record.version = kCalibrationVersion;
+  record.size = sizeof(CalibrationFlashRecord);
+  record.leftMmPerTick = calibrationCandidateLeftMmPerTick_;
+  record.rightMmPerTick = calibrationCandidateRightMmPerTick_;
+  record.trackMm = calibrationCandidateTrackMm_;
+  record.straightSamples = calibrationStraightSamples_;
+  record.turnSamples = calibrationTurnSamples_;
+  record.crc = CalibrationCrc(record);
+
+  HAL_FLASH_Unlock();
+  FLASH_EraseInitTypeDef erase = {};
+  erase.TypeErase = FLASH_TYPEERASE_PAGES;
+  erase.PageAddress = kCalibrationFlashAddress;
+  erase.NbPages = 1U;
+  uint32_t pageError = 0U;
+  bool ok = HAL_FLASHEx_Erase(&erase, &pageError) == HAL_OK;
+  const auto* halfwords = reinterpret_cast<const uint16_t*>(&record);
+  if (ok) {
+    for (size_t i = 0; i < sizeof(record) / sizeof(uint16_t); ++i) {
+      if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD,
+                            kCalibrationFlashAddress + i * sizeof(uint16_t),
+                            halfwords[i]) != HAL_OK) {
+        ok = false;
+        break;
+      }
+    }
+  }
+  HAL_FLASH_Lock();
+  return ok;
+}
+
+bool WheelOdometry::startCalibrationStraight() {
+  if (!healthy() || calibrationPhase_ != WheelCalibrationPhase::NONE) {
+    calibrationLastError_ = !healthy() ? "UNHEALTHY" : "ACTIVE";
+    return false;
+  }
+  calibrationStartLeftTicks_ = data_.leftTicks;
+  calibrationStartRightTicks_ = data_.rightTicks;
+  calibrationPhase_ = WheelCalibrationPhase::STRAIGHT;
+  calibrationLastError_ = "NONE";
+  return true;
+}
+
+bool WheelOdometry::finishCalibrationStraight(float referenceMm) {
+  if (calibrationPhase_ != WheelCalibrationPhase::STRAIGHT) {
+    calibrationLastError_ = "NOT_STRAIGHT";
+    return false;
+  }
+  if (!healthy()) {
+    calibrationLastError_ = "UNHEALTHY";
+    return false;
+  }
+  if (!isfinite(referenceMm) || referenceMm < 100.0f ||
+      referenceMm > 2000.0f) {
+    calibrationLastError_ = "REFERENCE";
+    return false;
+  }
+  const int64_t leftDelta = data_.leftTicks - calibrationStartLeftTicks_;
+  const int64_t rightDelta = data_.rightTicks - calibrationStartRightTicks_;
+  calibrationLastLeftDelta_ = leftDelta;
+  calibrationLastRightDelta_ = rightDelta;
+  if (llabs(leftDelta) < 50LL || llabs(rightDelta) < 50LL ||
+      (leftDelta > 0) != (rightDelta > 0)) {
+    calibrationLastError_ = (leftDelta > 0) != (rightDelta > 0)
+                                ? "SIGN"
+                                : "DELTA";
+    return false;
+  }
+  const float leftCandidate = referenceMm /
+                              static_cast<float>(llabs(leftDelta));
+  const float rightCandidate = referenceMm /
+                               static_cast<float>(llabs(rightDelta));
+  if (!calibrationValuesValid(leftCandidate, rightCandidate,
+                              calibrationCandidateTrackMm_)) {
+    calibrationLastError_ = "RANGE";
+    return false;
+  }
+  if (calibrationStraightSamples_ >= 8U) {
+    calibrationLastError_ = "LIMIT";
+    return false;
+  }
+  const float sampleCount = static_cast<float>(calibrationStraightSamples_);
+  calibrationCandidateLeftMmPerTick_ =
+      (calibrationCandidateLeftMmPerTick_ * sampleCount + leftCandidate) /
+      (sampleCount + 1.0f);
+  calibrationCandidateRightMmPerTick_ =
+      (calibrationCandidateRightMmPerTick_ * sampleCount + rightCandidate) /
+      (sampleCount + 1.0f);
+  ++calibrationStraightSamples_;
+  calibrationPhase_ = WheelCalibrationPhase::NONE;
+  calibrationLastError_ = "NONE";
+  return true;
+}
+
+bool WheelOdometry::startCalibrationTurn() {
+  if (!healthy() || calibrationPhase_ != WheelCalibrationPhase::NONE) {
+    calibrationLastError_ = !healthy() ? "UNHEALTHY" : "ACTIVE";
+    return false;
+  }
+  calibrationStartLeftTicks_ = data_.leftTicks;
+  calibrationStartRightTicks_ = data_.rightTicks;
+  calibrationPhase_ = WheelCalibrationPhase::TURN;
+  calibrationLastError_ = "NONE";
+  return true;
+}
+
+bool WheelOdometry::finishCalibrationTurn(float referenceDeg) {
+  if (calibrationPhase_ != WheelCalibrationPhase::TURN) {
+    calibrationLastError_ = "NOT_TURN";
+    return false;
+  }
+  if (!healthy()) {
+    calibrationLastError_ = "UNHEALTHY";
+    return false;
+  }
+  if (!isfinite(referenceDeg) || referenceDeg < 45.0f ||
+      referenceDeg > 720.0f) {
+    calibrationLastError_ = "REFERENCE";
+    return false;
+  }
+  const int64_t leftDelta = data_.leftTicks - calibrationStartLeftTicks_;
+  const int64_t rightDelta = data_.rightTicks - calibrationStartRightTicks_;
+  calibrationLastLeftDelta_ = leftDelta;
+  calibrationLastRightDelta_ = rightDelta;
+  if (llabs(leftDelta) < 50LL || llabs(rightDelta) < 50LL ||
+      (leftDelta > 0) == (rightDelta > 0)) {
+    calibrationLastError_ = (leftDelta > 0) == (rightDelta > 0)
+                                ? "SIGN"
+                                : "DELTA";
+    return false;
+  }
+  const float leftMm = static_cast<float>(leftDelta) *
+                       calibrationCandidateLeftMmPerTick_;
+  const float rightMm = static_cast<float>(rightDelta) *
+                        calibrationCandidateRightMmPerTick_;
+  const float angleRad = referenceDeg * kDegToRad;
+  const float candidateTrack = fabsf(rightMm - leftMm) / angleRad;
+  if (!calibrationValuesValid(calibrationCandidateLeftMmPerTick_,
+                              calibrationCandidateRightMmPerTick_,
+                              candidateTrack)) {
+    calibrationLastError_ = "RANGE";
+    return false;
+  }
+  if (calibrationTurnSamples_ >= 8U) {
+    calibrationLastError_ = "LIMIT";
+    return false;
+  }
+  const float sampleCount = static_cast<float>(calibrationTurnSamples_);
+  calibrationCandidateTrackMm_ =
+      (calibrationCandidateTrackMm_ * sampleCount + candidateTrack) /
+      (sampleCount + 1.0f);
+  ++calibrationTurnSamples_;
+  calibrationPhase_ = WheelCalibrationPhase::NONE;
+  calibrationLastError_ = "NONE";
+  return true;
+}
+
+bool WheelOdometry::commitCalibration() {
+  if (calibrationPhase_ != WheelCalibrationPhase::NONE ||
+      calibrationStraightSamples_ == 0U || calibrationTurnSamples_ == 0U ||
+      !calibrationValuesValid(calibrationCandidateLeftMmPerTick_,
+                              calibrationCandidateRightMmPerTick_,
+                              calibrationCandidateTrackMm_)) {
+    calibrationLastError_ = calibrationPhase_ != WheelCalibrationPhase::NONE
+                                ? "ACTIVE"
+                                : (calibrationStraightSamples_ == 0U
+                                       ? "NO_STRAIGHT"
+                                       : calibrationTurnSamples_ == 0U
+                                             ? "NO_TURN"
+                                             : "RANGE");
+    return false;
+  }
+  if (!saveCalibration()) {
+    calibrationLastError_ = "FLASH";
+    return false;
+  }
+  leftMmPerTick_ = calibrationCandidateLeftMmPerTick_;
+  rightMmPerTick_ = calibrationCandidateRightMmPerTick_;
+  trackMm_ = calibrationCandidateTrackMm_;
+  calibrationPersisted_ = true;
+  committedStraightSamples_ = calibrationStraightSamples_;
+  committedTurnSamples_ = calibrationTurnSamples_;
+  calibrationLastError_ = "NONE";
+  return true;
+}
+
+void WheelOdometry::abortCalibration() {
+  calibrationPhase_ = WheelCalibrationPhase::NONE;
+  calibrationCandidateLeftMmPerTick_ = leftMmPerTick_;
+  calibrationCandidateRightMmPerTick_ = rightMmPerTick_;
+  calibrationCandidateTrackMm_ = trackMm_;
+  calibrationStraightSamples_ = committedStraightSamples_;
+  calibrationTurnSamples_ = committedTurnSamples_;
+  calibrationLastError_ = "NONE";
+}
+
+const char* WheelOdometry::calibrationLastError() const {
+  return calibrationLastError_;
+}
+
+WheelCalibrationStatus WheelOdometry::calibrationStatus() const {
+  WheelCalibrationStatus status;
+  status.phase = calibrationPhase_;
+  status.valid = calibrationValuesValid(leftMmPerTick_, rightMmPerTick_,
+                                        trackMm_);
+  status.persisted = calibrationPersisted_;
+  status.leftMmPerTick = calibrationCandidateLeftMmPerTick_;
+  status.rightMmPerTick = calibrationCandidateRightMmPerTick_;
+  status.trackMm = calibrationCandidateTrackMm_;
+  status.straightSamples = calibrationStraightSamples_;
+  status.turnSamples = calibrationTurnSamples_;
+  return status;
 }
 
 void WheelOdometry::reset() {

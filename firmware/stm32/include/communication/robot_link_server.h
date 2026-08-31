@@ -123,6 +123,33 @@ struct RobotLinkConfigRequest {
   int16_t value = 0;
 };
 
+enum class RobotLinkCalibrationType : uint8_t {
+  NONE,
+  STATUS,
+  BEGIN_STRAIGHT,
+  END_STRAIGHT,
+  BEGIN_TURN,
+  END_TURN,
+  COMMIT,
+  ABORT,
+};
+
+struct RobotLinkCalibrationRequest {
+  RobotLinkCalibrationType type = RobotLinkCalibrationType::NONE;
+  float reference = 0.0f;
+};
+
+struct RobotLinkCalibrationStatus {
+  uint8_t phase = 0;
+  bool valid = false;
+  bool persisted = false;
+  float leftMmPerTick = 0.0f;
+  float rightMmPerTick = 0.0f;
+  float trackMm = 0.0f;
+  uint16_t straightSamples = 0;
+  uint16_t turnSamples = 0;
+};
+
 class RobotLinkServer {
  public:
   RobotLinkServer(HardwareSerial& serial, Print& debugStream)
@@ -143,6 +170,10 @@ class RobotLinkServer {
   void completeConfigRequest(const RobotLinkConfigRequest& request,
                              bool success,
                              uint32_t compassZeroGeneration = 0);
+  bool takeCalibrationRequest(RobotLinkCalibrationRequest& request);
+  void completeCalibrationRequest(const RobotLinkCalibrationRequest& request,
+                                  bool success,
+                                  const RobotLinkCalibrationStatus& status);
   uint32_t validFrames() const { return validFrames_; }
   uint32_t receivedBytes() const { return receivedBytes_; }
 
@@ -179,6 +210,9 @@ class RobotLinkServer {
   bool configRequestReady_ = false;
   bool configRequestInFlight_ = false;
   RobotLinkConfigRequest configRequest_;
+  bool calibrationRequestReady_ = false;
+  bool calibrationRequestInFlight_ = false;
+  RobotLinkCalibrationRequest calibrationRequest_;
   bool aiMode_ = false;
   bool rxSequenceInitialized_ = false;
   uint16_t lastRxSequence_ = 0;

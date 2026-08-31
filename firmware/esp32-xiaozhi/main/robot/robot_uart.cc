@@ -157,7 +157,8 @@ bool RobotUart::SendFrame(const char* body) {
 }
 
 bool RobotUart::SendAndWait(const char* body, EventBits_t expected,
-                            uint32_t timeout_ms) {
+                            uint32_t timeout_ms,
+                            uint32_t cancellation_token) {
     if (!started_) {
         ESP_LOGW(kTag, "ROBOT_TXN_FAIL,BODY=%s,STAGE=NOT_STARTED",
                  body != nullptr ? body : "");
@@ -169,6 +170,16 @@ bool RobotUart::SendAndWait(const char* body, EventBits_t expected,
                  "ROBOT_TXN_FAIL,BODY=%s,STAGE=MUTEX_TIMEOUT,TIMEOUT_MS=%lu",
                  body != nullptr ? body : "",
                  static_cast<unsigned long>(timeout_ms));
+        return false;
+    }
+    // STOP increments the generation before waiting for physical STOP, so a
+    // queued motion that was waiting on the transaction mutex cannot send a
+    // MOVE/TURN after STOP has already taken ownership of the link.
+    if (cancellation_token != 0U &&
+        !MotionCancellationCurrent(cancellation_token)) {
+        xSemaphoreGive(transaction_mutex_);
+        ESP_LOGW(kTag, "ROBOT_TXN_CANCELLED,BODY=%s,STAGE=BEFORE_SEND",
+                 body != nullptr ? body : "");
         return false;
     }
     xEventGroupClearBits(response_events_, expected | kResponseNack);
@@ -224,8 +235,11 @@ bool RobotUart::CheckProtocol(uint32_t timeout_ms) {
 }
 
 bool RobotUart::BeginMotionCorrelation(uint32_t& session_id,
-                                       uint32_t& operation_id) {
-    if (!SessionReady() || motion_session_id_ == 0U ||
+                                       uint32_t& operation_id,
+                                       uint32_t cancellation_token) {
+    if ((cancellation_token != 0U &&
+         !MotionCancellationCurrent(cancellation_token)) ||
+        !SessionReady() || motion_session_id_ == 0U ||
         motion_correlation_active_) {
         return false;
     }
@@ -327,12 +341,14 @@ bool RobotUart::StartContinuousRotation(bool left, int speed,
 
 bool RobotUart::MoveDistance(bool forward, int distance_mm, int speed,
                              RobotDistanceResult& result,
-                             uint32_t timeout_ms) {
+                             uint32_t timeout_ms,
+                             uint32_t cancellation_token) {
     result = {};
     distance_mm = std::max(1, std::min(distance_mm, 5000));
     uint32_t session_id = 0;
     uint32_t operation_id = 0;
-    if (!BeginMotionCorrelation(session_id, operation_id)) {
+    if (!BeginMotionCorrelation(session_id, operation_id,
+                                cancellation_token)) {
         result.code = RobotDistanceResult::Code::LINK_ERROR;
         return false;
     }
@@ -348,7 +364,8 @@ bool RobotUart::MoveDistance(bool forward, int distance_mm, int speed,
         xSemaphoreGive(state_mutex_);
     }
     distance_waiting_ = true;
-    const bool started = SendAndWait(command, kResponseAck, 700);
+    const bool started = SendAndWait(command, kResponseAck, 700,
+                                     cancellation_token);
     motion_ack_waiting_ = false;
     if (!started) {
         result.code = RobotDistanceResult::Code::LINK_ERROR;
@@ -397,11 +414,13 @@ bool RobotUart::MoveDistance(bool forward, int distance_mm, int speed,
 
 bool RobotUart::TurnRelative(bool left, int angle_deg, int speed,
                              RobotTurnResult& result,
-                             uint32_t timeout_ms) {
+                             uint32_t timeout_ms,
+                             uint32_t cancellation_token) {
     angle_deg = std::max(1, std::min(angle_deg, 180));
     uint32_t session_id = 0;
     uint32_t operation_id = 0;
-    if (!BeginMotionCorrelation(session_id, operation_id)) return false;
+    if (!BeginMotionCorrelation(session_id, operation_id,
+                                cancellation_token)) return false;
     char command[96];
     snprintf(command, sizeof(command), "TURN,REL,%s,%d,%d,SID,%lu,OP,%lu",
              left ? "LEFT" : "RIGHT", angle_deg, ClampSpeed(speed),
@@ -410,7 +429,12 @@ bool RobotUart::TurnRelative(bool left, int angle_deg, int speed,
     xEventGroupClearBits(response_events_,
                          kResponseTurnDone | kResponseTurnError);
     turn_waiting_ = true;
-    const bool started = SendAndWait(command, kResponseAck, 700);
+    // STM32 may be busy completing the preceding MODE,AI/STOP boundary while
+    // camera and sensor telemetry are active. Do not abort a valid turn after
+    // the old 700 ms ACK window; once accepted, the terminal wait below still
+    // remains bounded by the caller's 13 s turn timeout.
+    const bool started = SendAndWait(command, kResponseAck, 2000,
+                                     cancellation_token);
     motion_ack_waiting_ = false;
     if (!started) {
         turn_waiting_ = false;
@@ -444,11 +468,13 @@ bool RobotUart::TurnRelative(bool left, int angle_deg, int speed,
 
 bool RobotUart::TurnAbsolute(int heading_deg, int speed,
                              RobotTurnResult& result,
-                             uint32_t timeout_ms) {
+                             uint32_t timeout_ms,
+                             uint32_t cancellation_token) {
     heading_deg = std::max(-180, std::min(heading_deg, 180));
     uint32_t session_id = 0;
     uint32_t operation_id = 0;
-    if (!BeginMotionCorrelation(session_id, operation_id)) return false;
+    if (!BeginMotionCorrelation(session_id, operation_id,
+                                cancellation_token)) return false;
     char command[96];
     snprintf(command, sizeof(command), "TURN,ABS,%d,%d,SID,%lu,OP,%lu",
              heading_deg, ClampSpeed(speed),
@@ -457,7 +483,8 @@ bool RobotUart::TurnAbsolute(int heading_deg, int speed,
     xEventGroupClearBits(response_events_,
                          kResponseTurnDone | kResponseTurnError);
     turn_waiting_ = true;
-    const bool started = SendAndWait(command, kResponseAck, 700);
+    const bool started = SendAndWait(command, kResponseAck, 2000,
+                                     cancellation_token);
     motion_ack_waiting_ = false;
     if (!started) {
         turn_waiting_ = false;
@@ -655,6 +682,58 @@ bool RobotUart::GetFusionStatus(RobotFusionStatus& status,
     status = fusion_status_;
     xSemaphoreGive(state_mutex_);
     return status.valid;
+}
+
+bool RobotUart::CalibrationCommand(const char* body,
+                                   RobotCalibrationStatus& status,
+                                   uint32_t timeout_ms) {
+    const bool completed = SendAndWait(body, kResponseCalibration, timeout_ms);
+    if (!completed) vTaskDelay(pdMS_TO_TICKS(30));
+    if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+    status = calibration_status_;
+    xSemaphoreGive(state_mutex_);
+    return completed && status.valid;
+}
+
+bool RobotUart::GetCalibrationStatus(RobotCalibrationStatus& status,
+                                     uint32_t timeout_ms) {
+    return CalibrationCommand("CAL,STATUS", status, timeout_ms);
+}
+
+bool RobotUart::BeginCalibrationStraight(RobotCalibrationStatus& status,
+                                         uint32_t timeout_ms) {
+    return CalibrationCommand("CAL,BEGIN,STRAIGHT", status, timeout_ms);
+}
+
+bool RobotUart::EndCalibrationStraight(float reference_mm,
+                                       RobotCalibrationStatus& status,
+                                       uint32_t timeout_ms) {
+    char command[48];
+    snprintf(command, sizeof(command), "CAL,END,STRAIGHT,%.3f", reference_mm);
+    return CalibrationCommand(command, status, timeout_ms);
+}
+
+bool RobotUart::BeginCalibrationTurn(RobotCalibrationStatus& status,
+                                     uint32_t timeout_ms) {
+    return CalibrationCommand("CAL,BEGIN,TURN", status, timeout_ms);
+}
+
+bool RobotUart::EndCalibrationTurn(float reference_deg,
+                                   RobotCalibrationStatus& status,
+                                   uint32_t timeout_ms) {
+    char command[48];
+    snprintf(command, sizeof(command), "CAL,END,TURN,%.3f", reference_deg);
+    return CalibrationCommand(command, status, timeout_ms);
+}
+
+bool RobotUart::CommitCalibration(RobotCalibrationStatus& status,
+                                  uint32_t timeout_ms) {
+    return CalibrationCommand("CAL,COMMIT", status, timeout_ms);
+}
+
+bool RobotUart::AbortCalibration(RobotCalibrationStatus& status,
+                                 uint32_t timeout_ms) {
+    return CalibrationCommand("CAL,ABORT", status, timeout_ms);
 }
 
 bool RobotUart::GetCachedObstacle(RobotObstacleStatus& status) {
@@ -882,6 +961,12 @@ void RobotUart::HandleFrame(const char* frame) {
                obstacle_zone, &obstacle_distance) == 2;
     if (obstacle_detected || obstacle_stopped) {
         const bool was_motion_active = motion_lease_active_;
+        // A STOPPED event can also be produced by the STM32 fail-closed path
+        // when an SR04 echo is missing.  That is a safe stop, but it is not
+        // evidence of a visual obstacle and must not be presented to the
+        // camera/AI obstacle worker as one.
+        const bool echo_valid = strcmp(obstacle_zone, "UNKNOWN") != 0 &&
+                                strcmp(obstacle_zone, "STALE") != 0;
         // DETECTED is telemetry, not a motion-lease cancellation. In
         // particular, the front sensor can report CAUTION while an avoidance
         // turn is sweeping past an object. Stopping heartbeat here makes the
@@ -896,7 +981,7 @@ void RobotUart::HandleFrame(const char* frame) {
         if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
             obstacle_status_.valid = true;
             obstacle_status_.fresh = true;
-            obstacle_status_.echo_valid = true;
+            obstacle_status_.echo_valid = echo_valid;
             obstacle_status_.distance_cm = obstacle_distance;
             strncpy(obstacle_status_.zone, obstacle_zone,
                     sizeof(obstacle_status_.zone) - 1);
@@ -985,6 +1070,40 @@ void RobotUart::HandleFrame(const char* frame) {
                                        operation_id, "NACK");
         }
         xEventGroupSetBits(response_events_, kResponseNack);
+        return;
+    }
+    int calibration_valid = 0;
+    int calibration_persisted = 0;
+    int calibration_active = 0;
+    unsigned int straight_samples = 0;
+    unsigned int turn_samples = 0;
+    char calibration_phase[12] = {};
+    float left_mm_per_tick = 0.0f;
+    float right_mm_per_tick = 0.0f;
+    float track_mm = 0.0f;
+    if (sscanf(frame,
+               "VALUE,CALIBRATION,PHASE,%11[^,],VALID,%d,PERSISTED,%d,ACTIVE,%d,LEFT_MPT,%f,RIGHT_MPT,%f,TRACK_MM,%f,STRAIGHT_SAMPLES,%u,TURN_SAMPLES,%u",
+               calibration_phase, &calibration_valid, &calibration_persisted,
+               &calibration_active, &left_mm_per_tick, &right_mm_per_tick,
+               &track_mm, &straight_samples, &turn_samples) == 9) {
+        if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
+            calibration_status_.valid = calibration_valid != 0;
+            calibration_status_.persisted = calibration_persisted != 0;
+            calibration_status_.active = calibration_active != 0;
+            strncpy(calibration_status_.phase, calibration_phase,
+                    sizeof(calibration_status_.phase) - 1);
+            calibration_status_.phase[
+                sizeof(calibration_status_.phase) - 1] = '\0';
+            calibration_status_.left_mm_per_tick = left_mm_per_tick;
+            calibration_status_.right_mm_per_tick = right_mm_per_tick;
+            calibration_status_.track_mm = track_mm;
+            calibration_status_.straight_samples =
+                static_cast<uint16_t>(straight_samples);
+            calibration_status_.turn_samples =
+                static_cast<uint16_t>(turn_samples);
+            xSemaphoreGive(state_mutex_);
+        }
+        xEventGroupSetBits(response_events_, kResponseCalibration);
         return;
     }
     float zero_heading = 0.0f;

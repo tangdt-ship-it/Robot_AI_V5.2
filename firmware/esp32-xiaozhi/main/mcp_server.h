@@ -158,6 +158,7 @@ public:
 class PropertyList {
 private:
     std::vector<Property> properties_;
+    uint32_t request_generation_ = 0U;
 
 public:
     PropertyList() = default;
@@ -165,6 +166,10 @@ public:
     void AddProperty(const Property& property) {
         properties_.push_back(property);
     }
+    void SetRequestGeneration(uint32_t generation) {
+        request_generation_ = generation;
+    }
+    uint32_t RequestGeneration() const { return request_generation_; }
 
     const Property& operator[](const std::string& name) const {
         for (const auto& property : properties_) {
@@ -313,6 +318,9 @@ public:
 
 class McpServer {
 public:
+    using RequestGenerationProvider =
+        std::function<uint32_t(const std::string&)>;
+
     static McpServer& GetInstance() {
         static McpServer instance;
         return instance;
@@ -323,6 +331,9 @@ public:
     void AddTool(McpTool* tool);
     void AddTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
     void AddUserOnlyTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
+    void SetRequestGenerationProvider(RequestGenerationProvider provider) {
+        request_generation_provider_ = std::move(provider);
+    }
     void ParseMessage(const cJSON* json);
     void ParseMessage(const std::string& message);
 
@@ -339,6 +350,7 @@ private:
     void DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments);
 
     std::vector<McpTool*> tools_;
+    RequestGenerationProvider request_generation_provider_;
 };
 
 #endif // MCP_SERVER_H

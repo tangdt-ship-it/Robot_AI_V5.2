@@ -71,6 +71,13 @@ void UltrasonicSensor::recomputeObstacleModel(uint32_t now){
   if(frontLeft_.zone==ObstacleZone::EMERGENCY||frontRight_.zone==ObstacleZone::EMERGENCY)overallZone_=ObstacleZone::EMERGENCY;else if(frontLeft_.zone==ObstacleZone::BLOCKED||frontRight_.zone==ObstacleZone::BLOCKED)overallZone_=ObstacleZone::BLOCKED;else if(frontLeft_.zone==ObstacleZone::CAUTION||frontRight_.zone==ObstacleZone::CAUTION)overallZone_=ObstacleZone::CAUTION;else overallZone_=ObstacleZone::CLEAR;
   const float delta=frontLeft_.distanceCm-frontRight_.distanceCm;if(overallZone_>=ObstacleZone::EMERGENCY||fabsf(delta)<=AVOID_SIDE_HYSTERESIS_CM)suggestion_=AvoidanceDirection::STOP;else suggestion_=delta<0?AvoidanceDirection::RIGHT:AvoidanceDirection::LEFT;
 }
+bool UltrasonicSensor::degradedClearWindow(uint32_t nowMs) const{
+  for(uint8_t i=0;i<2;++i){
+    const Channel& c=channels_[i];
+    if(!c.filterReady || c.lastValidEchoMs==0 || nowMs-c.lastValidEchoMs>ULTRASONIC_DEGRADED_GRACE_MS || c.consecutiveTimeouts>ULTRASONIC_DEGRADED_MAX_TIMEOUTS || c.filteredDistanceCm<=ULTRASONIC_DEGRADED_CLEAR_CM) return false;
+  }
+  return true;
+}
 void UltrasonicSensor::update(){
   const uint32_t ms=millis(),us=micros();
   if(activeChannel_==0xFF){if((int32_t)(ms-nextTriggerAllowedMs_)>=0)for(uint8_t n=0;n<2;n++){uint8_t i=(nextChannel_+n)%2;if(ms-channels_[i].lastTriggerMs>=ULTRASONIC_SAMPLE_PERIOD_MS){activeChannel_=i;nextChannel_=(i+1)%2;Channel& c=channels_[i];digitalWrite(c.trigPin,HIGH);c.triggerStartedUs=us;c.lastTriggerMs=ms;c.state=TriggerState::TRIGGER_HIGH;break;}}}
@@ -79,7 +86,24 @@ void UltrasonicSensor::update(){
 }
 bool UltrasonicSensor::hardBlocked()const{return overallZone_==ObstacleZone::BLOCKED||overallZone_==ObstacleZone::EMERGENCY;}
 float UltrasonicSensor::stoppingDistanceCm(int16_t cmd)const{const float speed=abs(cmd)*OBSTACLE_STOP_PER_COMMAND_CM;const float approach=max(0.0f,nearestRateCmS_)*OBSTACLE_APPROACH_LOOKAHEAD_S;return constrain(OBSTACLE_STOP_BASE_CM+speed+approach,OBSTACLE_EMERGENCY_CM,OBSTACLE_CAUTION_CM);}
-int16_t UltrasonicSensor::limitForwardCommand(int16_t cmd)const{if(cmd<=0)return cmd;if(!overallFresh_||!healthy())return 0;if(nearestDistanceCm_<=stoppingDistanceCm(cmd)||hardBlocked())return 0;if(nearestDistanceCm_>=stoppingDistanceCm(cmd)+OBSTACLE_SLOW_BAND_CM)return cmd;int16_t limited=(int16_t)lroundf(cmd*constrain((nearestDistanceCm_-stoppingDistanceCm(cmd))/OBSTACLE_SLOW_BAND_CM,0.0f,1.0f));if(limited>0&&limited<OBSTACLE_MIN_FORWARD_COMMAND)limited=OBSTACLE_MIN_FORWARD_COMMAND;return min(cmd,limited);}
+int16_t UltrasonicSensor::limitForwardCommand(int16_t cmd)const{
+  if(cmd<=0)return cmd;
+  if(!overallFresh_||!healthy()){
+    // Do not turn a brief, known-clear echo loss into an immediate mission
+    // abort.  This path is deliberately capped and expires quickly; a
+    // missing startup reading, close/stale reading, or repeated timeout still
+    // fails closed at zero.
+    if(!degradedClearWindow(millis()))return 0;
+    const float degradedNearest=min(channels_[LEFT_MOUNT].filteredDistanceCm,channels_[RIGHT_MOUNT].filteredDistanceCm);
+    if(degradedNearest<=stoppingDistanceCm(cmd) || degradedNearest<=OBSTACLE_CAUTION_CM)return 0;
+    return min(cmd,ULTRASONIC_DEGRADED_MAX_FORWARD_COMMAND);
+  }
+  if(nearestDistanceCm_<=stoppingDistanceCm(cmd)||hardBlocked())return 0;
+  if(nearestDistanceCm_>=stoppingDistanceCm(cmd)+OBSTACLE_SLOW_BAND_CM)return cmd;
+  int16_t limited=(int16_t)lroundf(cmd*constrain((nearestDistanceCm_-stoppingDistanceCm(cmd))/OBSTACLE_SLOW_BAND_CM,0.0f,1.0f));
+  if(limited>0&&limited<OBSTACLE_MIN_FORWARD_COMMAND)limited=OBSTACLE_MIN_FORWARD_COMMAND;
+  return min(cmd,limited);
+}
 const char* UltrasonicSensor::zoneText(ObstacleZone z){switch(z){case ObstacleZone::CLEAR:return "CLEAR";case ObstacleZone::CAUTION:return "CAUTION";case ObstacleZone::BLOCKED:return "BLOCKED";case ObstacleZone::EMERGENCY:return "EMERGENCY";default:return "UNKNOWN";}}
 const char* UltrasonicSensor::healthText(SensorHealth h){switch(h){case SensorHealth::HEALTHY:return "HEALTHY";case SensorHealth::STALE:return "STALE";case SensorHealth::TIMEOUT:return "TIMEOUT";case SensorHealth::INVALID:return "INVALID";case SensorHealth::DISCONNECTED_OR_FAULT:return "DISCONNECTED_OR_FAULT";case SensorHealth::DEGRADED:return "DEGRADED";default:return "UNKNOWN";}}
 const char* UltrasonicSensor::avoidanceText(AvoidanceDirection d){switch(d){case AvoidanceDirection::LEFT:return "LEFT";case AvoidanceDirection::RIGHT:return "RIGHT";case AvoidanceDirection::STOP:return "STOP";default:return "NONE";}}

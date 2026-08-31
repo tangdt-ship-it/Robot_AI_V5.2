@@ -81,6 +81,7 @@ private:
         CompactWifiBoardS3Cam* board;
         bool left;
         int degrees;
+        int speed;
     };
 
     static void DiagnosticTurnTask(void* context) {
@@ -88,13 +89,14 @@ private:
         CompactWifiBoardS3Cam* board = request->board;
         const bool left = request->left;
         const int degrees = request->degrees;
+        const int speed = request->speed;
         delete request;
 
         RobotTurnResult result;
-        ESP_LOGI(TAG, "ROBOT_DIAG TURN START dir=%s relative=%d speed=10",
-                 left ? "left" : "right", degrees);
+        ESP_LOGI(TAG, "ROBOT_DIAG TURN START dir=%s relative=%d speed=%d",
+                 left ? "left" : "right", degrees, speed);
         const bool completed = board->robot_uart_.SetMode(true, 700) &&
-            board->robot_uart_.TurnRelative(left, degrees, 10, result, 13000);
+            board->robot_uart_.TurnRelative(left, degrees, speed, result, 13000);
         if (!completed) board->robot_uart_.Stop(700);
         board->robot_uart_.SetMode(false, 700);
         ESP_LOGI(TAG,
@@ -103,6 +105,17 @@ private:
                  result.error_deg);
         board->diagnostic_turn_active_ = false;
         vTaskDelete(nullptr);
+    }
+
+    static void LogCalibrationStatus(const char* action, bool success,
+                                     const RobotCalibrationStatus& status) {
+        ESP_LOGI(TAG,
+                 "CALIBRATION action=%s result=%s phase=%s valid=%d persisted=%d active=%d left_mpt=%.6f right_mpt=%.6f track_mm=%.2f straight_samples=%u turn_samples=%u",
+                 action, success ? "PASS" : "FAIL", status.phase,
+                 status.valid, status.persisted, status.active,
+                 status.left_mm_per_tick, status.right_mm_per_tick,
+                 status.track_mm, status.straight_samples,
+                 status.turn_samples);
     }
 
     static void DiagnosticConsoleTask(void* context) {
@@ -126,6 +139,59 @@ private:
                 length = 0;
                 ESP_LOGI(TAG, "ROBOT_DIAG RX: %s", line);
 
+                if (strcmp(line, "calibration_status") == 0) {
+                    RobotCalibrationStatus status;
+                    const bool ok = board->robot_uart_.GetCalibrationStatus(
+                        status, 900);
+                    LogCalibrationStatus("STATUS", ok, status);
+                    continue;
+                }
+                if (strcmp(line, "calibration_begin_straight") == 0) {
+                    RobotCalibrationStatus status;
+                    const bool ok = board->robot_uart_.BeginCalibrationStraight(
+                        status, 900);
+                    LogCalibrationStatus("BEGIN_STRAIGHT", ok, status);
+                    continue;
+                }
+                float calibrationReference = 0.0f;
+                char calibrationTrailing = '\0';
+                if (sscanf(line, "calibration_end_straight %f%c",
+                           &calibrationReference, &calibrationTrailing) == 1) {
+                    RobotCalibrationStatus status;
+                    const bool ok = board->robot_uart_.EndCalibrationStraight(
+                        calibrationReference, status, 900);
+                    LogCalibrationStatus("END_STRAIGHT", ok, status);
+                    continue;
+                }
+                if (strcmp(line, "calibration_begin_turn") == 0) {
+                    RobotCalibrationStatus status;
+                    const bool ok = board->robot_uart_.BeginCalibrationTurn(
+                        status, 900);
+                    LogCalibrationStatus("BEGIN_TURN", ok, status);
+                    continue;
+                }
+                if (sscanf(line, "calibration_end_turn %f%c",
+                           &calibrationReference, &calibrationTrailing) == 1) {
+                    RobotCalibrationStatus status;
+                    const bool ok = board->robot_uart_.EndCalibrationTurn(
+                        calibrationReference, status, 900);
+                    LogCalibrationStatus("END_TURN", ok, status);
+                    continue;
+                }
+                if (strcmp(line, "calibration_commit") == 0) {
+                    RobotCalibrationStatus status;
+                    const bool ok = board->robot_uart_.CommitCalibration(
+                        status, 1400);
+                    LogCalibrationStatus("COMMIT", ok, status);
+                    continue;
+                }
+                if (strcmp(line, "calibration_abort") == 0) {
+                    RobotCalibrationStatus status;
+                    const bool ok = board->robot_uart_.AbortCalibration(
+                        status, 900);
+                    LogCalibrationStatus("ABORT", ok, status);
+                    continue;
+                }
                 if (strcmp(line, "camera_capture") == 0) {
                     const int64_t started = esp_timer_get_time();
                     const bool captured = board->camera_ != nullptr &&
@@ -290,9 +356,9 @@ private:
                            &degrees, &speed) != 3 ||
                     (strcmp(direction, "left") != 0 &&
                      strcmp(direction, "right") != 0) ||
-                    degrees < 1 || degrees > 30 || speed != 10) {
+                    degrees < 1 || degrees > 30 || speed < 10 || speed > 20) {
                     ESP_LOGW(TAG,
-                             "ROBOT_DIAG rejected; use robot_turn left|right 1..30 10 or robot_stop");
+                             "ROBOT_DIAG rejected; use robot_turn left|right 1..30 10..20 or robot_stop");
                     continue;
                 }
                 if (board->diagnostic_turn_active_) {
@@ -300,7 +366,7 @@ private:
                     continue;
                 }
                 auto* request = new DiagnosticTurnRequest{
-                    board, strcmp(direction, "left") == 0, degrees};
+                    board, strcmp(direction, "left") == 0, degrees, speed};
                 board->diagnostic_turn_active_ = true;
                 if (xTaskCreatePinnedToCore(DiagnosticTurnTask,
                                             "robot_diag_turn", 4096, request,
@@ -324,7 +390,7 @@ private:
                                     "robot_diag_console", 4096, this, 1,
                                     nullptr, 1) == pdPASS) {
             ESP_LOGI(TAG,
-                     "ROBOT_DIAG console ready: camera_capture; camera_dump; camera_describe; camera_nav; robot_obstacle; robot_odometry; robot_encoder; navigation_status; scan_obstacle_shadow; bypass_obstacle_once; navigate_autonomous_12s; continue_forward_once; robot_turn left|right 1..30 10; robot_stop");
+                     "ROBOT_DIAG console ready: calibration_status; calibration_begin_straight; calibration_end_straight <mm>; calibration_begin_turn; calibration_end_turn <deg>; calibration_commit; calibration_abort; camera_capture; camera_dump; camera_describe; camera_nav; robot_obstacle; robot_odometry; robot_encoder; navigation_status; scan_obstacle_shadow; bypass_obstacle_once; navigate_autonomous_12s; continue_forward_once; robot_turn left|right 1..30 10; robot_stop");
         }
     }
 
@@ -383,6 +449,21 @@ private:
 
     void InitializeRobotTools() {
         auto& mcp_server = McpServer::GetInstance();
+        // Capture the motion-cancellation generation when the MCP request is
+        // received, before Application::Schedule can queue the callback on the
+        // main task.  STOP then invalidates stale queued MOVE/TURN requests.
+        mcp_server.SetRequestGenerationProvider(
+            [this](const std::string& tool_name) -> uint32_t {
+                if (tool_name == "self.robot.move_distance" ||
+                    tool_name == "self.robot.turn_and_move" ||
+                    tool_name == "self.robot.turn_left" ||
+                    tool_name == "self.robot.turn_right" ||
+                    tool_name == "self.robot.turn_relative" ||
+                    tool_name == "self.robot.turn_to_heading") {
+                    return robot_uart_.MotionCancellationToken();
+                }
+                return 0U;
+            });
         const PropertyList continuous_motion_property({
             Property("speed", kPropertyTypeInteger, 20, 10, 20),
             Property("continuous", kPropertyTypeBoolean, true),
@@ -391,6 +472,12 @@ private:
             Property("distance_mm", kPropertyTypeInteger, 500, 1, 5000),
             Property("forward", kPropertyTypeBoolean, true),
             Property("speed", kPropertyTypeInteger, 15, 10, 20),
+        });
+        const PropertyList turn_and_move_property({
+            Property("direction", kPropertyTypeString),
+            Property("distance_mm", kPropertyTypeInteger, 500, 1, 5000),
+            Property("turn_speed", kPropertyTypeInteger, 15, 10, 20),
+            Property("drive_speed", kPropertyTypeInteger, 15, 10, 20),
         });
         const PropertyList config_speed_property({
             Property("speed", kPropertyTypeInteger, 30, 10, 255),
@@ -590,11 +677,23 @@ private:
                 const int distance_mm = properties["distance_mm"].value<int>();
                 const bool forward = properties["forward"].value<bool>();
                 const int speed = properties["speed"].value<int>();
+                const uint32_t cancellation_token = properties.RequestGeneration();
+                if (!robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                    return std::string(
+                        "{\"completed\":false,\"error\":\"motion_cancelled_before_start\"}");
+                }
                 RobotDistanceResult result;
-                const bool completed = robot_uart_.SetMode(true, 700) &&
+                const bool mode_started = robot_uart_.SetMode(true, 700);
+                const bool completed = mode_started &&
                     robot_uart_.MoveDistance(forward, distance_mm, speed,
-                                              result, 31000);
+                                              result, 31000,
+                                              cancellation_token);
                 robot_uart_.SetMode(false, 700);
+                if (!completed &&
+                    !robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                    return std::string(
+                        "{\"completed\":false,\"error\":\"motion_cancelled\"}");
+                }
                 const bool pose_synced = mission_manager_.SyncAfterExternalMotion();
                 char json[224];
                 snprintf(json, sizeof(json),
@@ -602,6 +701,70 @@ private:
                          completed ? "true" : "false",
                          forward ? "forward" : "backward",
                          result.target_mm, result.travelled_mm,
+                         pose_synced ? "true" : "false");
+                return std::string(json);
+            });
+        mcp_server.AddTool(
+            "self.robot.turn_and_move",
+            "Dùng cho câu rẽ trái/phải theo quãng đường, ví dụ rẽ trái 500 mm hoặc rẽ phải 1 m. Thực hiện quay kín đúng 90 độ trước; chỉ khi quay completed=true mới tiến thẳng theo distance_mm. Không dùng cho câu chỉ yêu cầu quay/xoay theo góc.",
+            turn_and_move_property,
+            [this](const PropertyList& properties) -> ReturnValue {
+                if (mission_manager_.IsActive()) {
+                    return std::string(
+                        "{\"completed\":false,\"error\":\"autonomous_mission_active\"}");
+                }
+                const std::string direction =
+                    properties["direction"].value<std::string>();
+                const bool left = direction == "left" || direction == "LEFT" ||
+                                  direction == "trai" || direction == "trÃ¡i";
+                const bool right = direction == "right" || direction == "RIGHT" ||
+                                   direction == "phai" || direction == "phÃ¡i";
+                if (!left && !right) {
+                    return std::string(
+                        "{\"completed\":false,\"error\":\"invalid_direction\"}");
+                }
+                const int distance_mm = properties["distance_mm"].value<int>();
+                const int turn_speed = properties["turn_speed"].value<int>();
+                const int drive_speed = properties["drive_speed"].value<int>();
+                const uint32_t cancellation_token = properties.RequestGeneration();
+                if (!robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                    return std::string(
+                        "{\"completed\":false,\"error\":\"motion_cancelled_before_start\"}");
+                }
+                RobotTurnResult turn;
+                const bool turned = robot_uart_.SetMode(true, 700) &&
+                    robot_uart_.TurnRelative(left, 90, turn_speed, turn, 13000,
+                                             cancellation_token);
+                if (!turned) {
+                    robot_uart_.Stop(700);
+                    robot_uart_.SetMode(false, 700);
+                    char json[320];
+                    snprintf(json, sizeof(json),
+                             "{\"completed\":false,\"turned\":false,\"moved\":false,\"direction\":\"%s\",\"requested_turn_degrees\":90,\"error_deg\":%.1f}",
+                             left ? "left" : "right", turn.error_deg);
+                    return std::string(json);
+                }
+                robot_uart_.SetMode(false, 700);
+
+                RobotDistanceResult move;
+                const bool moved = robot_uart_.SetMode(true, 700) &&
+                    robot_uart_.MoveDistance(true, distance_mm, drive_speed,
+                                              move, 31000,
+                                              cancellation_token);
+                robot_uart_.SetMode(false, 700);
+                if (!moved) robot_uart_.Stop(700);
+                if (!moved &&
+                    !robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                    return std::string(
+                        "{\"completed\":false,\"error\":\"motion_cancelled\",\"turned\":true,\"moved\":false}");
+                }
+                const bool pose_synced = mission_manager_.SyncAfterExternalMotion();
+                char json[448];
+                snprintf(json, sizeof(json),
+                         "{\"completed\":%s,\"turned\":true,\"moved\":%s,\"direction\":\"%s\",\"requested_turn_degrees\":90,\"turn_error_deg\":%.1f,\"target_mm\":%.1f,\"travelled_mm\":%.1f,\"pose_synced\":%s}",
+                         moved ? "true" : "false", moved ? "true" : "false",
+                         left ? "left" : "right", turn.error_deg,
+                         move.target_mm, move.travelled_mm,
                          pose_synced ? "true" : "false");
                 return std::string(json);
             });
@@ -888,14 +1051,39 @@ private:
             });
         mcp_server.AddTool(
             "self.robot.turn_left",
-            "Cho robot xoay trái tại chỗ. continuous=false xoay một nhịp 650 ms; continuous=true xoay liên tục tới STOP bằng heartbeat. Tuyệt đối không dùng cho yêu cầu có số độ; yêu cầu góc phải dùng self.robot.turn_relative.",
-            continuous_motion_property,
+            "Cho robot xoay trái. Nếu câu nói có số độ (quay/xoay/rẽ trái X độ), dùng degrees để quay vòng kín đến đúng góc; nếu không có góc thì dùng nhịp/liên tục như cũ.",
+            PropertyList({
+                Property("speed", kPropertyTypeInteger, 20, 10, 20),
+                Property("continuous", kPropertyTypeBoolean, true),
+                Property("degrees", kPropertyTypeInteger, 1, 180),
+            }),
             [this](const PropertyList& properties) -> ReturnValue {
                 if (mission_manager_.IsActive()) {
                     return std::string("{\"completed\":false,\"error\":\"autonomous_mission_active\"}");
                 }
                 const int speed = properties["speed"].value<int>();
                 const bool continuous = properties["continuous"].value<bool>();
+                const int degrees = properties["degrees"].value<int>();
+                if (degrees > 0) {
+                    const uint32_t cancellation_token = properties.RequestGeneration();
+                    if (!robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                        return std::string(
+                            "{\"completed\":false,\"error\":\"motion_cancelled_before_start\"}");
+                    }
+                    RobotTurnResult turn;
+                    const bool completed = robot_uart_.SetMode(true, 700) &&
+                        robot_uart_.TurnRelative(true, degrees, speed, turn, 13000,
+                                                  cancellation_token);
+                    if (!completed) robot_uart_.Stop(700);
+                    robot_uart_.SetMode(false, 700);
+                    char json[256];
+                    snprintf(json, sizeof(json),
+                             "{\"completed\":%s,\"direction\":\"left\",\"requested_degrees\":%d,\"heading_deg\":%.1f,\"target_deg\":%.1f,\"error_deg\":%.1f,\"compass_closed_loop\":true}",
+                             completed ? "true" : "false", degrees,
+                             turn.heading_deg, turn.target_deg,
+                             turn.error_deg);
+                    return std::string(json);
+                }
                 if (continuous) return StartSafeContinuousRotation(true, speed);
                 const bool started = robot_uart_.SetMode(true, 700) &&
                                      robot_uart_.TurnLeft(speed, 700);
@@ -903,14 +1091,39 @@ private:
             });
         mcp_server.AddTool(
             "self.robot.turn_right",
-            "Cho robot xoay phải tại chỗ. continuous=false xoay một nhịp 650 ms; continuous=true xoay liên tục tới STOP bằng heartbeat. Tuyệt đối không dùng cho yêu cầu có số độ; yêu cầu góc phải dùng self.robot.turn_relative.",
-            continuous_motion_property,
+            "Cho robot xoay phải. Nếu câu nói có số độ (quay/xoay/rẽ phải X độ), dùng degrees để quay vòng kín đến đúng góc; nếu không có góc thì dùng nhịp/liên tục như cũ.",
+            PropertyList({
+                Property("speed", kPropertyTypeInteger, 20, 10, 20),
+                Property("continuous", kPropertyTypeBoolean, true),
+                Property("degrees", kPropertyTypeInteger, 1, 180),
+            }),
             [this](const PropertyList& properties) -> ReturnValue {
                 if (mission_manager_.IsActive()) {
                     return std::string("{\"completed\":false,\"error\":\"autonomous_mission_active\"}");
                 }
                 const int speed = properties["speed"].value<int>();
                 const bool continuous = properties["continuous"].value<bool>();
+                const int degrees = properties["degrees"].value<int>();
+                if (degrees > 0) {
+                    const uint32_t cancellation_token = properties.RequestGeneration();
+                    if (!robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                        return std::string(
+                            "{\"completed\":false,\"error\":\"motion_cancelled_before_start\"}");
+                    }
+                    RobotTurnResult turn;
+                    const bool completed = robot_uart_.SetMode(true, 700) &&
+                        robot_uart_.TurnRelative(false, degrees, speed, turn, 13000,
+                                                  cancellation_token);
+                    if (!completed) robot_uart_.Stop(700);
+                    robot_uart_.SetMode(false, 700);
+                    char json[256];
+                    snprintf(json, sizeof(json),
+                             "{\"completed\":%s,\"direction\":\"right\",\"requested_degrees\":%d,\"heading_deg\":%.1f,\"target_deg\":%.1f,\"error_deg\":%.1f,\"compass_closed_loop\":true}",
+                             completed ? "true" : "false", degrees,
+                             turn.heading_deg, turn.target_deg,
+                             turn.error_deg);
+                    return std::string(json);
+                }
                 if (continuous) return StartSafeContinuousRotation(false, speed);
                 const bool started = robot_uart_.SetMode(true, 700) &&
                                      robot_uart_.TurnRight(speed, 700);
@@ -945,7 +1158,7 @@ private:
             PropertyList({
                 Property("direction", kPropertyTypeString),
                 Property("degrees", kPropertyTypeInteger, 1, 180),
-                Property("speed", kPropertyTypeInteger, 10, 10, 20),
+                Property("speed", kPropertyTypeInteger, 15, 10, 20),
             }),
             [this](const PropertyList& properties) -> ReturnValue {
                 if (mission_manager_.IsActive()) {
@@ -962,9 +1175,15 @@ private:
                 }
                 const int degrees = properties["degrees"].value<int>();
                 const int speed = properties["speed"].value<int>();
+                const uint32_t cancellation_token = properties.RequestGeneration();
+                if (!robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                    return std::string(
+                        "{\"completed\":false,\"error\":\"motion_cancelled_before_start\"}");
+                }
                 RobotTurnResult turn;
                 const bool completed = robot_uart_.SetMode(true, 700) &&
-                    robot_uart_.TurnRelative(left, degrees, speed, turn, 13000);
+                    robot_uart_.TurnRelative(left, degrees, speed, turn, 13000,
+                                              cancellation_token);
                 if (!completed) robot_uart_.Stop(700);
                 robot_uart_.SetMode(false, 700);
                 char json[256];
@@ -980,7 +1199,7 @@ private:
             "Yêu cầu STM32 quay tới heading tuyệt đối -180..180 độ bằng vòng kín fused heading (Encoder + MPU6050 + Compass) và chờ DONE. Dùng cho câu như quay về hướng 0 độ. Chỉ xác nhận hoàn tất khi completed=true.",
             PropertyList({
                 Property("heading", kPropertyTypeInteger, -180, 180),
-                Property("speed", kPropertyTypeInteger, 10, 10, 20),
+                Property("speed", kPropertyTypeInteger, 15, 10, 20),
             }),
             [this](const PropertyList& properties) -> ReturnValue {
                 if (mission_manager_.IsActive()) {
@@ -988,9 +1207,15 @@ private:
                 }
                 const int heading = properties["heading"].value<int>();
                 const int speed = properties["speed"].value<int>();
+                const uint32_t cancellation_token = properties.RequestGeneration();
+                if (!robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                    return std::string(
+                        "{\"completed\":false,\"error\":\"motion_cancelled_before_start\"}");
+                }
                 RobotTurnResult turn;
                 const bool completed = robot_uart_.SetMode(true, 700) &&
-                    robot_uart_.TurnAbsolute(heading, speed, turn, 13000);
+                    robot_uart_.TurnAbsolute(heading, speed, turn, 13000,
+                                              cancellation_token);
                 if (!completed) robot_uart_.Stop(700);
                 robot_uart_.SetMode(false, 700);
                 char json[224];
