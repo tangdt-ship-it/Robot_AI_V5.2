@@ -85,8 +85,9 @@ static constexpr uint32_t IMU_I2C_HALF_PERIOD_US = 4;
 static constexpr uint32_t IMU_I2C_CLOCK_STRETCH_TIMEOUT_US = 500;
 
 // Heading fusion. Short-term yaw comes from MPU6050 Gyro-Z, wheel encoder yaw
-// constrains the estimate to chassis kinematics and Compass supplies a slow
-// absolute correction. Large Compass jumps are never injected directly.
+// constrains the estimate to chassis kinematics and the optional Compass
+// sensor supplies a slow absolute correction. Large jumps are never injected
+// directly.
 static constexpr float FUSION_ENCODER_DELTA_WEIGHT = 0.10f;
 // Wheel slip must not turn encoder yaw into an absolute heading source.
 static constexpr float FUSION_ENCODER_AGREEMENT_DEG = 1.5f;
@@ -142,7 +143,7 @@ static constexpr uint8_t ROBOT_AI_PROTOCOL_VERSION = 3;
 static constexpr uint32_t COMPASS_RESET_EVENT_TIMEOUT_MS = 1500;
 static constexpr uint32_t ROBOT_AI_HEARTBEAT_MS = 200;
 
-// Compass closed-loop turns. The controller estimates yaw rate, predicts the
+// Heading closed-loop turns. The controller estimates yaw rate, predicts the
 // mechanical coast angle and uses short correction pulses close to target.
 static constexpr int16_t TURN_MIN_SPEED = 10;
 static constexpr int16_t TURN_MAX_SPEED = 20;
@@ -296,7 +297,8 @@ static constexpr float HEADING_MAX_DT_S = 0.100f;
 // Detect a poisoned heading signal by checking closed-loop causality. On this
 // chassis positive correction must produce negative yaw (and vice versa). If
 // a meaningful correction sees sustained yaw in the wrong direction, stop
-// using the Compass for the remainder of that straight-drive session.
+// using the faulty heading feedback for the remainder of that straight-drive
+// session.
 static constexpr float HEADING_RESPONSE_TEST_OUTPUT = 2.0f;
 static constexpr float HEADING_RESPONSE_TEST_RATE_DEG_S = 0.45f;
 static constexpr float HEADING_RESPONSE_FAULT_TIME_S = 1.10f;

@@ -9,7 +9,7 @@ enum class LcdPage : uint8_t {
 };
 
 struct LcdDisplayData {
-  float compassAngle = 0.0f;
+  float headingDeg = 0.0f;
   const char* ps2Status = "WAIT";
   int16_t speed = 0;
   int16_t left = 0;

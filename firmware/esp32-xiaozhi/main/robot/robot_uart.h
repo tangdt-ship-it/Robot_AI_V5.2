@@ -26,7 +26,7 @@ struct RobotState {
     bool moving = false;
     bool brake_enabled = false;
     bool ramp_enabled = false;
-    bool compass_ok = false;
+    bool compass_sensor_ok = false;
     bool ps2_ok = false;
     char motion_owner[12] = "UNKNOWN";
     uint32_t received_at_ms = 0;

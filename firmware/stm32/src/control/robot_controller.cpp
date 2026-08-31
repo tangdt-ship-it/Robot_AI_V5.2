@@ -188,7 +188,7 @@ void RobotController::setMotionCommand(int16_t left, int16_t right,
       heading_.reset();
       headingSuppressed_ = false;
       heading_.capture(currentHeadingDeg());
-      lastHeadingCompassSequence_ = 0;
+      lastHeadingSequence_ = 0;
       lastHeadingCorrection_ = 0;
 #if ROBOT_DEBUG
       debug_.print("HEADING,CAPTURE=");
@@ -336,13 +336,13 @@ void RobotController::applyMotorCommand() {
   if (straightCommand_ && !headingSuppressed_ && headingAvailable()) {
     if (!heading_.isActive()) {
       heading_.capture(currentHeadingDeg());
-      lastHeadingCompassSequence_ = 0;
+      lastHeadingSequence_ = 0;
       lastHeadingCorrection_ = 0;
     }
     // V4.2 updates steering once per fused-heading sample. Motor/PS2 loops
     // may run faster and reuse the last correction between estimator samples.
-    if (currentHeadingSequence() != lastHeadingCompassSequence_) {
-      lastHeadingCompassSequence_ = currentHeadingSequence();
+    if (currentHeadingSequence() != lastHeadingSequence_) {
+      lastHeadingSequence_ = currentHeadingSequence();
       const int16_t magnitude =
           static_cast<int16_t>((abs(left) + abs(right)) / 2);
       lastHeadingCorrection_ = heading_.update(
@@ -360,8 +360,8 @@ void RobotController::applyMotorCommand() {
   } else if (straightCommand_) {
     lastHeadingCorrection_ = 0;
     // Continue open-loop only when every heading source is unavailable.
-    // A noisy/lost Compass no longer disables steering when IMU+encoder fusion
-    // is healthy.
+    // A missing optional Compass no longer disables steering when the fused
+    // Heading source is healthy.
     headingSuppressed_ = !headingAvailable();
   }
   if (aiMotionMode_ == AiMotionMode::DISTANCE) {
@@ -511,7 +511,7 @@ bool RobotController::startAiTurnRelative(bool left, float degrees,
     return false;
   }
   // Capture the current heading exactly once. Physical measurement on this
-  // robot shows LEFT increases Compass heading and RIGHT decreases it.
+  // Physical measurement shows LEFT increases Heading and RIGHT decreases it.
   const float startHeading = currentHeadingDeg();
   const float delta = left ? degrees : -degrees;
   const float target = CompassController::normalize(startHeading + delta);
@@ -616,7 +616,7 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     return;
   }
   if (!headingAvailable()) {
-    finishAiTurn(AiTurnResultCode::COMPASS_LOST);
+    finishAiTurn(AiTurnResultCode::HEADING_LOST);
     return;
   }
   if (static_cast<int32_t>(nowMs - aiMotionDeadlineMs_) >= 0) {
@@ -747,7 +747,7 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     aiTurnCommandSpeed_ = constrain(speed, TURN_MIN_SPEED, aiTurnMaxSpeed_);
   }
 
-  // Measured turn polarity: L=-,R=+ increases Compass heading (left turn),
+  // Measured turn polarity: L=-,R=+ increases Heading (left turn),
   // while L=+,R=- decreases it (right turn).
   if (aiTurnErrorDeg_ > 0.0f) {
     targetLeft_ = -aiTurnCommandSpeed_;
@@ -816,7 +816,7 @@ void RobotController::updateFast() {
       aiMotionMode_ == AiMotionMode::DISTANCE) {
     return;
   }
-  // Release/timeout bypasses ramp, Compass, LCD and the normal control period.
+  // Release/timeout bypasses ramp, heading sensor, LCD and the normal control period.
   stopImmediately();
 }
 
@@ -1032,7 +1032,7 @@ void RobotController::updateControl() {
 void RobotController::updateDisplay() {
   const uint32_t now = millis();
   LcdDisplayData data;
-  data.compassAngle = currentHeadingDeg();
+  data.headingDeg = currentHeadingDeg();
   data.ps2Status = ps2_.receiverStatusText(now);
   data.speed = speedSetting_;
   data.left = motors_.leftSpeed();

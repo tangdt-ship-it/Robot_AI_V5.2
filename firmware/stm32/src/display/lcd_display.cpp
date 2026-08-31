@@ -154,10 +154,10 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
 }
 
 void LcdDisplay::buildRobotLines() {
-  const int compassTenths = static_cast<int>(roundf(data_.compassAngle * 10.0f));
+  const int headingTenths = static_cast<int>(roundf(data_.headingDeg * 10.0f));
   const int targetTenths = static_cast<int>(roundf(data_.headingTarget * 10.0f));
   snprintf(desired_[0], 21, "HDG:%4d.%1d PS2:%-4s",
-           compassTenths / 10, abs(compassTenths % 10), data_.ps2Status);
+           headingTenths / 10, abs(headingTenths % 10), data_.ps2Status);
   snprintf(desired_[1], 21, "SPD:%3d L:%3d R:%3d", data_.speed, data_.left, data_.right);
   if (!data_.encoderReady) {
     snprintf(desired_[2], 21, "ENC:%-16.16s",

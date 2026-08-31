@@ -1027,9 +1027,9 @@ void MissionManager::RunShadowScan() {
         Finish(MissionState::FAILED);
         return;
     }
-    if (!state.compass_ok) {
+    if (!state.compass_sensor_ok) {
         ESP_LOGW(kShadowTag,
-                 "Compass unavailable; shadow scan uses fused encoder/gyro heading");
+                 "Optional Compass sensor unavailable; shadow scan uses fused Heading");
     }
     original_heading = NormalizeHeading(original_heading);
     {
@@ -1079,7 +1079,7 @@ void MissionManager::RunShadowScan() {
         LockGuard lock(mutex_);
         if (lock.locked()) context_.scan_left = left;
     }
-    // MUST return to H0 before continuing (closed-loop Compass, not timed).
+    // MUST return to H0 before continuing (closed-loop Heading, not timed).
     const bool returned_left = TurnToShadow(original_heading, kShadowScanSpeed);
     if (!returned_left) {
         SetFailure("left_scan_return_h0_failed");
@@ -1739,7 +1739,7 @@ bool MissionManager::DriveSegment(bool forward, uint32_t duration_ms,
                 current_heading - heading));
             if (delta > 18.0f) {
                 ESP_LOGW(kTag,
-                         "Compass hazard during forward drive: delta=%.1f deg",
+                         "Heading hazard during forward drive: delta=%.1f deg",
                          delta);
                 blocked = true;
                 break;
@@ -1942,7 +1942,7 @@ bool MissionManager::AvoidObstacle() {
                            MissionState::SCAN_LEFT, left) ||
             !ScanDirection(base_heading - kScanAngleDeg,
                            MissionState::SCAN_RIGHT, right)) {
-            SetFailure("scan_failed_or_compass_lost");
+            SetFailure("scan_failed_or_heading_lost");
             return false;
         }
 
@@ -2436,7 +2436,7 @@ void MissionManager::RunBypassOnce() {
     ESP_LOGI(kShadowTag, "One-obstacle bypass task started");
     RobotState state;
     float route_heading = 0.0f;
-    if (!robot_uart_->GetState(state, 700) || !state.compass_ok ||
+    if (!robot_uart_->GetState(state, 700) ||
         state.brake_enabled || state.moving ||
         !robot_uart_->GetHeading(route_heading, 700)) {
         SetFailure(state.brake_enabled ? "brake_locked" :

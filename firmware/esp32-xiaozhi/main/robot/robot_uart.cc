@@ -1077,8 +1077,7 @@ void RobotUart::HandleFrame(const char* frame) {
         return;
     }
     if (strncmp(frame, "ERR,TURN,", 9) == 0 ||
-        (turn_waiting_ && (strncmp(frame, "ERR,COMPASS,LOST", 16) == 0 ||
-                           strncmp(frame, "ERR,HEADING,LOST", 16) == 0))) {
+        (turn_waiting_ && strncmp(frame, "ERR,HEADING,LOST", 16) == 0)) {
         if (!accept_terminal()) return;
         motion_lease_active_ = false;
         if (correlated) terminal_operation_id_ = operation_id;
@@ -1434,7 +1433,7 @@ void RobotUart::HandleFrame(const char* frame) {
             state_.brake_enabled = strcmp(brake, "ON") == 0;
             state_.ramp_enabled = strcmp(ramp, "ON") == 0;
             state_.ps2_ok = strcmp(ps2, "LOST") != 0;
-            state_.compass_ok = strcmp(compass, "OK") == 0;
+            state_.compass_sensor_ok = strcmp(compass, "OK") == 0;
             strncpy(state_.motion_owner, owner,
                     sizeof(state_.motion_owner) - 1);
             state_.motion_owner[sizeof(state_.motion_owner) - 1] = '\0';
@@ -1459,7 +1458,7 @@ void RobotUart::HandleFrame(const char* frame) {
             state_.brake_enabled = strcmp(brake, "ON") == 0;
             state_.ramp_enabled = strcmp(ramp, "ON") == 0;
             state_.ps2_ok = strcmp(ps2, "LOST") != 0;
-            state_.compass_ok = strcmp(compass, "OK") == 0;
+            state_.compass_sensor_ok = strcmp(compass, "OK") == 0;
             snprintf(state_.motion_owner, sizeof(state_.motion_owner), "%s",
                      "UNKNOWN");
             state_.received_at_ms = NowMs();
@@ -1605,9 +1604,9 @@ void RobotUart::RunLinkTest() {
              heading_ok ? "PASS" : "FAIL", heading);
 
     RobotCompassStatus compass;
-    const bool compass_ok = GetCompassStatus(compass, 700);
+    const bool compass_status_ok = GetCompassStatus(compass, 700);
     ESP_LOGI(kTag, "SELFTEST COMPASS STATUS: %s connected=%d cal=%d",
-             compass_ok ? "PASS" : "FAIL", compass.connected,
+             compass_status_ok ? "PASS" : "FAIL", compass.connected,
              compass.calibrating);
 
     RobotPs2Status ps2;
@@ -1645,7 +1644,7 @@ void RobotUart::RunLinkTest() {
                  "SELFTEST OBSTACLE FORWARD GUARD: SKIP (path clear/no echo)");
     }
 
-    const bool compass_reset_ok = compass_ok && compass.connected &&
+    const bool compass_reset_ok = compass_status_ok && compass.connected &&
                                   ResetCompass(2200);
     ESP_LOGI(kTag, "SELFTEST COMPASS RESET/ZERO EVENT: %s",
              compass_reset_ok ? "PASS" : "FAIL");

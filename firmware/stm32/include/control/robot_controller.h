@@ -28,7 +28,7 @@ enum class AiMotionMode : uint8_t { NONE, PULSE, CONTINUOUS, TURN, DISTANCE };
 enum class MotionOwner : uint8_t { NONE, MCP, MISSION, REPLAY, DIAGNOSTIC, PS2 };
 
 enum class AiTurnResultCode : uint8_t {
-  NONE, DONE, TIMEOUT, COMPASS_LOST, MOTION_FAULT, OBSTACLE
+  NONE, DONE, TIMEOUT, HEADING_LOST, MOTION_FAULT, OBSTACLE
 };
 
 struct AiTurnResult {
@@ -154,7 +154,7 @@ class RobotController {
   uint32_t lastMotorDebugMs_ = 0;
   uint32_t lastUltrasonicDebugMs_ = 0;
   uint32_t lastCompassSequence_ = 0;
-  uint32_t lastHeadingCompassSequence_ = 0;
+  uint32_t lastHeadingSequence_ = 0;
   int16_t lastHeadingCorrection_ = 0;
   bool headingSuppressed_ = false;
   AiMotionMode aiMotionMode_ = AiMotionMode::NONE;

@@ -25,7 +25,7 @@ float HeadingController::shortestError(float target, float current) {
 void HeadingController::capture(float currentHeading) {
   // A disturbed session stays latched until RobotController explicitly ends
   // it with reset(). This prevents the normal "capture if inactive" path
-  // from immediately re-enabling a poisoned Compass signal.
+  // from immediately re-enabling a poisoned heading signal.
   if (disturbed_) return;
   targetHeading_ = currentHeading;
   active_ = true;
@@ -130,7 +130,7 @@ int16_t HeadingController::update(float currentHeading,
     limit = HEADING_MIN_CORRECTION_LIMIT;
   }
   // The measured chassis polarity is negative: a positive wheel correction
-  // produces a negative Compass yaw. Outer rate command plus inner rate
+  // produces a negative heading yaw. Outer rate command plus inner rate
   // feedback therefore have this sign. The integral learns slow L/R mismatch.
   float raw = kd_ * (yawRateFiltered_ - desiredYawRate_) -
               ki_ * integralCandidate;

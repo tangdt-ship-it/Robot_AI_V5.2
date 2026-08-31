@@ -115,7 +115,7 @@ void RobotLinkServer::completeMotionRequest(
     // All known static reject causes are checked before the request is queued.
     // A failure here is therefore a race/runtime reject (for example PS2
     // becoming active between validation and execution). Do not mislabel it
-    // as COMPASS_LOST or PS2_OVERRIDE without evidence.
+    // as HEADING_LOST or PS2_OVERRIDE without evidence.
     serial_.print("<ERR,MOTION_REJECTED");
     PrintCorrelation(serial_, request.sessionId, request.operationId);
     serial_.print(">\r\n");
@@ -1120,7 +1120,9 @@ void RobotLinkServer::update(const RobotTelemetry& telemetry) {
     } else if ((now - compassResetStartedMs_) >
                COMPASS_RESET_EVENT_TIMEOUT_MS) {
       compassResetAwaitingSample_ = false;
-      serial_.print("<ERR,COMPASS,LOST>\r\n");
+      // Compass is an optional sensor. A missing zero sample is diagnostic
+      // information only; it must not be reported as a heading failure.
+      serial_.print("<EVENT,COMPASS,UNAVAILABLE>\r\n");
     }
   }
   if (aiMode_ && telemetry.ps2CommandActive) {
