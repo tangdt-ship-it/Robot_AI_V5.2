@@ -33,7 +33,7 @@ jobs:
         run: |
           . /opt/esp/idf/export.sh
           idf.py fullclean
-          idf.py build
+          idf.py -D IDF_TARGET=esp32s3 -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.robot_ai.defaults' build
       - name: Record firmware sizes
         working-directory: firmware/esp32-xiaozhi
         run: |
