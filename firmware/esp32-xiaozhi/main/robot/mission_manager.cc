@@ -488,7 +488,8 @@ bool MissionManager::StartBypassOnce() {
 }
 
 // Shadow-mode body turn: switch STM32 to AI mode, use closed-loop fused heading
-// TurnAbsolute at low speed, then wait for heading settle. Never timed turn.
+// (encoder + gyro when the optional compass is unavailable), then wait for
+// heading settle. Never timed turn.
 bool MissionManager::TurnToShadow(float heading_deg, int speed) {
     if (CancelRequested()) return false;
     RobotTurnResult result;
@@ -500,7 +501,7 @@ bool MissionManager::TurnToShadow(float heading_deg, int speed) {
         robot_uart_->Stop(700);
         // STM32 intentionally has a tighter completion tolerance than the
         // Shadow observer. If it times out already stopped very near target,
-        // accept only after an active state/Compass verification below.
+        // accept only after active state and fused-heading verification below.
         RobotState state;
         float timeout_heading = 0.0f;
         const bool near_target = mode_ok &&
@@ -1018,13 +1019,17 @@ void MissionManager::RunShadowScan() {
     }
     // GetState is the authoritative active link probe. Do not reject from the
     // short cached IsConnected window after an otherwise healthy quiet UART.
-    if (!robot_uart_->GetState(state, 700) || !state.compass_ok ||
-        state.moving || !robot_uart_->GetHeading(original_heading, 700)) {
+    if (!robot_uart_->GetState(state, 700) || state.moving ||
+        !robot_uart_->GetHeading(original_heading, 700)) {
         SetFailure("shadow_preflight_failed");
         robot_uart_->Stop(700);
         robot_uart_->SetMode(false, 700);
         Finish(MissionState::FAILED);
         return;
+    }
+    if (!state.compass_ok) {
+        ESP_LOGW(kShadowTag,
+                 "Compass unavailable; shadow scan uses fused encoder/gyro heading");
     }
     original_heading = NormalizeHeading(original_heading);
     {

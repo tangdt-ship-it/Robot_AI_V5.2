@@ -343,12 +343,57 @@ private:
                              obstacle_ok, camera_ok, result.c_str());
                     continue;
                 }
+                char move_direction[8] = {};
+                int move_distance_mm = 0;
+                int move_speed = 0;
+                if (sscanf(line, "robot_move %7s %d %d", move_direction,
+                           &move_distance_mm, &move_speed) == 3) {
+                    const bool forward = strcmp(move_direction, "fwd") == 0 ||
+                                         strcmp(move_direction, "forward") == 0;
+                    const bool backward = strcmp(move_direction, "back") == 0 ||
+                                          strcmp(move_direction, "backward") == 0;
+                    if ((!forward && !backward) || move_distance_mm < 1 ||
+                        move_distance_mm > 5000 || move_speed < 10 ||
+                        move_speed > 20) {
+                        ESP_LOGW(TAG,
+                                 "ROBOT_DIAG rejected; use robot_move fwd|back 1..5000 10..20");
+                        continue;
+                    }
+                    RobotDistanceResult result;
+                    const bool completed = board->robot_uart_.SetMode(true, 700) &&
+                        board->robot_uart_.MoveDistance(
+                            forward, move_distance_mm, move_speed, result, 31000);
+                    board->robot_uart_.SetMode(false, 700);
+                    const bool pose_synced =
+                        board->mission_manager_.SyncAfterExternalMotion();
+                    ESP_LOGI(TAG,
+                             "ROBOT_DIAG MOVE END completed=%d direction=%s requested_mm=%d travelled_mm=%.1f pose_synced=%d",
+                             completed, forward ? "forward" : "backward",
+                             move_distance_mm, result.travelled_mm, pose_synced);
+                    continue;
+                }
+                if (strcmp(line, "robot_set_home") == 0) {
+                    const bool ok = board->mission_manager_.SetHome();
+                    ESP_LOGI(TAG, "ROBOT_DIAG SET_HOME ok=%d home=%s", ok,
+                             board->mission_manager_.HomeJson().c_str());
+                    continue;
+                }
+                if (strcmp(line, "robot_return_home") == 0) {
+                    const bool accepted = board->mission_manager_.StartReturnHome(
+                        12, true);
+                    ESP_LOGI(TAG,
+                             "ROBOT_DIAG RETURN_HOME accepted=%d status=%s",
+                             accepted,
+                             board->mission_manager_.StatusJson().c_str());
+                    continue;
+                }
                 if (strcmp(line, "navigation_status") == 0) {
                     ESP_LOGI(TAG, "NAVIGATION_STATUS %s",
                              board->mission_manager_.StatusJson().c_str());
                     continue;
                 }
                 if (strcmp(line, "robot_stop") == 0) {
+                    board->mission_manager_.CancelMission();
                     const bool stopped = board->robot_uart_.Stop(700);
                     ESP_LOGI(TAG, "ROBOT_DIAG STOP completed=%d", stopped);
                     continue;
@@ -361,9 +406,9 @@ private:
                            &degrees, &speed) != 3 ||
                     (strcmp(direction, "left") != 0 &&
                      strcmp(direction, "right") != 0) ||
-                    degrees < 1 || degrees > 30 || speed < 10 || speed > 20) {
+                    degrees < 1 || degrees > 180 || speed < 10 || speed > 20) {
                     ESP_LOGW(TAG,
-                             "ROBOT_DIAG rejected; use robot_turn left|right 1..30 10..20 or robot_stop");
+                             "ROBOT_DIAG rejected; use robot_turn left|right 1..180 10..20 or robot_stop");
                     continue;
                 }
                 if (board->diagnostic_turn_active_) {
@@ -395,7 +440,7 @@ private:
                                     "robot_diag_console", 4096, this, 1,
                                     nullptr, 1) == pdPASS) {
             ESP_LOGI(TAG,
-                     "ROBOT_DIAG console ready: calibration_status; calibration_begin_straight; calibration_end_straight <mm>; calibration_begin_turn; calibration_end_turn <deg>; calibration_commit; calibration_abort; camera_capture; camera_dump; camera_describe; camera_nav; robot_obstacle; robot_odometry; robot_encoder; navigation_status; scan_obstacle_shadow; bypass_obstacle_once; navigate_autonomous_12s; continue_forward_once; robot_turn left|right 1..30 10; robot_stop");
+                     "ROBOT_DIAG console ready: calibration_status; calibration_begin_straight; calibration_end_straight <mm>; calibration_begin_turn; calibration_end_turn <deg>; calibration_commit; calibration_abort; camera_capture; camera_dump; camera_describe; camera_nav; robot_obstacle; robot_odometry; robot_encoder; robot_set_home; robot_return_home; navigation_status; scan_obstacle_shadow; bypass_obstacle_once; navigate_autonomous_12s; continue_forward_once; robot_move fwd|back 1..5000 10..20; robot_turn left|right 1..180 10..20; robot_stop");
         }
     }
 
