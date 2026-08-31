@@ -218,6 +218,57 @@ private:
     std::function<ReturnValue(const PropertyList&)> callback_;
     bool user_only_ = false;
 
+    // Robot AI V5.2.2 MCP cleanup policy.
+    // Keep the legacy callbacks registered for compatibility/testing, but hide
+    // overlapping or misleading motion aliases from the normal AI tools/list.
+    // This changes only the AI-facing surface; motor, RobotLink, HOME, MAP and
+    // safety implementations remain untouched.
+    static bool HideLegacyRobotMotionToolFromAi(const std::string& name) {
+        return name == "self.robot.turn_and_move" ||
+               name == "self.robot.navigate_autonomously" ||
+               name == "self.robot.cancel_mission" ||
+               name == "self.robot.move_forward" ||
+               name == "self.robot.move_backward" ||
+               name == "self.robot.turn_left" ||
+               name == "self.robot.turn_right" ||
+               name == "self.robot.rotate_continuous";
+    }
+
+    static const char* RobotMotionDescriptionOverride(const std::string& name) {
+        if (name == "self.robot.stop") {
+            return "Dừng robot ngay lập tức với ưu tiên cao nhất. Dùng cho các cách nói như dừng, dừng lại, đứng lại, ngừng, ngừng lại, stop. STOP phải hủy mission/chuyển động đang chạy và chỉ báo hoàn tất sau khi STM32 xác nhận motor đã dừng.";
+        }
+        if (name == "self.robot.move_distance") {
+            return "Tool chuẩn duy nhất cho tiến/lùi có quãng đường. Chuyển đổi mọi đơn vị sang distance_mm trước khi gọi: 1 cm=10 mm, 1 m=1000 mm, và quy ước 1 bước=5 cm=50 mm. forward=true cho các cách nói tiến, đi thẳng, tiến về phía trước, đi lên, tiến lên, tiến thẳng, di chuyển lên/trước; forward=false cho lùi, lùi về sau, thụt lại, đi lùi, di chuyển về sau. Robot dùng encoder và chỉ được xác nhận đi đủ khi completed=true.";
+        }
+        if (name == "self.robot.turn_relative") {
+            return "Tool chuẩn duy nhất cho quay/xoay/rẽ/quẹo theo góc tương đối. direction=left/right, degrees=1..180. Các từ xoay, quay, rẽ, quẹo, nghiêng đều ánh xạ vào tool này khi có số độ. 'Quay đầu' nghĩa là 180 độ; nếu người dùng nói rõ trái/phải thì dùng hướng đó. Không dùng turn_left/turn_right/rotate_continuous vì các alias đó đã ẩn khỏi AI.";
+        }
+        if (name == "self.robot.turn_to_heading") {
+            return "Quay robot tới heading tuyệt đối -180..180 độ bằng fused heading. Chỉ dùng khi người dùng yêu cầu một hướng tuyệt đối, ví dụ quay về hướng 0 độ; không dùng thay cho quay trái/phải một số độ tương đối.";
+        }
+        if (name == "self.robot.set_home") {
+            return "Đặt vị trí hiện tại làm HOME/điểm xuất phát. Dùng cho các cách nói set home, đặt vị trí nhà, đặt nhà, đặt vị trí xuất phát, đánh dấu điểm xuất phát. Tool không làm robot di chuyển và chỉ thành công khi odometry sẵn sàng, robot không có mission đang chạy.";
+        }
+        if (name == "self.robot.return_home") {
+            return "Cho robot trở về HOME đã lưu. Dùng cho các cách nói về nhà, quay về nhà, quay về chỗ cũ, trở lại vị trí ban đầu, quay về điểm xuất phát. Đây là mission Return Home riêng; chỉ xác nhận đã về khi mission state là return_completed.";
+        }
+        if (name == "self.robot.scan_obstacle") {
+            return "PHYSICAL MOTION: robot sẽ thật sự xoay thân trái/phải để quét môi trường bằng HC-SR04 + camera rồi trở lại hướng gốc. Chỉ dùng khi người dùng yêu cầu quét/nhìn xung quanh hoặc kiểm tra hai bên. Nếu chỉ hỏi vật cản phía trước, dùng get_diagnostics(target=obstacle) vì tool đó không làm robot di chuyển.";
+        }
+        return nullptr;
+    }
+
+    void ApplyRobotAiMotionPolicy(const std::string& original_name) {
+        if (HideLegacyRobotMotionToolFromAi(original_name)) {
+            user_only_ = true;
+        }
+        const char* override_text = RobotMotionDescriptionOverride(original_name);
+        if (override_text != nullptr) {
+            description_ = override_text;
+        }
+    }
+
 public:
     McpTool(const std::string& name, 
             const std::string& description, 
@@ -226,7 +277,9 @@ public:
         : name_(name), 
         description_(description), 
         properties_(properties), 
-        callback_(callback) {}
+        callback_(callback) {
+        ApplyRobotAiMotionPolicy(name);
+    }
 
     void set_user_only(bool user_only) { user_only_ = user_only; }
     inline const std::string& name() const { return name_; }
