@@ -15,10 +15,8 @@ class HeadingFusion {
   void reset(float referenceHeadingDeg = 0.0f,
              float encoderHeadingRad = 0.0f);
   // Sensor sequence numbers ensure one physical sample is never integrated
-  // multiple times when the main loop runs faster than the IMU/Compass.
-  void update(float compassHeadingDeg, bool compassOk,
-              uint32_t compassSequence,
-              float gyroZDegS, bool imuOk, uint32_t imuSequence,
+  // multiple times when the main loop runs faster than the IMU.
+  void update(float gyroZDegS, bool imuOk, uint32_t imuSequence,
               float encoderHeadingRad, bool encoderOk,
               bool robotMoving);
 
@@ -33,7 +31,6 @@ class HeadingFusion {
   const char* sourceText() const { return sourceText_; }
   float encoderDisagreementDeg() const { return encoderDisagreementDeg_; }
   float effectiveEncoderWeight() const { return effectiveEncoderWeight_; }
-  bool usingCompass() const { return usingCompass_; }
   bool usingImu() const { return usingImu_; }
   bool usingEncoder() const { return usingEncoder_; }
 
@@ -51,11 +48,9 @@ class HeadingFusion {
   float encoderDisagreementDeg_ = 0.0f;
   float effectiveEncoderWeight_ = 0.0f;
   uint32_t lastImuSequence_ = 0;
-  uint32_t lastCompassSequence_ = 0;
   uint32_t lastImuConsumeMs_ = 0;
   uint32_t sampleSequence_ = 0;
   FusionHealth health_ = FusionHealth::NO_SOURCE;
-  bool usingCompass_ = false;
   bool usingImu_ = false;
   bool usingEncoder_ = false;
   const char* sourceText_ = "NONE";

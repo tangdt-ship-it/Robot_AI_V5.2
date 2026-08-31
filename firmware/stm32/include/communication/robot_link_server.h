@@ -19,9 +19,6 @@ struct RobotTelemetry {
   uint16_t ps2Buttons = 0xFFFF;
   uint8_t ps2Errors = 0;
   uint8_t ps2Raw[9] = {};
-  bool compassConnected = false;
-  bool compassCalibrating = false;
-  float compassHeadingDeg = 0.0f;
   bool headingReady = false;
   bool imuConnected = false;
   bool imuCalibrated = false;
@@ -41,7 +38,6 @@ struct RobotTelemetry {
   bool rampEnabled = false;
   bool brakeEnabled = false;
   uint32_t ps2FrameAgeMs = 0;
-  uint32_t compassZeroGeneration = 0;
   bool aiTurnActive = false;
   float aiTurnTargetDeg = 0.0f;
   float aiTurnErrorDeg = 0.0f;
@@ -114,7 +110,7 @@ enum class RobotLinkConfigType : uint8_t {
   SET_SPEED,
   SET_BRAKE,
   SET_RAMP,
-  RESET_COMPASS,
+  RESET_HEADING,
   RESET_ENCODERS
 };
 
@@ -168,8 +164,7 @@ class RobotLinkServer {
   void reportDistanceResult(uint8_t code, float targetMm, float travelledMm);
   bool takeConfigRequest(RobotLinkConfigRequest& request);
   void completeConfigRequest(const RobotLinkConfigRequest& request,
-                             bool success,
-                             uint32_t compassZeroGeneration = 0);
+                             bool success);
   bool takeCalibrationRequest(RobotLinkCalibrationRequest& request);
   void completeCalibrationRequest(const RobotLinkCalibrationRequest& request,
                                   bool success,
@@ -221,9 +216,6 @@ class RobotLinkServer {
   char asciiBuffer_[96] = {};
   uint8_t asciiLength_ = 0;
   bool asciiReceiving_ = false;
-  bool compassResetAwaitingSample_ = false;
-  uint32_t compassResetGeneration_ = 0;
-  uint32_t compassResetStartedMs_ = 0;
   uint32_t lastObstacleZoneSequence_ = 0;
   float lastObstacleDistanceCm_ = 0.0f;
   uint8_t lastObstacleZone_ = 0;
