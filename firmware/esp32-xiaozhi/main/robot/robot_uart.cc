@@ -15,6 +15,11 @@
 namespace {
 constexpr const char* kTag = "RobotUart";
 constexpr size_t kDriverBufferSize = 1024;
+// The assembled chassis does not reliably break static friction at the
+// protocol minimum of 10. Keep turns at the commissioned minimum, but give
+// translation commands a small torque margin. The STM32-local wheel PID
+// remains disabled because each motor driver already closes its own loop.
+constexpr int kMinimumDriveSpeed = 12;
 
 uint32_t NowMs() {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
@@ -105,6 +110,10 @@ bool RobotUart::Begin() {
 
 int RobotUart::ClampSpeed(int speed) {
     return std::max(10, std::min(speed, 20));
+}
+
+int RobotUart::ClampDriveSpeed(int speed) {
+    return std::max(kMinimumDriveSpeed, std::min(speed, 20));
 }
 
 bool RobotUart::SendFrame(const char* body) {
@@ -274,13 +283,13 @@ bool RobotUart::SetMode(bool ai_mode, uint32_t timeout_ms) {
 
 bool RobotUart::MoveForward(int speed, uint32_t timeout_ms) {
     char command[32];
-    snprintf(command, sizeof(command), "CMD,FWD,%d", ClampSpeed(speed));
+    snprintf(command, sizeof(command), "CMD,FWD,%d", ClampDriveSpeed(speed));
     return SendAndWait(command, kResponseAck, timeout_ms);
 }
 
 bool RobotUart::MoveBackward(int speed, uint32_t timeout_ms) {
     char command[32];
-    snprintf(command, sizeof(command), "CMD,BACK,%d", ClampSpeed(speed));
+    snprintf(command, sizeof(command), "CMD,BACK,%d", ClampDriveSpeed(speed));
     return SendAndWait(command, kResponseAck, timeout_ms);
 }
 
@@ -300,7 +309,7 @@ bool RobotUart::StartContinuous(bool forward, int speed,
                                 uint32_t timeout_ms) {
     char command[48];
     snprintf(command, sizeof(command), "MOVE,%s,%d,CONT",
-             forward ? "FWD" : "BACK", ClampSpeed(speed));
+             forward ? "FWD" : "BACK", ClampDriveSpeed(speed));
     const bool started = SendAndWait(command, kResponseAck, timeout_ms);
     motion_lease_active_ = started;
     return started;
@@ -329,7 +338,7 @@ bool RobotUart::MoveDistance(bool forward, int distance_mm, int speed,
     }
     char command[96];
     snprintf(command, sizeof(command), "MOVE,%s,%d,%d,SID,%lu,OP,%lu",
-             forward ? "FWD" : "BACK", distance_mm, ClampSpeed(speed),
+             forward ? "FWD" : "BACK", distance_mm, ClampDriveSpeed(speed),
              static_cast<unsigned long>(session_id),
              static_cast<unsigned long>(operation_id));
     xEventGroupClearBits(response_events_,

@@ -63,6 +63,15 @@ constexpr int kMinPassSegments = 12;
 constexpr int kMaxPassSegments = 16;    // 112 cm for a longer box.
 constexpr float kReturnClearanceMarginCm = 12.0f;
 constexpr uint32_t kSemanticVisionIntervalMs = 6000;
+// NVS flash operations temporarily disable the flash cache. They must not be
+// started while the internal/DMA heaps are nearly exhausted, otherwise a
+// concurrent audio/camera allocation can turn a recoverable write failure into
+// a panic. The mission task itself uses a PSRAM stack, so persistence is
+// deferred to the internal-stack Application task below.
+constexpr size_t kHomePersistMinInternalFree = 16 * 1024;
+constexpr size_t kHomePersistMinInternalLargest = 8 * 1024;
+constexpr size_t kHomePersistMinDmaFree = 12 * 1024;
+constexpr size_t kHomePersistMinDmaLargest = 8 * 1024;
 // Return Home performs UART transactions, sensor checks and bounded replans,
 // but its large temporary buffers are heap-backed. Keep the task stack in
 // PSRAM so a normal Xiaozhi/audio/camera runtime cannot exhaust internal SRAM.
@@ -312,7 +321,11 @@ bool MissionManager::StartAutonomousForward(int speed,
 
 bool MissionManager::SetHome() {
     if (robot_uart_ == nullptr || mutex_ == nullptr || IsActive()) return false;
-    return InitializeOdometryReference(true);
+    if (!InitializeOdometryReference(true)) return false;
+    const bool persisted = PersistHomeRoute();
+    persistent_home_ok_ = persisted;
+    if (!persisted) ESP_LOGE(kTag, "HOME_PERSIST_FAILED");
+    return persisted;
 }
 
 bool MissionManager::StartReturnHome(int speed, bool camera_guidance) {
@@ -1343,15 +1356,75 @@ bool MissionManager::SyncAfterExternalMotion() {
             }
         }
     }
-    if (breadcrumb_added && !PersistHomeRoute()) {
-        LockGuard lock(mutex_);
-        if (lock.locked()) persistent_home_ok_ = false;
-        return false;
-    }
+    if (breadcrumb_added) RequestHomePersistence();
     return true;
 }
 
+void MissionManager::RequestHomePersistence() {
+    const size_t internal_free =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t internal_largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    const size_t dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+    if (internal_free < kHomePersistMinInternalFree ||
+        internal_largest < kHomePersistMinInternalLargest ||
+        dma_free < kHomePersistMinDmaFree ||
+        dma_largest < kHomePersistMinDmaLargest) {
+        ESP_LOGW(kTag,
+                 "HOME_PERSIST_DEFER_LOW_MEMORY INTERNAL_FREE=%u INTERNAL_LARGEST=%u DMA_FREE=%u DMA_LARGEST=%u",
+                 static_cast<unsigned>(internal_free),
+                 static_cast<unsigned>(internal_largest),
+                 static_cast<unsigned>(dma_free),
+                 static_cast<unsigned>(dma_largest));
+        return;
+    }
+
+    bool expected = false;
+    if (!home_persist_scheduled_.compare_exchange_strong(expected, true)) {
+        return;
+    }
+    try {
+        // Application::Run executes callbacks on the main task, whose stack is
+        // internal RAM. This is required because nvs_set_blob/nvs_commit
+        // disable the flash cache and cannot safely run on the PSRAM-backed
+        // navigation task stack.
+        Application::GetInstance().Schedule([this]() {
+            const bool persisted = PersistHomeRoute();
+            if (!persisted) {
+                LockGuard lock(mutex_);
+                if (lock.locked()) persistent_home_ok_ = false;
+            } else {
+                LockGuard lock(mutex_);
+                if (lock.locked()) persistent_home_ok_ = true;
+            }
+            home_persist_scheduled_.store(false);
+        });
+    } catch (const std::exception& e) {
+        home_persist_scheduled_.store(false);
+        ESP_LOGW(kTag, "HOME_PERSIST_SCHEDULE_FAILED: %s", e.what());
+    }
+}
+
 bool MissionManager::PersistHomeRoute() {
+    const size_t internal_free =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t internal_largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    const size_t dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+    if (internal_free < kHomePersistMinInternalFree ||
+        internal_largest < kHomePersistMinInternalLargest ||
+        dma_free < kHomePersistMinDmaFree ||
+        dma_largest < kHomePersistMinDmaLargest) {
+        ESP_LOGW(kTag,
+                 "HOME_PERSIST_SKIP_LOW_MEMORY INTERNAL_FREE=%u INTERNAL_LARGEST=%u DMA_FREE=%u DMA_LARGEST=%u",
+                 static_cast<unsigned>(internal_free),
+                 static_cast<unsigned>(internal_largest),
+                 static_cast<unsigned>(dma_free),
+                 static_cast<unsigned>(dma_largest));
+        return false;
+    }
     BreadcrumbList route;
     float home_heading = 0.0f;
     {
@@ -1459,10 +1532,7 @@ bool MissionManager::InitializeOdometryReference(bool reset_breadcrumbs) {
     }
     ESP_LOGI(kTag, "HOME_SET odom=(%.1f,%.1f) heading=%.1f",
              odom_origin_x_mm_, odom_origin_y_mm_, home_heading_deg_);
-    const bool persisted = PersistHomeRoute();
-    persistent_home_ok_ = persisted;
-    if (!persisted) ESP_LOGE(kTag, "HOME_PERSIST_FAILED");
-    return persisted;
+    return true;
 }
 
 bool MissionManager::RecordBreadcrumbLocked() {
@@ -1511,10 +1581,7 @@ bool MissionManager::SyncPoseFromOdometry(bool record_breadcrumb) {
             breadcrumb_added = RecordBreadcrumbLocked();
         }
     }
-    if (breadcrumb_added && !PersistHomeRoute()) {
-        LockGuard lock(mutex_);
-        if (lock.locked()) persistent_home_ok_ = false;
-    }
+    if (breadcrumb_added) RequestHomePersistence();
     return true;
 }
 
@@ -2596,6 +2663,9 @@ void MissionManager::RunAutonomous() {
         Finish(MissionState::FAILED);
         return;
     }
+    // The navigation task uses a PSRAM-backed stack. Do not perform the NVS
+    // write here; queue it onto the internal-stack application task instead.
+    if (need_home) RequestHomePersistence();
     // An active GetState response proves the link; the cached heartbeat age can
     // legitimately be stale before a mission starts.
     if (!robot_uart_->GetState(state, 700) || state.brake_enabled ||

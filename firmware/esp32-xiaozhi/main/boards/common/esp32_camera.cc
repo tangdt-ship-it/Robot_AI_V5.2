@@ -1,6 +1,7 @@
 #include "sdkconfig.h"
 
 #include <esp_heap_caps.h>
+#include <esp_pthread.h>
 #include <cstdio>
 #include <cstring>
 #include <esp_log.h>
@@ -22,6 +23,12 @@
 #define TAG "Esp32Camera"
 
 namespace {
+constexpr size_t kCameraJpegTaskStackSize = 8192;
+constexpr size_t kVisionMinInternalFree = 12 * 1024;
+constexpr size_t kVisionMinInternalLargest = 8 * 1024;
+constexpr size_t kVisionMinDmaFree = 10 * 1024;
+constexpr size_t kVisionMinDmaLargest = 6 * 1024;
+
 struct ConsoleJpegStats {
     size_t bytes = 0;
     size_t chunks = 0;
@@ -36,6 +43,76 @@ void LogVisionMemory(const char* stage) {
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),
              static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+}
+
+class CameraJpegPthreadConfigScope {
+public:
+    CameraJpegPthreadConfigScope() {
+        if (esp_pthread_get_cfg(&previous_) != ESP_OK) {
+            previous_ = esp_pthread_get_default_config();
+        }
+
+        auto jpeg_config = previous_;
+        jpeg_config.stack_size = kCameraJpegTaskStackSize;
+        // The encoder may execute code that temporarily disables flash
+        // caches. Keep its stack in internal 8-bit RAM so the cache-disabled
+        // stack sanity check remains valid.
+        jpeg_config.stack_alloc_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+        jpeg_config.thread_name = "camera_jpeg";
+        jpeg_config.inherit_cfg = false;
+        status_ = esp_pthread_set_cfg(&jpeg_config);
+        if (status_ != ESP_OK) {
+            ESP_LOGE(TAG, "JPEG_TASK_CONFIG_FAIL err=0x%x", status_);
+        }
+    }
+
+    ~CameraJpegPthreadConfigScope() {
+        if (status_ == ESP_OK) {
+            const esp_err_t restore_status = esp_pthread_set_cfg(&previous_);
+            if (restore_status != ESP_OK) {
+                ESP_LOGW(TAG, "JPEG_TASK_CONFIG_RESTORE_FAIL err=0x%x",
+                         restore_status);
+            }
+        }
+    }
+
+    bool Ready() const { return status_ == ESP_OK; }
+
+private:
+    esp_pthread_cfg_t previous_{};
+    esp_err_t status_ = ESP_FAIL;
+};
+
+void LogJpegTaskStack(const char* stage) {
+    ESP_LOGI(TAG,
+             "JPEG_TASK,STAGE=%s,STACK_FREE=%u,INTERNAL_FREE=%u,PSRAM_FREE=%u",
+             stage,
+             static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+}
+
+bool VisionMemoryReady(const char* stage) {
+    const size_t internal_free =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t internal_largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    const size_t dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+    const bool ready = internal_free >= kVisionMinInternalFree &&
+                       internal_largest >= kVisionMinInternalLargest &&
+                       dma_free >= kVisionMinDmaFree &&
+                       dma_largest >= kVisionMinDmaLargest;
+    if (!ready) {
+        ESP_LOGW(TAG,
+                 "VISION_SKIP_LOW_MEMORY STAGE=%s INTERNAL_FREE=%u INTERNAL_LARGEST=%u DMA_FREE=%u DMA_LARGEST=%u",
+                 stage == nullptr ? "UNKNOWN" : stage,
+                 static_cast<unsigned>(internal_free),
+                 static_cast<unsigned>(internal_largest),
+                 static_cast<unsigned>(dma_free),
+                 static_cast<unsigned>(dma_largest));
+    }
+    return ready;
 }
 
 // HttpClient::Write() returns the complete HTTP chunk on-wire size when
@@ -621,6 +698,11 @@ std::string Esp32Camera::Explain(const std::string &question) {
     if (current_fb_ == nullptr) {
         throw std::runtime_error("No camera frame captured");
     }
+    // Vision upload is best-effort. Keep a safety margin for Wi-Fi/audio and
+    // fall back to local navigation analysis when the transient heaps are low.
+    if (!VisionMemoryReady("BEFORE_EXPLAIN")) {
+        throw std::runtime_error("Insufficient internal memory for vision upload");
+    }
 
     v4l2_pix_fmt_t format;
     switch (current_fb_->format) {
@@ -675,8 +757,14 @@ std::string Esp32Camera::Explain(const std::string &question) {
     };
 
     LogVisionMemory("BEFORE_JPEG_ENCODER");
+    CameraJpegPthreadConfigScope jpeg_thread_config;
+    if (!jpeg_thread_config.Ready()) {
+        release_queue();
+        throw std::runtime_error("Failed to configure JPEG encoder task");
+    }
     encoder_thread_ = std::thread([source, source_length, width, height,
                                     format, &context, &encoder_ok, jpeg_queue]() {
+        LogJpegTaskStack("START");
         const bool encoded = image_to_jpeg_cb(
             source, source_length, width, height, format, 85,
             [](void* argument, size_t, const void* data, size_t length) -> size_t {
@@ -700,6 +788,7 @@ std::string Esp32Camera::Explain(const std::string &question) {
         if (!encoded) encoder_ok.store(false);
         const JpegChunk done{nullptr, 0};
         xQueueSend(jpeg_queue, &done, portMAX_DELAY);
+        LogJpegTaskStack(encoded ? "END_OK" : "END_FAIL");
     });
 
     // The production encoder emits one complete JPEG callback (then its end
@@ -714,6 +803,11 @@ std::string Esp32Camera::Explain(const std::string &question) {
         throw std::runtime_error("Failed to encode image to JPEG");
     }
     LogVisionMemory("AFTER_JPEG_ENCODER_JOIN");
+
+    if (!VisionMemoryReady("BEFORE_HTTP")) {
+        release_queue();
+        throw std::runtime_error("Insufficient internal memory for vision HTTP");
+    }
 
     auto network = Board::GetInstance().GetNetwork();
     LogVisionMemory("BEFORE_CREATE_HTTP");

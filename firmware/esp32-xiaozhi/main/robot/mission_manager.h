@@ -303,6 +303,7 @@ private:
     void Finish(MissionState terminal_state);
     void ResetMapLocked();
     void UpdateHeading(float heading_deg);
+    void RequestHomePersistence();
     bool LoadPersistentHome();
     bool PersistHomeRoute();
     bool RestoreOdometryReference();
@@ -327,6 +328,7 @@ private:
     std::atomic_bool ai_obstacle_hold_{false};
     std::atomic_uint32_t ai_obstacle_hold_event_id_{0};
     std::atomic_bool semantic_task_running_{false};
+    std::atomic_bool home_persist_scheduled_{false};
     bool active_ = false;
     bool planner_self_test_ok_ = false;
     uint32_t next_mission_id_ = 1;

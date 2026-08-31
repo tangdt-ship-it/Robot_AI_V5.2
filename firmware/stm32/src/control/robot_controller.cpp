@@ -907,6 +907,9 @@ void RobotController::emitDiagnostics(uint32_t nowMs) {
     debug_.print(",R="); debug_.print(motors_.rightSpeed());
     debug_.print(",PWM_L="); debug_.print(motors_.leftPwm());
     debug_.print(",PWM_R="); debug_.print(motors_.rightPwm());
+    debug_.print(",PID_EN="); debug_.print(WHEEL_SPEED_PID_ENABLED ? 1 : 0);
+    debug_.print(",APPLIED_L="); debug_.print(motors_.leftAppliedCommand());
+    debug_.print(",APPLIED_R="); debug_.print(motors_.rightAppliedCommand());
     debug_.print(",TGT=");
     debug_.print(turnActive ? aiTurnTargetDeg_ : heading_.targetHeading(), 2);
     debug_.print(",CUR="); debug_.print(currentHeadingDeg(), 2);

@@ -436,6 +436,11 @@ void loop() {
                                    distanceResult.targetMm,
                                    distanceResult.travelledMm);
   }
+  // Apply the optional STM32-local wheel-speed loop after all command/safety
+  // owners for this iteration have had a chance to update the requested
+  // command. Encoder velocity was sampled at the beginning of this loop.
+  motors.updateSpeedPid(wheelOdometry.data().leftVelocityMmS,
+                        wheelOdometry.data().rightVelocityMmS);
   robot.updateDisplay();
   safetyWatchdog.kick();
   yield();

@@ -355,6 +355,7 @@ private:
     bool MatchMotionCorrelation(uint32_t session_id,
                                 uint32_t operation_id) const;
     static int ClampSpeed(int speed);
+    static int ClampDriveSpeed(int speed);
 
     SemaphoreHandle_t transaction_mutex_ = nullptr;
     SemaphoreHandle_t tx_mutex_ = nullptr;
