@@ -31,11 +31,13 @@ jobs:
       - name: Build ESP32-S3 firmware
         working-directory: firmware/esp32-xiaozhi
         run: |
+          . /opt/esp/idf/export.sh
           idf.py fullclean
           idf.py build
       - name: Record firmware sizes
         working-directory: firmware/esp32-xiaozhi
         run: |
+          . /opt/esp/idf/export.sh
           idf.py size
           idf.py size-components
       - name: Upload ESP32 build outputs
