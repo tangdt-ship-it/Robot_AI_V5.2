@@ -576,6 +576,23 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
     if (request_generation_provider_) {
         arguments.SetRequestGeneration(request_generation_provider_(tool_name));
     }
+
+    // A normal MCP callback runs on Application's main task. Finite motion
+    // tools intentionally wait there for STM32 DONE, so a STOP queued behind
+    // one of them would not execute until the motion timeout. Dispatch the
+    // canonical STOP immediately on the protocol task; RobotUart's urgent
+    // STOP path is safe to run concurrently and invalidates stale motions
+    // before sending the physical STOP frame.
+    if (tool_name == "self.robot.stop") {
+        try {
+            ReplyResult(id, (*tool_iter)->Call(arguments));
+        } catch (const std::exception& e) {
+            ESP_LOGE(TAG, "tools/call STOP: %s", e.what());
+            ReplyError(id, e.what());
+        }
+        return;
+    }
+
     auto& app = Application::GetInstance();
     app.Schedule([this, id, tool_iter, arguments = std::move(arguments)]() {
         try {

@@ -437,7 +437,10 @@ private:
     volatile uint32_t last_rx_ms_ = 0;
     volatile bool protocol_compatible_ = false;
     volatile bool motion_lease_active_ = false;
-    volatile bool stop_in_progress_ = false;
+    // STOP can run concurrently with a finite MOVE/TURN waiter. Keep this
+    // atomic so a queued motion cannot pass its cancellation gate while the
+    // urgent STOP transaction is taking ownership of the UART.
+    std::atomic_bool stop_in_progress_{false};
     volatile bool turn_waiting_ = false;
     volatile bool distance_waiting_ = false;
     volatile bool motion_ack_waiting_ = false;

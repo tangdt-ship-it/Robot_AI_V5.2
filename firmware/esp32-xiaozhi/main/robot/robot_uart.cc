@@ -344,6 +344,7 @@ bool RobotUart::MoveDistance(bool forward, int distance_mm, int speed,
                              uint32_t timeout_ms,
                              uint32_t cancellation_token) {
     result = {};
+    const uint32_t motion_generation = motion_cancel_generation_.load();
     distance_mm = std::max(1, std::min(distance_mm, 5000));
     uint32_t session_id = 0;
     uint32_t operation_id = 0;
@@ -385,7 +386,10 @@ bool RobotUart::MoveDistance(bool forward, int distance_mm, int speed,
         (bits & kResponseDistanceError) != 0) {
         // STM32 has already handed motor ownership to PS2; don't race the
         // operator with a follow-up STOP.
-        if (!Ps2OverrideActive()) Stop(700);
+        if (!Ps2OverrideActive() &&
+            motion_cancel_generation_.load() == motion_generation) {
+            Stop(700);
+        }
         if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
             result = distance_result_;
             xSemaphoreGive(state_mutex_);
@@ -416,6 +420,7 @@ bool RobotUart::TurnRelative(bool left, int angle_deg, int speed,
                              RobotTurnResult& result,
                              uint32_t timeout_ms,
                              uint32_t cancellation_token) {
+    const uint32_t motion_generation = motion_cancel_generation_.load();
     angle_deg = std::max(1, std::min(angle_deg, 180));
     uint32_t session_id = 0;
     uint32_t operation_id = 0;
@@ -451,7 +456,10 @@ bool RobotUart::TurnRelative(bool left, int angle_deg, int speed,
     turn_waiting_ = false;
     if ((bits & kResponseTurnDone) == 0 ||
         (bits & kResponseTurnError) != 0) {
-        if (!Ps2OverrideActive()) Stop(700);
+        if (!Ps2OverrideActive() &&
+            motion_cancel_generation_.load() == motion_generation) {
+            Stop(700);
+        }
         EndMotionCorrelation();
         return false;
     }
@@ -470,6 +478,7 @@ bool RobotUart::TurnAbsolute(int heading_deg, int speed,
                              RobotTurnResult& result,
                              uint32_t timeout_ms,
                              uint32_t cancellation_token) {
+    const uint32_t motion_generation = motion_cancel_generation_.load();
     heading_deg = std::max(-180, std::min(heading_deg, 180));
     uint32_t session_id = 0;
     uint32_t operation_id = 0;
@@ -501,7 +510,10 @@ bool RobotUart::TurnAbsolute(int heading_deg, int speed,
     turn_waiting_ = false;
     if ((bits & kResponseTurnDone) == 0 ||
         (bits & kResponseTurnError) != 0) {
-        if (!Ps2OverrideActive()) Stop(700);
+        if (!Ps2OverrideActive() &&
+            motion_cancel_generation_.load() == motion_generation) {
+            Stop(700);
+        }
         EndMotionCorrelation();
         return false;
     }
@@ -521,7 +533,28 @@ bool RobotUart::Stop(uint32_t timeout_ms) {
     GetSafetyBlackBox().Record(SafetyEventType::STOP, waiting_session_id_,
                                waiting_operation_id_, "STOP");
     InvalidateMotionCorrelation("STOP");
-    return SendAndWait("STOP", kResponseStopDone, timeout_ms);
+    if (!started_) return false;
+
+    // STOP is an emergency boundary, not an ordinary request/response
+    // transaction. A finite MOVE/TURN holds transaction_mutex_ while waiting
+    // for its terminal frame; waiting for that mutex here would make a voice
+    // STOP arrive only after the motion timeout. Serialize only the physical
+    // UART write, then wait for the independent DONE,STOP event.
+    xEventGroupClearBits(response_events_, kResponseStopDone | kResponseNack);
+    const bool sent = SendFrame("STOP");
+    if (!sent) {
+        ESP_LOGW(kTag, "ROBOT_STOP_FAIL,STAGE=SEND");
+        return false;
+    }
+    const EventBits_t bits = xEventGroupWaitBits(
+        response_events_, kResponseStopDone | kResponseNack, pdTRUE, pdFALSE,
+        pdMS_TO_TICKS(timeout_ms));
+    if ((bits & kResponseStopDone) == 0 ||
+        (bits & kResponseNack) != 0) {
+        ESP_LOGW(kTag, "ROBOT_STOP_FAIL,STAGE=WAIT_DONE");
+        return false;
+    }
+    return true;
 }
 
 bool RobotUart::GetState(RobotState& state, uint32_t timeout_ms) {

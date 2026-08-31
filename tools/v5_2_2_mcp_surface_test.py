@@ -12,6 +12,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 MCP_HEADER = ROOT / "firmware/esp32-xiaozhi/main/mcp_server.h"
+MCP_SOURCE = ROOT / "firmware/esp32-xiaozhi/main/mcp_server.cc"
+UART_SOURCE = ROOT / "firmware/esp32-xiaozhi/main/robot/robot_uart.cc"
 BOARD = ROOT / (
     "firmware/esp32-xiaozhi/main/boards/"
     "bread-compact-wifi-s3cam/compact_wifi_board_s3cam.cc"
@@ -27,6 +29,8 @@ def require(text: str, needle: str, label: str) -> None:
 
 def main() -> int:
     header = MCP_HEADER.read_text(encoding="utf-8")
+    mcp_source = MCP_SOURCE.read_text(encoding="utf-8")
+    uart_source = UART_SOURCE.read_text(encoding="utf-8")
     board = BOARD.read_text(encoding="utf-8")
     defaults = SDK_DEFAULTS.read_text(encoding="utf-8")
     version = VERSION.read_text(encoding="utf-8").strip()
@@ -77,6 +81,19 @@ def main() -> int:
         "self.robot.turn_to_heading",
     ):
         require(board, f'tool_name == "{name}"', f"STOP cancellation token {name}")
+
+    # STOP must not be queued behind a blocking finite-motion callback. The
+    # UART implementation therefore has an urgent path that bypasses the
+    # ordinary transaction mutex and wakes the finite waiter after physical
+    # DONE,STOP confirmation.
+    require(mcp_source, 'tool_name == "self.robot.stop"',
+            "immediate STOP dispatch")
+    require(uart_source, "STOP is an emergency boundary",
+            "urgent STOP implementation")
+    require(uart_source, "kResponseStopDone | kResponseNack",
+            "urgent physical STOP wait")
+    require(uart_source, "motion_generation = motion_cancel_generation_.load()",
+            "internal motion STOP preservation")
 
     print("V5.2.2 MCP surface static guard: PASS")
     print("  canonical finite motion: move_distance + turn_relative")

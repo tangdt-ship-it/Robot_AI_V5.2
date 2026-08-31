@@ -90,6 +90,8 @@ private:
         const bool left = request->left;
         const int degrees = request->degrees;
         const int speed = request->speed;
+        const uint32_t motion_generation =
+            board->robot_uart_.MotionCancellationToken();
         delete request;
 
         RobotTurnResult result;
@@ -97,7 +99,10 @@ private:
                  left ? "left" : "right", degrees, speed);
         const bool completed = board->robot_uart_.SetMode(true, 700) &&
             board->robot_uart_.TurnRelative(left, degrees, speed, result, 13000);
-        if (!completed) board->robot_uart_.Stop(700);
+        if (!completed &&
+            board->robot_uart_.MotionCancellationToken() == motion_generation) {
+            board->robot_uart_.Stop(700);
+        }
         board->robot_uart_.SetMode(false, 700);
         ESP_LOGI(TAG,
                  "ROBOT_DIAG TURN END completed=%d heading=%.2f target=%.2f error=%.2f",
@@ -736,7 +741,9 @@ private:
                     robot_uart_.TurnRelative(left, 90, turn_speed, turn, 13000,
                                              cancellation_token);
                 if (!turned) {
-                    robot_uart_.Stop(700);
+                    if (robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                        robot_uart_.Stop(700);
+                    }
                     robot_uart_.SetMode(false, 700);
                     char json[320];
                     snprintf(json, sizeof(json),
@@ -752,7 +759,10 @@ private:
                                               move, 31000,
                                               cancellation_token);
                 robot_uart_.SetMode(false, 700);
-                if (!moved) robot_uart_.Stop(700);
+                if (!moved &&
+                    robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                    robot_uart_.Stop(700);
+                }
                 if (!moved &&
                     !robot_uart_.MotionCancellationCurrent(cancellation_token)) {
                     return std::string(
@@ -1074,7 +1084,10 @@ private:
                     const bool completed = robot_uart_.SetMode(true, 700) &&
                         robot_uart_.TurnRelative(true, degrees, speed, turn, 13000,
                                                   cancellation_token);
-                    if (!completed) robot_uart_.Stop(700);
+                    if (!completed &&
+                        robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                        robot_uart_.Stop(700);
+                    }
                     robot_uart_.SetMode(false, 700);
                     char json[256];
                     snprintf(json, sizeof(json),
@@ -1114,7 +1127,10 @@ private:
                     const bool completed = robot_uart_.SetMode(true, 700) &&
                         robot_uart_.TurnRelative(false, degrees, speed, turn, 13000,
                                                   cancellation_token);
-                    if (!completed) robot_uart_.Stop(700);
+                    if (!completed &&
+                        robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                        robot_uart_.Stop(700);
+                    }
                     robot_uart_.SetMode(false, 700);
                     char json[256];
                     snprintf(json, sizeof(json),
@@ -1184,7 +1200,10 @@ private:
                 const bool completed = robot_uart_.SetMode(true, 700) &&
                     robot_uart_.TurnRelative(left, degrees, speed, turn, 13000,
                                               cancellation_token);
-                if (!completed) robot_uart_.Stop(700);
+                if (!completed &&
+                    robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                    robot_uart_.Stop(700);
+                }
                 robot_uart_.SetMode(false, 700);
                 char json[256];
                 snprintf(json, sizeof(json),
@@ -1216,7 +1235,10 @@ private:
                 const bool completed = robot_uart_.SetMode(true, 700) &&
                     robot_uart_.TurnAbsolute(heading, speed, turn, 13000,
                                               cancellation_token);
-                if (!completed) robot_uart_.Stop(700);
+                if (!completed &&
+                    robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                    robot_uart_.Stop(700);
+                }
                 robot_uart_.SetMode(false, 700);
                 char json[224];
                 snprintf(json, sizeof(json),
