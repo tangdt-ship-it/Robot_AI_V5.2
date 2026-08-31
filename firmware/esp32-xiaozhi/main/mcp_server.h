@@ -219,10 +219,11 @@ private:
     bool user_only_ = false;
 
     // Robot AI V5.2.2 MCP cleanup policy.
-    // Keep the legacy callbacks registered for compatibility/testing, but hide
-    // overlapping or misleading motion aliases from the normal AI tools/list.
-    // This changes only the AI-facing surface; motor, RobotLink, HOME, MAP and
-    // safety implementations remain untouched.
+    // Keep legacy registrations in source for rollback/history, but remove
+    // overlapping or misleading motion aliases from the normal AI surface and
+    // make direct legacy calls fail closed instead of issuing motor commands.
+    // Motor, RobotLink, HOME, MAP and STM32 safety implementations are not
+    // changed by this policy.
     static bool HideLegacyRobotMotionToolFromAi(const std::string& name) {
         return name == "self.robot.turn_and_move" ||
                name == "self.robot.navigate_autonomously" ||
@@ -242,7 +243,7 @@ private:
             return "Tool chuẩn duy nhất cho tiến/lùi có quãng đường. Chuyển đổi mọi đơn vị sang distance_mm trước khi gọi: 1 cm=10 mm, 1 m=1000 mm, và quy ước 1 bước=5 cm=50 mm. forward=true cho các cách nói tiến, đi thẳng, tiến về phía trước, đi lên, tiến lên, tiến thẳng, di chuyển lên/trước; forward=false cho lùi, lùi về sau, thụt lại, đi lùi, di chuyển về sau. Robot dùng encoder và chỉ được xác nhận đi đủ khi completed=true.";
         }
         if (name == "self.robot.turn_relative") {
-            return "Tool chuẩn duy nhất cho quay/xoay/rẽ/quẹo theo góc tương đối. direction=left/right, degrees=1..180. Các từ xoay, quay, rẽ, quẹo, nghiêng đều ánh xạ vào tool này khi có số độ. 'Quay đầu' nghĩa là 180 độ; nếu người dùng nói rõ trái/phải thì dùng hướng đó. Không dùng turn_left/turn_right/rotate_continuous vì các alias đó đã ẩn khỏi AI.";
+            return "Tool chuẩn duy nhất cho quay/xoay/rẽ/quẹo theo góc tương đối. direction=left/right, degrees=1..180. Các từ xoay, quay, rẽ, quẹo, nghiêng đều ánh xạ vào tool này khi có số độ. 'Quay đầu' nghĩa là 180 độ; nếu người dùng nói rõ trái/phải thì dùng hướng đó. Không dùng turn_left/turn_right/rotate_continuous vì các alias đó đã bị khóa khỏi AI.";
         }
         if (name == "self.robot.turn_to_heading") {
             return "Quay robot tới heading tuyệt đối -180..180 độ bằng fused heading. Chỉ dùng khi người dùng yêu cầu một hướng tuyệt đối, ví dụ quay về hướng 0 độ; không dùng thay cho quay trái/phải một số độ tương đối.";
@@ -262,6 +263,12 @@ private:
     void ApplyRobotAiMotionPolicy(const std::string& original_name) {
         if (HideLegacyRobotMotionToolFromAi(original_name)) {
             user_only_ = true;
+            callback_ = [original_name](const PropertyList&) -> ReturnValue {
+                return std::string(
+                    "{\"completed\":false,\"accepted\":false,\"error\":\"legacy_motion_tool_disabled\",\"tool\":\"" +
+                    original_name +
+                    "\",\"use\":\"stop/move_distance/turn_relative/turn_to_heading/set_home/return_home\"}");
+            };
         }
         const char* override_text = RobotMotionDescriptionOverride(original_name);
         if (override_text != nullptr) {
