@@ -26,17 +26,9 @@ struct RobotState {
     bool moving = false;
     bool brake_enabled = false;
     bool ramp_enabled = false;
-    bool compass_sensor_ok = false;
     bool ps2_ok = false;
     char motion_owner[12] = "UNKNOWN";
     uint32_t received_at_ms = 0;
-};
-
-struct RobotCompassStatus {
-    bool valid = false;
-    bool connected = false;
-    bool calibrating = false;
-    float heading_deg = 0.0f;
 };
 
 struct RobotPs2Status {
@@ -245,9 +237,7 @@ public:
     bool GetRamp(bool& enabled, uint32_t timeout_ms = 500);
     bool SetRamp(bool enabled, uint32_t timeout_ms = 500);
     bool GetHeading(float& heading_deg, uint32_t timeout_ms = 500);
-    bool GetCompassStatus(RobotCompassStatus& status,
-                          uint32_t timeout_ms = 500);
-    bool ResetCompass(uint32_t timeout_ms = 2200);
+    bool ResetHeading(uint32_t timeout_ms = 700);
     bool ResetEncoders(uint32_t timeout_ms = 700);
     bool GetPs2Status(RobotPs2Status& status, uint32_t timeout_ms = 500);
     bool GetObstacle(RobotObstacleStatus& status,
@@ -303,7 +293,6 @@ private:
     static constexpr EventBits_t kResponseHello = BIT5;
     static constexpr EventBits_t kResponseValue = BIT6;
     static constexpr EventBits_t kResponsePs2 = BIT7;
-    static constexpr EventBits_t kResponseCompassZeroed = BIT8;
     static constexpr EventBits_t kResponseTurnDone = BIT9;
     static constexpr EventBits_t kResponseTurnError = BIT10;
     static constexpr EventBits_t kResponseStopDone = BIT11;
@@ -420,7 +409,6 @@ private:
     bool value_brake_ = false;
     bool value_ramp_ = false;
     float value_heading_deg_ = 0.0f;
-    RobotCompassStatus compass_status_;
     RobotPs2Status ps2_status_;
     RobotObstacleStatus obstacle_status_;
     RobotTurnResult turn_result_;

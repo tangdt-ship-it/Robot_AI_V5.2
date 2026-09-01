@@ -84,29 +84,16 @@ static constexpr uint8_t IMU_READ_FAULT_COUNT = 5;
 static constexpr uint32_t IMU_I2C_HALF_PERIOD_US = 4;
 static constexpr uint32_t IMU_I2C_CLOCK_STRETCH_TIMEOUT_US = 500;
 
-// Heading fusion. Short-term yaw comes from MPU6050 Gyro-Z, wheel encoder yaw
-// constrains the estimate to chassis kinematics and the optional Compass
-// sensor supplies a slow absolute correction. Large jumps are never injected
-// directly.
+// Heading fusion. Short-term yaw comes from MPU6050 Gyro-Z and wheel encoder
+// yaw constrains the estimate to chassis kinematics. Large jumps are never
+// injected directly.
 static constexpr float FUSION_ENCODER_DELTA_WEIGHT = 0.10f;
 // Wheel slip must not turn encoder yaw into an absolute heading source.
 static constexpr float FUSION_ENCODER_AGREEMENT_DEG = 1.5f;
 static constexpr float FUSION_ENCODER_REJECT_DEG = 12.0f;
-// During drive the magnetic sensor is affected by motor current. Let the
-// gyro/encoder prediction carry motion and use Compass only as a slow bias
-// correction, otherwise a one-sided magnetic error steadily pulls HDG away.
-static constexpr float FUSION_COMPASS_GAIN_MOVING = 0.004f;
-static constexpr float FUSION_COMPASS_GAIN_STATIONARY = 0.045f;
-static constexpr float FUSION_COMPASS_MAX_STEP_DEG = 0.25f;
-static constexpr float FUSION_COMPASS_MOVING_GATE_DEG = 10.0f;
 static constexpr float FUSION_YAW_RATE_FILTER = 0.30f;
 static constexpr float FUSION_MIN_DT_S = 0.003f;
 static constexpr float FUSION_MAX_DT_S = 0.100f;
-
-static constexpr uint32_t COMPASS_RX_STM32 = PA3;
-static constexpr uint32_t COMPASS_TX_STM32 = PA2;
-static constexpr uint32_t COMPASS_BAUD = 115200;
-static constexpr float COMPASS_SCALE = 9.8f;
 
 static constexpr uint32_t PS2_CLK_PIN = PB14;
 static constexpr uint32_t PS2_ATT_PIN = PB13;
@@ -140,7 +127,6 @@ static constexpr uint32_t ROBOT_AI_DISTANCE_PROGRESS_MS = 250;
 static constexpr float DISTANCE_WHEEL_BALANCE_GAIN = 0.0f;
 static constexpr int16_t DISTANCE_WHEEL_BALANCE_MAX = 4;
 static constexpr uint8_t ROBOT_AI_PROTOCOL_VERSION = 3;
-static constexpr uint32_t COMPASS_RESET_EVENT_TIMEOUT_MS = 1500;
 static constexpr uint32_t ROBOT_AI_HEARTBEAT_MS = 200;
 
 // Heading closed-loop turns. The controller estimates yaw rate, predicts the
@@ -230,50 +216,7 @@ static constexpr uint32_t CONTROL_PERIOD_MS = 5;
 #endif
 static constexpr bool IWDG_ENABLED = ROBOT_IWDG_ENABLE != 0;
 static constexpr uint32_t IWDG_TIMEOUT_MS = 2500;
-static constexpr uint32_t COMPASS_POLL_MS = 20;
-static constexpr uint32_t COMPASS_LOST_MS = 500;
 static constexpr uint32_t LCD_RENDER_MS = 100;
-
-// One UART Compass count is 1 / 9.8 = 0.102 degree. Keep the deadband just
-// above one count so a stationary quantization edge cannot toggle LCD/PID.
-static constexpr float COMPASS_NOISE_DEADBAND_DEG = 0.12f;
-static constexpr float COMPASS_FAST_DELTA_DEG = 1.2f;
-static constexpr float COMPASS_ALPHA_SLOW = 0.28f;
-static constexpr float COMPASS_ALPHA_FAST = 0.88f;
-// A two-byte Compass response has no framing or CRC. Validate its rate before
-// it is allowed into the heading loop. Straight driving deliberately uses a
-// much tighter limit: the closed loop requests at most 2.2 deg/s, so a sudden
-// large yaw while both wheels drive the same direction is normally UART/motor
-// interference. Intentional turns retain a generous physical rate limit.
-static constexpr float COMPASS_STRAIGHT_MAX_RATE_DEG_S = 8.0f;
-static constexpr float COMPASS_TURN_MAX_RATE_DEG_S = 600.0f;
-static constexpr float COMPASS_RATE_GATE_MARGIN_DEG = 0.65f;
-static constexpr uint32_t COMPASS_RATE_GATE_MAX_DT_MS = 60;
-// A few consecutive rejected frames are expected when PWM noise appears;
-// do not declare the UART device LOST and throw away the heading source.
-static constexpr uint8_t COMPASS_REJECT_DISCONNECT_COUNT = 12;
-static constexpr uint32_t COMPASS_DRIFT_CAL_MS = 6000;
-static constexpr uint32_t COMPASS_DRIFT_SETTLE_MS = 1000;
-static constexpr uint16_t COMPASS_DRIFT_MIN_SAMPLES = 60;
-// Raised-wheel profiling on this module measured 0.089..0.123 deg/s. The old
-// 26-second startup window exceeded its own 1.5-degree travel limit and was
-// normally discarded. Use a short robust window and retain enough margin for
-// warm-up variation without classifying a deliberate turn as bias.
-static constexpr float COMPASS_MAX_ACCEPTED_DRIFT_DEG_S = 0.20f;
-static constexpr float COMPASS_MAX_CALIBRATION_TRAVEL_DEG = 1.4f;
-// The UART Compass has a 1-count = 0.102 degree output quantum and its bias
-// changes as the module warms up. Re-estimate only on long, quiet windows.
-// A real rotation immediately cancels the window and is never subtracted.
-static constexpr uint32_t COMPASS_ADAPTIVE_WINDOW_MS = 8000;
-static constexpr uint16_t COMPASS_ADAPTIVE_MIN_SAMPLES = 120;
-static constexpr float COMPASS_ADAPTIVE_MAX_TRAVEL_DEG = 1.40f;
-static constexpr float COMPASS_ADAPTIVE_MAX_STEP_DEG = 0.25f;
-static constexpr float COMPASS_ADAPTIVE_RATE_BLEND = 0.85f;
-static constexpr uint32_t COMPASS_ADAPTIVE_ROTATION_GUARD_MS = 3000;
-// When commanded motors are stopped, sensor bias is not physical robot yaw.
-// A >1-count jump releases the hold for deliberate manual rotation.
-static constexpr float COMPASS_MANUAL_ROTATION_STEP_DEG = 0.16f;
-static constexpr uint32_t COMPASS_MANUAL_ROTATION_SETTLE_MS = 800;
 
 // Cascaded heading controller. The outer loop requests a deliberately slow
 // yaw rate; the inner loop damps measured yaw. This prevents the long S-curve
