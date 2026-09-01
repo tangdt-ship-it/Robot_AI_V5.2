@@ -12,18 +12,34 @@ void UltrasonicSensor::begin() {
   channels_[RIGHT_MOUNT].trigPin=ULTRASONIC_RIGHT_TRIG_PIN;
   channels_[RIGHT_MOUNT].echoPin=ULTRASONIC_RIGHT_ECHO_PIN;
   const uint32_t now=millis();
-  for (uint8_t i=0; i<2; ++i) { Channel& c=channels_[i]; pinMode(c.trigPin,OUTPUT); digitalWrite(c.trigPin,LOW); pinMode(c.echoPin,INPUT_PULLDOWN); c.lastTriggerMs=now-ULTRASONIC_SAMPLE_PERIOD_MS; }
-  attachInterrupt(digitalPinToInterrupt(channels_[LEFT_MOUNT].echoPin),echoIsrMountLeft,CHANGE);
-  attachInterrupt(digitalPinToInterrupt(channels_[RIGHT_MOUNT].echoPin),echoIsrMountRight,CHANGE);
+  for (uint8_t i=0; i<2; ++i) {
+    Channel& c=channels_[i];
+    pinMode(c.trigPin,OUTPUT);
+    digitalWrite(c.trigPin,LOW);
+    // Keep the idle level deterministic while retaining the HC-SR04's
+    // push-pull Echo signal during a measurement.
+    pinMode(c.echoPin,INPUT_PULLDOWN);
+    c.lastTriggerMs=now-ULTRASONIC_SAMPLE_PERIOD_MS;
+  }
+  attachInterrupt(digitalPinToInterrupt(channels_[LEFT_MOUNT].echoPin),
+                  echoIsrMountLeft,CHANGE);
+  attachInterrupt(digitalPinToInterrupt(channels_[RIGHT_MOUNT].echoPin),
+                  echoIsrMountRight,CHANGE);
   nextTriggerAllowedMs_=now;
 }
 void UltrasonicSensor::echoIsrMountLeft(){if(instance_)instance_->handleEchoEdge(LEFT_MOUNT);}
 void UltrasonicSensor::echoIsrMountRight(){if(instance_)instance_->handleEchoEdge(RIGHT_MOUNT);}
 void UltrasonicSensor::handleEchoEdge(uint8_t i){
-  Channel& c=channels_[i]; const uint32_t us=micros();
-  if (activeChannel_ != i || c.state != TriggerState::WAIT_ECHO) return;
-  if(digitalRead(c.echoPin)==HIGH)c.echoRiseUs=us;
-  else if(c.echoRiseUs){c.echoPulseUs=us-c.echoRiseUs;c.echoRiseUs=0;c.echoPulseReady=true;}
+  Channel& c=channels_[i];
+  const uint32_t us=micros();
+  if(activeChannel_ != i || c.state != TriggerState::WAIT_ECHO) return;
+  if(digitalRead(c.echoPin)==HIGH){
+    c.echoRiseUs=us;
+  }else if(c.echoRiseUs != 0U){
+    c.echoPulseUs=us-c.echoRiseUs;
+    c.echoRiseUs=0;
+    c.echoPulseReady=true;
+  }
 }
 bool UltrasonicSensor::channelFresh(const Channel& c,uint32_t now)const{return c.measurementSequence && now-c.lastMeasurementMs<=ULTRASONIC_FRESH_MS;}
 float UltrasonicSensor::medianHistory(const Channel& c)const{
@@ -79,10 +95,58 @@ bool UltrasonicSensor::degradedClearWindow(uint32_t nowMs) const{
   return true;
 }
 void UltrasonicSensor::update(){
-  const uint32_t ms=millis(),us=micros();
-  if(activeChannel_==0xFF){if((int32_t)(ms-nextTriggerAllowedMs_)>=0)for(uint8_t n=0;n<2;n++){uint8_t i=(nextChannel_+n)%2;if(ms-channels_[i].lastTriggerMs>=ULTRASONIC_SAMPLE_PERIOD_MS){activeChannel_=i;nextChannel_=(i+1)%2;Channel& c=channels_[i];digitalWrite(c.trigPin,HIGH);c.triggerStartedUs=us;c.lastTriggerMs=ms;c.state=TriggerState::TRIGGER_HIGH;break;}}}
-  else {Channel& c=channels_[activeChannel_];if(c.state==TriggerState::TRIGGER_HIGH&&us-c.triggerStartedUs>=12){digitalWrite(c.trigPin,LOW);noInterrupts();c.echoPulseReady=false;c.echoRiseUs=0;interrupts();c.waitEchoStartedUs=us;c.state=TriggerState::WAIT_ECHO;}else if(c.state==TriggerState::WAIT_ECHO){uint32_t pulse=0;bool ready=false;noInterrupts();if(c.echoPulseReady){pulse=c.echoPulseUs;c.echoPulseReady=false;ready=true;}interrupts();if(ready){acceptPulse(activeChannel_,pulse,ms);++measurementSequence_;}else if(us-c.waitEchoStartedUs>=ULTRASONIC_ECHO_TIMEOUT_US){acceptTimeout(activeChannel_,ms);++measurementSequence_;}if(ready||us-c.waitEchoStartedUs>=ULTRASONIC_ECHO_TIMEOUT_US){c.state=TriggerState::IDLE;activeChannel_=0xFF;nextTriggerAllowedMs_=ms+ULTRASONIC_INTER_SENSOR_GUARD_MS;}}}
-  recomputeObstacleModel(ms);
+  const uint32_t ms=millis();
+  if(activeChannel_==0xFF && (int32_t)(ms-nextTriggerAllowedMs_)>=0) {
+    for(uint8_t n=0;n<2;n++) {
+      const uint8_t i=(nextChannel_+n)%2;
+      Channel& c=channels_[i];
+      if(ms-c.lastTriggerMs<ULTRASONIC_SAMPLE_PERIOD_MS) continue;
+
+      // Clear a previous capture before selecting the channel.  TRIG and the
+      // start of Echo capture are kept in one call; a delayed second loop
+      // could otherwise lose a close Echo pulse while still in TRIGGER_HIGH.
+      noInterrupts();
+      c.echoPulseReady=false;
+      c.echoRiseUs=0;
+      interrupts();
+      activeChannel_=i;
+      nextChannel_=(i+1)%2;
+      c.lastTriggerMs=ms;
+      digitalWrite(c.trigPin,HIGH);
+      delayMicroseconds(12);
+      digitalWrite(c.trigPin,LOW);
+      c.waitEchoStartedUs=micros();
+      c.state=TriggerState::WAIT_ECHO;
+      break;
+    }
+  } else if(activeChannel_!=0xFF) {
+    const uint8_t i=activeChannel_;
+    Channel& c=channels_[i];
+    uint32_t pulse=0;
+    bool ready=false;
+    noInterrupts();
+    if(c.echoPulseReady){
+      pulse=c.echoPulseUs;
+      c.echoPulseReady=false;
+      ready=true;
+    }
+    interrupts();
+    const uint32_t us=micros();
+    const bool timedOut=(us-c.waitEchoStartedUs)>=ULTRASONIC_ECHO_TIMEOUT_US;
+    if(ready){
+      acceptPulse(i,pulse,millis());
+      ++measurementSequence_;
+    }else if(timedOut){
+      acceptTimeout(i,millis());
+      ++measurementSequence_;
+    }
+    if(ready||timedOut){
+      c.state=TriggerState::IDLE;
+      activeChannel_=0xFF;
+      nextTriggerAllowedMs_=millis()+ULTRASONIC_INTER_SENSOR_GUARD_MS;
+    }
+  }
+  recomputeObstacleModel(millis());
 }
 bool UltrasonicSensor::hardBlocked()const{return overallZone_==ObstacleZone::BLOCKED||overallZone_==ObstacleZone::EMERGENCY;}
 float UltrasonicSensor::stoppingDistanceCm(int16_t cmd)const{const float speed=abs(cmd)*OBSTACLE_STOP_PER_COMMAND_CM;const float approach=max(0.0f,nearestRateCmS_)*OBSTACLE_APPROACH_LOOKAHEAD_S;return constrain(OBSTACLE_STOP_BASE_CM+speed+approach,OBSTACLE_EMERGENCY_CM,OBSTACLE_CAUTION_CM);}

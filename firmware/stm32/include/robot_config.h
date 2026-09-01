@@ -173,7 +173,10 @@ static constexpr uint8_t BRAKE_PWM_LOCK_MAX = 254;
 // HC-SR04 timing and obstacle policy. A speed-dependent stopping distance is
 // added by the sensor policy, while these values define the physical floor.
 static constexpr uint32_t ULTRASONIC_SAMPLE_PERIOD_MS = 60;
-static constexpr uint32_t ULTRASONIC_INTER_SENSOR_GUARD_MS = 8;
+// Allow acoustic ringing and late echoes from one HC-SR04 to decay before
+// triggering the other module. This prevents cross-talk without blocking the
+// main loop because Echo capture is interrupt-driven.
+static constexpr uint32_t ULTRASONIC_INTER_SENSOR_GUARD_MS = 30;
 static constexpr uint32_t ULTRASONIC_ECHO_TIMEOUT_US = 30000;
 static constexpr uint32_t ULTRASONIC_FRESH_MS = 350;
 // A single HC-SR04 timeout can be caused by an echo collision or a narrow

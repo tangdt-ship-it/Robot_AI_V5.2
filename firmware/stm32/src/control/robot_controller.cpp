@@ -581,6 +581,29 @@ void RobotController::updateAiDistance(uint32_t nowMs) {
 
 void RobotController::updateAiTurn(uint32_t nowMs) {
   if (aiMotionMode_ != AiMotionMode::TURN) return;
+  if (!headingAvailable()) {
+    finishAiTurn(AiTurnResultCode::HEADING_LOST);
+    return;
+  }
+
+  // An absolute turn can legitimately be a no-op (for example Return Home
+  // already being aligned with HOME).  It does not energize the motors, so a
+  // missing ultrasonic echo must not turn this safe completion into an
+  // obstacle failure.  Every turn that still needs wheel motion continues
+  // through the fail-closed ultrasonic gate below.
+  if (fabsf(aiTurnErrorDeg_) <= TURN_TOLERANCE_DEG &&
+      fabsf(aiTurnYawRateDegS_) <= TURN_SETTLE_RATE_DEG_S) {
+    targetLeft_ = targetRight_ = currentLeft_ = currentRight_ = 0;
+    aiTurnCommandSpeed_ = 0;
+    aiTurnPulseDriving_ = false;
+    motors_.stop();
+    if (aiTurnSettleStartMs_ == 0U) aiTurnSettleStartMs_ = nowMs;
+    if ((nowMs - aiTurnSettleStartMs_) >= TURN_SETTLE_MS) {
+      finishAiTurn(AiTurnResultCode::DONE);
+    }
+    return;
+  }
+
   // A turn-in-place does not add forward travel. Permit it when at least one
   // fresh sector is explicitly clear, even if the other ultrasonic channel is
   // temporarily unknown/timeout. Keep every caution/blocked/emergency result
@@ -599,10 +622,6 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     debug_.println(ultrasonic_.isFresh() ? 1 : 0);
 #endif
     finishAiTurn(AiTurnResultCode::OBSTACLE);
-    return;
-  }
-  if (!headingAvailable()) {
-    finishAiTurn(AiTurnResultCode::HEADING_LOST);
     return;
   }
   if (static_cast<int32_t>(nowMs - aiMotionDeadlineMs_) >= 0) {
@@ -704,8 +723,14 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
       stopTurnDrive();
       return;
     }
-    aiTurnCommandSpeed_ = constrain(TURN_CORRECTION_SPEED, TURN_MIN_SPEED,
-                                    aiTurnMaxSpeed_);
+    // The requested speed is the normal slew speed.  Near the target, a
+    // chassis that is already stationary needs the commissioned correction
+    // torque to overcome static friction; clamping this pulse to a requested
+    // speed of 10 made 90/180-degree turns stall just outside the tolerance.
+    // Keep the correction bounded by the global STM32 turn limit.
+    aiTurnCommandSpeed_ = constrain(
+        max(TURN_CORRECTION_SPEED, aiTurnMaxSpeed_), TURN_MIN_SPEED,
+        TURN_MAX_SPEED);
     aiTurnPulseDriving_ = true;
     // Short 45 ms pulses are precise near target but do not consistently
     // overcome static friction on this chassis when 5..8 degrees remain.
