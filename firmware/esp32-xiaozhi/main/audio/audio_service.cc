@@ -189,6 +189,12 @@ void AudioService::Stop() {
     audio_decode_queue_.clear();
     audio_playback_queue_.clear();
     audio_testing_queue_.clear();
+    playback_started_ = false;
+    playback_queue_min_ = MAX_PLAYBACK_TASKS_IN_QUEUE;
+    playback_underrun_count_ = 0;
+    last_playback_underrun_log_us_ = 0;
+    last_playback_queue_log_us_ = 0;
+    playback_waiting_for_more_ = false;
     audio_queue_cv_.notify_all();
 }
 
@@ -301,13 +307,74 @@ void AudioService::AudioInputTask() {
 void AudioService::AudioOutputTask() {
     while (true) {
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-        audio_queue_cv_.wait(lock, [this]() { return !audio_playback_queue_.empty() || service_stopped_; });
-        if (service_stopped_) {
-            break;
+        if (playback_started_ && playback_waiting_for_more_) {
+            const bool packet_arrived = audio_queue_cv_.wait_for(lock,
+                std::chrono::milliseconds(OPUS_FRAME_DURATION_MS * PLAYBACK_PREBUFFER_TARGET_FRAMES),
+                [this]() { return !audio_playback_queue_.empty() || service_stopped_; });
+            if (service_stopped_) {
+                break;
+            }
+            if (audio_playback_queue_.empty()) {
+                // A quiet period completed the current short stream. The
+                // next stream will get a fresh prebuffer window.
+                playback_started_ = false;
+                playback_waiting_for_more_ = false;
+                continue;
+            }
+            if (packet_arrived) {
+                ++playback_underrun_count_;
+                const int64_t now_us = esp_timer_get_time();
+                if (last_playback_underrun_log_us_ == 0 || now_us - last_playback_underrun_log_us_ >= 1000000) {
+                    ESP_LOGW(TAG, "AUDIO,UNDERRUN,COUNT=%lu",
+                             static_cast<unsigned long>(playback_underrun_count_));
+                    last_playback_underrun_log_us_ = now_us;
+                }
+            }
+            // Re-enter the bounded prebuffer path after a real queue gap.
+            playback_started_ = false;
+            playback_waiting_for_more_ = false;
+        } else {
+            audio_queue_cv_.wait(lock, [this]() { return !audio_playback_queue_.empty() || service_stopped_; });
+            if (service_stopped_) {
+                break;
+            }
+        }
+
+        // Wait for two decoded frames before starting a new stream. The
+        // timeout keeps short TTS responses from waiting forever.
+        if (!playback_started_ && audio_playback_queue_.size() < PLAYBACK_PREBUFFER_TARGET_FRAMES) {
+            audio_queue_cv_.wait_for(lock,
+                std::chrono::milliseconds(OPUS_FRAME_DURATION_MS * PLAYBACK_PREBUFFER_TARGET_FRAMES),
+                [this]() {
+                    return service_stopped_ ||
+                        audio_playback_queue_.size() >= PLAYBACK_PREBUFFER_TARGET_FRAMES;
+                });
+            if (service_stopped_) {
+                break;
+            }
+            if (audio_playback_queue_.empty()) {
+                continue;
+            }
+        }
+
+        if (!playback_started_) {
+            playback_started_ = true;
+            playback_queue_min_ = audio_playback_queue_.size();
+            ESP_LOGI(TAG, "AUDIO,REBUFFER,QUEUED=%u", static_cast<unsigned>(audio_playback_queue_.size()));
         }
 
         auto task = std::move(audio_playback_queue_.front());
         audio_playback_queue_.pop_front();
+        const size_t remaining = audio_playback_queue_.size();
+        if (remaining < playback_queue_min_) {
+            playback_queue_min_ = remaining;
+            const int64_t now_us = esp_timer_get_time();
+            if (last_playback_queue_log_us_ == 0 || now_us - last_playback_queue_log_us_ >= 1000000) {
+                ESP_LOGI(TAG, "AUDIO,PLAYBACK_QUEUE_MIN=%u", static_cast<unsigned>(remaining));
+                last_playback_queue_log_us_ = now_us;
+            }
+        }
+        playback_waiting_for_more_ = remaining == 0;
         audio_queue_cv_.notify_all();
         lock.unlock();
 
@@ -359,33 +426,6 @@ void AudioService::OpusCodecTask() {
             task->timestamp = packet->timestamp;
 
             SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
-            if (packet->packet_loss_concealment) {
-                // The bundled Opus decoder rejects an empty input frame even
-                // when frame_recover is set to PLC. Generate a bounded PCM
-                // concealment frame instead so packet loss cannot inject a
-                // decoder error/click into the speaker path.
-                task->pcm.assign(decoder_frame_size_, 0);
-                {
-                    std::lock_guard<std::mutex> decoder_lock(decoder_mutex_);
-                    if (!previous_frame_was_concealed_ && !last_decoded_pcm_.empty()) {
-                        const size_t fade_samples = std::min(
-                            task->pcm.size(),
-                            static_cast<size_t>(std::max(1, decoder_sample_rate_ * 8 / 1000)));
-                        const int32_t anchor = last_decoded_pcm_.back();
-                        for (size_t i = 0; i < fade_samples; ++i) {
-                            task->pcm[i] = static_cast<int16_t>(
-                                (anchor * static_cast<int32_t>(fade_samples - i)) /
-                                static_cast<int32_t>(fade_samples));
-                        }
-                    }
-                    previous_frame_was_concealed_ = true;
-                }
-                lock.lock();
-                audio_playback_queue_.push_back(std::move(task));
-                audio_queue_cv_.notify_all();
-                debug_statistics_.decode_count++;
-                continue;
-            }
             if (opus_decoder_ != nullptr) {
                 task->pcm.resize(decoder_frame_size_);
                 esp_audio_dec_in_raw_t raw = {
@@ -414,21 +454,6 @@ void AudioService::OpusCodecTask() {
                                                 (esp_ae_sample_t)resampled.data(), &actual_output);
                         resampled.resize(actual_output);
                         task->pcm = std::move(resampled);
-                    }
-                    {
-                        std::lock_guard<std::mutex> decoder_lock(decoder_mutex_);
-                        if (previous_frame_was_concealed_ && !task->pcm.empty()) {
-                            const size_t fade_samples = std::min(
-                                task->pcm.size(),
-                                static_cast<size_t>(std::max(1, codec_->output_sample_rate() * 5 / 1000)));
-                            for (size_t i = 0; i < fade_samples; ++i) {
-                                task->pcm[i] = static_cast<int16_t>(
-                                    (static_cast<int32_t>(task->pcm[i]) * static_cast<int32_t>(i + 1)) /
-                                    static_cast<int32_t>(fade_samples));
-                            }
-                        }
-                        last_decoded_pcm_ = task->pcm;
-                        previous_frame_was_concealed_ = false;
                     }
                     lock.lock();
                     audio_playback_queue_.push_back(std::move(task));
@@ -507,8 +532,6 @@ void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
         esp_opus_dec_close(opus_decoder_);
         opus_decoder_ = nullptr;
     }
-    last_decoded_pcm_.clear();
-    previous_frame_was_concealed_ = false;
     decoder_lock.unlock();
     esp_opus_dec_cfg_t opus_dec_cfg = OPUS_DEC_CFG(sample_rate, frame_duration);
     auto ret = esp_opus_dec_open(&opus_dec_cfg, sizeof(esp_opus_dec_cfg_t), &opus_decoder_);
@@ -726,13 +749,17 @@ void AudioService::ResetDecoder() {
     if (opus_decoder_ != nullptr) {
         esp_opus_dec_reset(opus_decoder_);
     }
-    last_decoded_pcm_.clear();
-    previous_frame_was_concealed_ = false;
     decoder_lock.unlock();
     timestamp_queue_.clear();
     audio_decode_queue_.clear();
     audio_playback_queue_.clear();
     audio_testing_queue_.clear();
+    playback_started_ = false;
+    playback_queue_min_ = MAX_PLAYBACK_TASKS_IN_QUEUE;
+    playback_underrun_count_ = 0;
+    last_playback_underrun_log_us_ = 0;
+    last_playback_queue_log_us_ = 0;
+    playback_waiting_for_more_ = false;
     audio_queue_cv_.notify_all();
 }
 

@@ -39,6 +39,7 @@
 #define OPUS_FRAME_DURATION_MS 60
 #define MAX_ENCODE_TASKS_IN_QUEUE 2
 #define MAX_PLAYBACK_TASKS_IN_QUEUE 4
+#define PLAYBACK_PREBUFFER_TARGET_FRAMES 2
 #define MAX_DECODE_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
 #define MAX_SEND_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
 #define AUDIO_TESTING_MAX_DURATION_MS 10000
@@ -155,8 +156,6 @@ private:
     int decoder_sample_rate_ = 0;
     int decoder_duration_ms_ = OPUS_FRAME_DURATION_MS;
     int decoder_frame_size_ = 0;
-    std::vector<int16_t> last_decoded_pcm_;
-    bool previous_frame_was_concealed_ = false;
     DebugStatistics debug_statistics_;
     srmodel_list_t* models_list_ = nullptr;
 
@@ -185,6 +184,12 @@ private:
     esp_timer_handle_t audio_power_timer_ = nullptr;
     std::chrono::steady_clock::time_point last_input_time_;
     std::chrono::steady_clock::time_point last_output_time_;
+    bool playback_started_ = false;
+    size_t playback_queue_min_ = MAX_PLAYBACK_TASKS_IN_QUEUE;
+    uint32_t playback_underrun_count_ = 0;
+    int64_t last_playback_underrun_log_us_ = 0;
+    int64_t last_playback_queue_log_us_ = 0;
+    bool playback_waiting_for_more_ = false;
 
     void AudioInputTask();
     void AudioOutputTask();

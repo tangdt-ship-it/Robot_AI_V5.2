@@ -32,6 +32,23 @@ MqttProtocol::MqttProtocol() {
         .arg = this,
     };
     esp_timer_create(&reconnect_timer_args, &reconnect_timer_);
+
+    esp_timer_create_args_t audio_reorder_timer_args = {
+        .callback = [](void* arg) {
+            auto* protocol = static_cast<MqttProtocol*>(arg);
+            std::lock_guard<std::mutex> lock(protocol->audio_reorder_mutex_);
+            protocol->audio_reorder_timer_armed_ = false;
+            if (*protocol->alive_) {
+                protocol->DrainAudioReorderBuffer(true);
+                protocol->UpdateAudioReorderTimer();
+            }
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "mqtt_audio_reorder",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&audio_reorder_timer_args, &audio_reorder_timer_);
 }
 
 MqttProtocol::~MqttProtocol() {
@@ -46,6 +63,11 @@ MqttProtocol::~MqttProtocol() {
     }
 
     udp_.reset();
+    ResetAudioReorderState();
+    if (audio_reorder_timer_ != nullptr) {
+        esp_timer_delete(audio_reorder_timer_);
+        audio_reorder_timer_ = nullptr;
+    }
     mqtt_.reset();
     
     if (event_group_handle_ != nullptr) {
@@ -190,11 +212,157 @@ bool MqttProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     return udp_->Send(encrypted) > 0;
 }
 
+void MqttProtocol::ResetAudioReorderState() {
+    std::lock_guard<std::mutex> lock(audio_reorder_mutex_);
+    if (audio_reorder_timer_ != nullptr) {
+        esp_timer_stop(audio_reorder_timer_);
+    }
+    audio_reorder_timer_armed_ = false;
+    audio_reorder_buffer_.clear();
+    expected_remote_sequence_ = 0;
+    expected_remote_sequence_valid_ = false;
+    audio_udp_gap_count_ = 0;
+    audio_late_packet_count_ = 0;
+    audio_reordered_count_ = 0;
+    audio_jitter_max_ = 0;
+    last_audio_gap_log_us_ = 0;
+}
+
+void MqttProtocol::UpdateAudioReorderTimer() {
+    if (audio_reorder_timer_ == nullptr) {
+        return;
+    }
+    if (audio_reorder_buffer_.empty()) {
+        if (audio_reorder_timer_armed_) {
+            esp_timer_stop(audio_reorder_timer_);
+            audio_reorder_timer_armed_ = false;
+        }
+        return;
+    }
+    if (!audio_reorder_timer_armed_) {
+        const int64_t timeout_us = std::max<int64_t>(
+            1000, static_cast<int64_t>(server_frame_duration_) * kTargetAudioJitterFrames * 1000);
+        if (esp_timer_start_once(audio_reorder_timer_, timeout_us) == ESP_OK) {
+            audio_reorder_timer_armed_ = true;
+        }
+    }
+}
+
+void MqttProtocol::LogLateAudioPacket(uint32_t sequence) {
+    ++audio_late_packet_count_;
+    const int64_t now_us = esp_timer_get_time();
+    if (last_audio_gap_log_us_ == 0 || now_us - last_audio_gap_log_us_ >= 1000000) {
+        ESP_LOGW(TAG, "AUDIO,LATE_PACKET,SEQ=%lu,TOTAL=%lu",
+                 static_cast<unsigned long>(sequence),
+                 static_cast<unsigned long>(audio_late_packet_count_));
+        last_audio_gap_log_us_ = now_us;
+    }
+}
+
+void MqttProtocol::DrainAudioReorderBuffer(bool force_gap) {
+    while (!audio_reorder_buffer_.empty()) {
+        auto expected = std::find_if(audio_reorder_buffer_.begin(), audio_reorder_buffer_.end(),
+            [this](const PendingAudioPacket& pending) {
+                return pending.sequence == expected_remote_sequence_;
+            });
+        if (expected != audio_reorder_buffer_.end()) {
+            const bool was_reordered = audio_reorder_buffer_.size() > 1;
+            auto packet = std::move(expected->packet);
+            const uint32_t sequence = expected->sequence;
+            audio_reorder_buffer_.erase(expected);
+            ++expected_remote_sequence_;
+
+            if (was_reordered) {
+                ++audio_reordered_count_;
+                ESP_LOGI(TAG, "AUDIO,REORDERED,SEQ=%lu,TOTAL=%lu",
+                         static_cast<unsigned long>(sequence),
+                         static_cast<unsigned long>(audio_reordered_count_));
+            }
+            if (on_incoming_audio_ != nullptr) {
+                on_incoming_audio_(std::move(packet));
+            }
+            force_gap = audio_reorder_buffer_.size() >= kTargetAudioJitterFrames;
+            continue;
+        }
+
+        // A packet is ahead of the expected sequence. Hold it until the
+        // bounded reorder window is reached so ordinary UDP reordering is not
+        // mistaken for loss.
+        if (!force_gap && audio_reorder_buffer_.size() < kTargetAudioJitterFrames) {
+            break;
+        }
+
+        auto next = audio_reorder_buffer_.end();
+        uint32_t nearest_distance = 0xFFFFFFFFU;
+        for (auto it = audio_reorder_buffer_.begin(); it != audio_reorder_buffer_.end(); ++it) {
+            const int32_t signed_distance = static_cast<int32_t>(it->sequence - expected_remote_sequence_);
+            if (signed_distance > 0 && static_cast<uint32_t>(signed_distance) < nearest_distance) {
+                nearest_distance = static_cast<uint32_t>(signed_distance);
+                next = it;
+            }
+        }
+        if (next == audio_reorder_buffer_.end()) {
+            break;
+        }
+
+        audio_udp_gap_count_ += nearest_distance;
+        const int64_t now_us = esp_timer_get_time();
+        if (last_audio_gap_log_us_ == 0 || now_us - last_audio_gap_log_us_ >= 1000000) {
+            ESP_LOGW(TAG, "AUDIO,UDP_GAP,MISSING=%lu,TOTAL=%lu",
+                     static_cast<unsigned long>(nearest_distance),
+                     static_cast<unsigned long>(audio_udp_gap_count_));
+            last_audio_gap_log_us_ = now_us;
+        }
+        expected_remote_sequence_ = next->sequence;
+        force_gap = false;
+    }
+}
+
+void MqttProtocol::QueueAudioPacket(uint32_t sequence, std::unique_ptr<AudioStreamPacket> packet) {
+    std::lock_guard<std::mutex> lock(audio_reorder_mutex_);
+    if (packet == nullptr) {
+        return;
+    }
+    if (!expected_remote_sequence_valid_) {
+        expected_remote_sequence_ = sequence;
+        expected_remote_sequence_valid_ = true;
+    }
+
+    // Signed subtraction gives a wrap-safe ordering as long as a stream does
+    // not span more than half the uint32 sequence space.
+    const int32_t signed_distance = static_cast<int32_t>(sequence - expected_remote_sequence_);
+    if (signed_distance < 0) {
+        LogLateAudioPacket(sequence);
+        return;
+    }
+    if (std::find_if(audio_reorder_buffer_.begin(), audio_reorder_buffer_.end(),
+            [sequence](const PendingAudioPacket& pending) {
+                return pending.sequence == sequence;
+            }) != audio_reorder_buffer_.end()) {
+        LogLateAudioPacket(sequence);
+        return;
+    }
+
+    audio_reorder_buffer_.push_back({sequence, std::move(packet)});
+    const size_t previous_jitter_max = audio_jitter_max_;
+    audio_jitter_max_ = std::max(audio_jitter_max_, audio_reorder_buffer_.size());
+    if (audio_jitter_max_ > previous_jitter_max && audio_jitter_max_ > 1) {
+        ESP_LOGI(TAG, "AUDIO,JITTER_MAX=%u", static_cast<unsigned>(audio_jitter_max_));
+    }
+
+    const bool bounded_window_reached = audio_reorder_buffer_.size() >= kTargetAudioJitterFrames ||
+        audio_reorder_buffer_.size() > kMaxAudioJitterFrames;
+    DrainAudioReorderBuffer(bounded_window_reached);
+    UpdateAudioReorderTimer();
+}
+
 void MqttProtocol::CloseAudioChannel(bool send_goodbye) {
     {
         std::lock_guard<std::mutex> lock(channel_mutex_);
         udp_.reset();
     }
+    ResetAudioReorderState();
+    Application::GetInstance().GetAudioService().ResetDecoder();
 
     ESP_LOGI(TAG, "Closing audio channel, send_goodbye: %d", send_goodbye);
 
@@ -223,6 +391,8 @@ bool MqttProtocol::OpenAudioChannel() {
 
     error_occurred_ = false;
     session_id_ = "";
+    ResetAudioReorderState();
+    Application::GetInstance().GetAudioService().ResetDecoder();
     xEventGroupClearBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);
 
     auto message = GetHelloMessage();
@@ -267,47 +437,6 @@ bool MqttProtocol::OpenAudioChannel() {
 
         uint32_t timestamp = ntohl(*(uint32_t*)&data[8]);
         uint32_t sequence = ntohl(*(uint32_t*)&data[12]);
-        if (remote_sequence_valid_) {
-            // Sequence numbers are uint32_t and must be compared modulo 2^32.
-            const uint32_t delta = sequence - remote_sequence_;
-            if (delta == 0 || delta > 0x80000000U) {
-                ESP_LOGD(TAG, "Dropping old/duplicate audio packet: %lu, latest: %lu",
-                         sequence, remote_sequence_);
-                return;
-            }
-            if (delta != 1) {
-                const uint32_t missing = delta - 1;
-                remote_sequence_gap_count_ += missing;
-                const int64_t now_us = esp_timer_get_time();
-                if (last_remote_sequence_warning_us_ == 0 ||
-                    now_us - last_remote_sequence_warning_us_ >= 1000000) {
-                    ESP_LOGW(TAG, "Audio UDP sequence gap: got %lu, expected %lu, missing=%lu, total_missing=%lu",
-                             sequence, remote_sequence_ + 1, missing, remote_sequence_gap_count_);
-                    last_remote_sequence_warning_us_ = now_us;
-                }
-
-                // Preserve real-time playback when UDP drops a small burst.
-                // The audio service inserts a bounded PCM concealment frame;
-                // feeding the next Opus frame directly produces clicks and
-                // speech discontinuities.
-                constexpr uint32_t kMaxPlcFramesPerGap = 4;
-                const uint32_t plc_frames = std::min(missing, kMaxPlcFramesPerGap);
-                if (on_incoming_audio_ != nullptr) {
-                    for (uint32_t i = 0; i < plc_frames; ++i) {
-                        auto plc_packet = std::make_unique<AudioStreamPacket>();
-                        plc_packet->sample_rate = server_sample_rate_;
-                        plc_packet->frame_duration = server_frame_duration_;
-                        plc_packet->packet_loss_concealment = true;
-                        on_incoming_audio_(std::move(plc_packet));
-                    }
-                }
-                if (missing > kMaxPlcFramesPerGap) {
-                    ESP_LOGW(TAG, "Audio UDP gap too large for PLC: missing=%lu, recovered=%lu",
-                             missing, plc_frames);
-                }
-            }
-        }
-
         size_t decrypted_size = data.size() - aes_nonce_.size();
         size_t nc_off = 0;
         uint8_t stream_block[16] = {0};
@@ -323,11 +452,7 @@ bool MqttProtocol::OpenAudioChannel() {
             ESP_LOGE(TAG, "Failed to decrypt audio data, ret: %d", ret);
             return;
         }
-        if (on_incoming_audio_ != nullptr) {
-            on_incoming_audio_(std::move(packet));
-        }
-        remote_sequence_ = sequence;
-        remote_sequence_valid_ = true;
+        QueueAudioPacket(sequence, std::move(packet));
         last_incoming_time_ = std::chrono::steady_clock::now();
     });
 
@@ -406,10 +531,7 @@ void MqttProtocol::ParseServerHello(const cJSON* root) {
     mbedtls_aes_init(&aes_ctx_);
     mbedtls_aes_setkey_enc(&aes_ctx_, (const unsigned char*)DecodeHexString(key).c_str(), 128);
     local_sequence_ = 0;
-    remote_sequence_ = 0;
-    remote_sequence_valid_ = false;
-    remote_sequence_gap_count_ = 0;
-    last_remote_sequence_warning_us_ = 0;
+    ResetAudioReorderState();
     xEventGroupSetBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);
 }
 

@@ -13,7 +13,7 @@
 
 #include <functional>
 #include <string>
-#include <map>
+#include <deque>
 #include <mutex>
 #include <memory>
 #include <atomic>
@@ -50,15 +50,38 @@ private:
     std::string udp_server_;
     int udp_port_;
     uint32_t local_sequence_;
-    uint32_t remote_sequence_;
-    bool remote_sequence_valid_ = false;
-    uint32_t remote_sequence_gap_count_ = 0;
-    int64_t last_remote_sequence_warning_us_ = 0;
+
+    // A small bounded jitter buffer keeps a packet that arrives ahead of the
+    // expected sequence long enough for normal UDP reordering to resolve.
+    // Missing frames are never synthesized here: after the bounded window,
+    // playback continues with the next real packet.
+    struct PendingAudioPacket {
+        uint32_t sequence;
+        std::unique_ptr<AudioStreamPacket> packet;
+    };
+    static constexpr size_t kTargetAudioJitterFrames = 2;
+    static constexpr size_t kMaxAudioJitterFrames = 4;
+    std::deque<PendingAudioPacket> audio_reorder_buffer_;
+    uint32_t expected_remote_sequence_ = 0;
+    bool expected_remote_sequence_valid_ = false;
+    uint32_t audio_udp_gap_count_ = 0;
+    uint32_t audio_late_packet_count_ = 0;
+    uint32_t audio_reordered_count_ = 0;
+    size_t audio_jitter_max_ = 0;
+    int64_t last_audio_gap_log_us_ = 0;
+    std::mutex audio_reorder_mutex_;
+    esp_timer_handle_t audio_reorder_timer_ = nullptr;
+    bool audio_reorder_timer_armed_ = false;
     esp_timer_handle_t reconnect_timer_;
 
     bool StartMqttClient(bool report_error=false);
     void ParseServerHello(const cJSON* root);
     std::string DecodeHexString(const std::string& hex_string);
+    void ResetAudioReorderState();
+    void QueueAudioPacket(uint32_t sequence, std::unique_ptr<AudioStreamPacket> packet);
+    void DrainAudioReorderBuffer(bool force_gap);
+    void LogLateAudioPacket(uint32_t sequence);
+    void UpdateAudioReorderTimer();
 
     bool SendText(const std::string& text) override;
     std::string GetHelloMessage();
