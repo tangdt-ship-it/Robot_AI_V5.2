@@ -672,7 +672,9 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   }
 
   bool overshot = false;
-  if (currentHeadingSequence() != aiTurnLastSampleSequence_) {
+  const bool headingSampleUpdated =
+      currentHeadingSequence() != aiTurnLastSampleSequence_;
+  if (headingSampleUpdated) {
     aiTurnLastSampleSequence_ = currentHeadingSequence();
     const float headingNow = currentHeadingDeg();
     const uint32_t dtMs = nowMs - aiTurnPreviousSampleMs_;
@@ -696,13 +698,34 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     }
     aiTurnLastErrorSign_ = errorSign;
   }
+  // A fused Heading sample normally drives the local rate estimate toward
+  // the current motion. When the estimator is temporarily quiet after PWM
+  // release, do not retain a stale pre-stop rate forever. This decay is used
+  // only while the turn command is already zero and no fresh sample exists;
+  // it cannot hide a fresh measured rotation.
+  if (!headingSampleUpdated && aiTurnCommandSpeed_ == 0 &&
+      !aiTurnPulseDriving_) {
+    aiTurnYawRateDegS_ *= TURN_STOP_RATE_DECAY;
+    if (fabsf(aiTurnYawRateDegS_) < 0.05f) aiTurnYawRateDegS_ = 0.0f;
+  }
   const float absError = fabsf(aiTurnErrorDeg_);
   const float absYawRate = fabsf(aiTurnYawRateDegS_);
+  const float maxWheelSpeed = max(
+      fabsf(odometry_.data().leftVelocityMmS),
+      fabsf(odometry_.data().rightVelocityMmS));
+  // The local Heading rate is derived from sampled Heading deltas and can
+  // retain noise after the turn controller has already released PWM. Let the
+  // encoder velocity certify that the chassis is physically settled before
+  // ignoring such a stale rate estimate.
+  const bool turnRateSettled =
+      absYawRate <= TURN_SETTLE_RATE_DEG_S ||
+      (aiTurnCommandSpeed_ == 0 &&
+       maxWheelSpeed <= TURN_SETTLE_WHEEL_SPEED_MM_S);
 
   // DONE requires both position and angular velocity to be settled. Merely
   // crossing the target is not success because the chassis may still coast.
   if (absError <= TURN_TOLERANCE_DEG &&
-      absYawRate <= TURN_SETTLE_RATE_DEG_S) {
+      turnRateSettled) {
     targetLeft_ = targetRight_ = currentLeft_ = currentRight_ = 0;
     aiTurnCommandSpeed_ = 0;
     aiTurnPulseDriving_ = false;
@@ -712,7 +735,7 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
       const float settleError = HeadingFusion::shortestDelta(
           aiTurnTargetDeg_, currentHeadingDeg());
       if (fabsf(settleError) <= TURN_TOLERANCE_DEG &&
-          fabsf(aiTurnYawRateDegS_) <= TURN_SETTLE_RATE_DEG_S) {
+          turnRateSettled) {
         finishAiTurn(AiTurnResultCode::DONE);
       } else {
         aiTurnSettleStartMs_ = 0U;

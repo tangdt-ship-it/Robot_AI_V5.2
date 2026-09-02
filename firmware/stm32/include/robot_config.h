@@ -139,12 +139,18 @@ static constexpr float TURN_PULSE_ZONE_DEG = 8.0f;
 // estimator's quantization plus the chassis' mechanical coast.  A 0.5-degree
 // acceptance window was below the repeatable resolution observed on HIL and
 // caused valid near-target turns to timeout.  Keep correction pulses active
-// near the target, but finish only inside this commissioned 1.5-degree band.
-static constexpr float TURN_TOLERANCE_DEG = 1.5f;
+// near the target, but finish only inside this commissioned 2-degree band.
+static constexpr float TURN_TOLERANCE_DEG = 2.0f;
 static constexpr float TURN_RATE_FILTER = 0.30f;
 static constexpr float TURN_PREDICT_TIME_S = 0.18f;
 static constexpr float TURN_SETTLE_RATE_DEG_S = 2.0f;
 static constexpr float TURN_CORRECTION_START_RATE_DEG_S = 2.5f;
+static constexpr float TURN_SETTLE_WHEEL_SPEED_MM_S = 5.0f;
+// If the turn controller has released PWM and no new fused-heading sample
+// arrives, decay the controller-local rate estimate. Without this bounded
+// decay, a stale pre-stop rate can keep an already stationary turn from
+// reaching DONE forever.
+static constexpr float TURN_STOP_RATE_DECAY = 0.80f;
 // Speed 10 was not sufficient to overcome static friction on the tested
 // chassis. Keep the final correction short, but give it the same torque as
 // the normal angle command.
