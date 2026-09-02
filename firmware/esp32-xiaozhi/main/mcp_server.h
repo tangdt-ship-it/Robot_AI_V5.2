@@ -245,6 +245,9 @@ private:
         if (name == "self.robot.turn_relative") {
             return "Tool chuẩn duy nhất cho quay/xoay/rẽ/quẹo theo góc tương đối. direction=left/right, degrees=1..180. Các từ xoay, quay, rẽ, quẹo, nghiêng đều ánh xạ vào tool này khi có số độ. 'Quay đầu' nghĩa là 180 độ; nếu người dùng nói rõ trái/phải thì dùng hướng đó. Không dùng turn_left/turn_right/rotate_continuous vì các alias đó đã bị khóa khỏi AI.";
         }
+        if (name == "self.robot.turn_revolutions") {
+            return "Tool quay theo so vong tai cho: direction=left/right, revolutions=1..2, 1 vong=360 do. Cac cach noi quay trai/phai 1 vong, xoay 2 vong deu dung tool nay. Moi vong duoc thuc hien bang hai doan quay kin 180 do bang Heading; chi bao hoan tat khi completed=true. Neu nguoi dung noi quay trai 2 vong roi quay phai 2 vong, goi tool nay hai lan theo dung thu tu va chi goi lan sau sau khi lan truoc completed=true. STOP co the huy giua cac doan; khong dung turn_left/turn_right/rotate_continuous.";
+        }
         if (name == "self.robot.turn_to_heading") {
             return "Quay robot tới heading tuyệt đối -180..180 độ bằng fused heading. Chỉ dùng khi người dùng yêu cầu một hướng tuyệt đối, ví dụ quay về hướng 0 độ; không dùng thay cho quay trái/phải một số độ tương đối.";
         }

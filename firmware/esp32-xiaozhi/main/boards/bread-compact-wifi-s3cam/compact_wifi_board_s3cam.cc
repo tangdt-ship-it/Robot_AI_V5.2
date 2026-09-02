@@ -555,6 +555,7 @@ private:
                     tool_name == "self.robot.turn_left" ||
                     tool_name == "self.robot.turn_right" ||
                     tool_name == "self.robot.turn_relative" ||
+                    tool_name == "self.robot.turn_revolutions" ||
                     tool_name == "self.robot.turn_to_heading") {
                     return robot_uart_.MotionCancellationToken();
                 }
@@ -589,6 +590,11 @@ private:
         const PropertyList return_home_property({
             Property("speed", kPropertyTypeInteger, 12, 10, 20),
             Property("camera_guidance", kPropertyTypeBoolean, true),
+        });
+        const PropertyList turn_revolutions_property({
+            Property("direction", kPropertyTypeString),
+            Property("revolutions", kPropertyTypeInteger, 1, 2),
+            Property("speed", kPropertyTypeInteger, 15, 10, 20),
         });
         // The individual read-only tools below are retained in source for
         // diagnostics history, but are consolidated into get_diagnostics so
@@ -1279,6 +1285,72 @@ private:
                          completed ? "true" : "false", left ? "left" : "right",
                          degrees, turn.heading_deg, turn.target_deg,
                          turn.error_deg);
+                return std::string(json);
+            });
+        mcp_server.AddTool(
+            "self.robot.turn_revolutions",
+            "Quay theo so vong bang Heading kin: 1 vong=360 do, toi da 2 vong moi lan goi. Moi vong gom hai doan 180 do; STOP huy duoc giua cac doan. Chuoi trai 2 vong roi phai 2 vong phai goi tool hai lan tuan tu.",
+            turn_revolutions_property,
+            [this](const PropertyList& properties) -> ReturnValue {
+                if (mission_manager_.IsActive()) {
+                    return std::string("{\"completed\":false,\"error\":\"autonomous_mission_active\"}");
+                }
+                const std::string direction =
+                    properties["direction"].value<std::string>();
+                const bool left = direction == "left" || direction == "LEFT" ||
+                                  direction == "trai" || direction == "trái";
+                const bool right = direction == "right" || direction == "RIGHT" ||
+                                   direction == "phai" || direction == "phải";
+                if (!left && !right) {
+                    return std::string("{\"completed\":false,\"error\":\"invalid_direction\"}");
+                }
+
+                const int revolutions = properties["revolutions"].value<int>();
+                const int speed = properties["speed"].value<int>();
+                const uint32_t cancellation_token = properties.RequestGeneration();
+                if (!robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                    return std::string(
+                        "{\"completed\":false,\"error\":\"motion_cancelled_before_start\"}");
+                }
+
+                const int total_segments = revolutions * 2;
+                int completed_segments = 0;
+                RobotTurnResult last_turn;
+                bool completed = robot_uart_.SetMode(true, 700);
+                for (int segment = 0; completed && segment < total_segments;
+                     ++segment) {
+                    if (!robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                        completed = false;
+                        break;
+                    }
+                    RobotTurnResult segment_result;
+                    completed = robot_uart_.TurnRelative(
+                        left, 180, speed, segment_result, 25000,
+                        cancellation_token);
+                    last_turn = segment_result;
+                    if (completed) ++completed_segments;
+                    if (!completed &&
+                        robot_uart_.MotionCancellationCurrent(cancellation_token)) {
+                        robot_uart_.Stop(700);
+                    }
+                }
+                robot_uart_.SetMode(false, 700);
+
+                const int requested_degrees = revolutions * 360;
+                const int completed_degrees = completed_segments * 180;
+                const char* error = completed
+                    ? ""
+                    : (robot_uart_.MotionCancellationCurrent(cancellation_token)
+                           ? "turn_failed"
+                           : "cancelled_or_stopped");
+                char json[384];
+                snprintf(
+                    json, sizeof(json),
+                    "{\"completed\":%s,\"direction\":\"%s\",\"requested_revolutions\":%d,\"requested_degrees\":%d,\"completed_revolutions\":%d,\"completed_degrees\":%d,\"completed_segments\":%d,\"heading_deg\":%.1f,\"target_deg\":%.1f,\"error_deg\":%.1f,\"heading_closed_loop\":true,\"error\":\"%s\"}",
+                    completed ? "true" : "false", left ? "left" : "right",
+                    revolutions, requested_degrees, completed_segments / 2,
+                    completed_degrees, completed_segments, last_turn.heading_deg,
+                    last_turn.target_deg, last_turn.error_deg, error);
                 return std::string(json);
             });
         mcp_server.AddTool(

@@ -56,6 +56,7 @@ def main() -> int:
         "self.robot.stop",
         "self.robot.move_distance",
         "self.robot.turn_relative",
+        "self.robot.turn_revolutions",
         "self.robot.turn_to_heading",
         "self.robot.set_home",
         "self.robot.return_home",
@@ -84,6 +85,7 @@ def main() -> int:
     require(header, "1 bước=5 cm=50 mm", "voice step conversion policy")
     require(header, "Quay đầu", "180-degree turn language policy")
     require(header, "PHYSICAL MOTION", "body-scan motion warning")
+    require(header, "self.robot.turn_revolutions", "revolution-turn language policy")
 
     # Do not advertise autonomous detour while firmware still rejects it.
     require(defaults, "CONFIG_AUTOMATIC_DETOUR=n", "detour disabled gate")
@@ -94,9 +96,13 @@ def main() -> int:
     for name in (
         "self.robot.move_distance",
         "self.robot.turn_relative",
+        "self.robot.turn_revolutions",
         "self.robot.turn_to_heading",
     ):
         require(board, f'tool_name == "{name}"', f"STOP cancellation token {name}")
+
+    require(board, "revolutions * 2", "bounded 360-degree revolution expansion")
+    require(board, "completed_segments", "revolution completion reporting")
 
     # STOP must not be queued behind a blocking finite-motion callback. The
     # UART implementation therefore has an urgent path that bypasses the
@@ -112,7 +118,7 @@ def main() -> int:
             "internal motion STOP preservation")
 
     print("V5.2.2 MCP surface static guard: PASS")
-    print("  canonical finite motion: move_distance + turn_relative")
+    print("  canonical finite motion: move_distance + turn_relative + turn_revolutions")
     print("  stop/home: retained")
     print("  overlapping aliases: hidden + fail-closed")
     print("  automatic detour: remains disabled")
