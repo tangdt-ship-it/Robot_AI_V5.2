@@ -138,9 +138,11 @@ static constexpr float TURN_PULSE_ZONE_DEG = 8.0f;
 // Angle-command turns use the fused Heading source and must account for the
 // estimator's quantization plus the chassis' mechanical coast.  A 0.5-degree
 // acceptance window was below the repeatable resolution observed on HIL and
-// caused valid near-target turns to timeout.  Keep correction pulses active
-// near the target, but finish only inside this commissioned 2-degree band.
-static constexpr float TURN_TOLERANCE_DEG = 2.0f;
+// caused valid near-target turns to timeout.  Ground HIL reproduced final
+// errors in the 2.2..3.6-degree range on direction changes, so use the
+// smallest practical bounded margin above that observation while keeping
+// correction pulses active near target.
+static constexpr float TURN_TOLERANCE_DEG = 4.0f;
 static constexpr float TURN_RATE_FILTER = 0.30f;
 static constexpr float TURN_PREDICT_TIME_S = 0.18f;
 static constexpr float TURN_SETTLE_RATE_DEG_S = 2.0f;
