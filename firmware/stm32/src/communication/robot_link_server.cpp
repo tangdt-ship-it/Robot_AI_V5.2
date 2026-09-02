@@ -214,6 +214,10 @@ void RobotLinkServer::reportTurnResult(uint8_t code, float headingDeg,
     serial_.print("<ERR,TURN,OBSTACLE");
     PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
     serial_.print(">\r\n");
+  } else if (code == 6U) {
+    serial_.print("<ERR,TURN,CANCELLED");
+    PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
+    serial_.print(">\r\n");
   }
   activeMotionSessionId_ = 0;
   activeMotionOperationId_ = 0;
@@ -251,6 +255,11 @@ void RobotLinkServer::reportDistanceResult(uint8_t code, float targetMm,
     serial_.print(">\r\n");
   } else if (code == 4U) {
     serial_.print("<ERR,MOVE,ENCODER_FAULT,TRAVEL,");
+    serial_.print(travelledMm, 1);
+    PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
+    serial_.print(">\r\n");
+  } else if (code == 5U) {
+    serial_.print("<ERR,MOVE,CANCELLED,TRAVEL,");
     serial_.print(travelledMm, 1);
     PrintCorrelation(serial_, activeMotionSessionId_, activeMotionOperationId_);
     serial_.print(">\r\n");
@@ -796,6 +805,10 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
   unsigned long operationId = 0;
   bool correlatedMotion = false;
   const auto rejectMotion = [&](const char* reason, bool nack = false) {
+    debug_.print("ROBOTLINK,REJECT=");
+    debug_.print(reason);
+    debug_.print(",FRAME=");
+    debug_.println(frame);
     serial_.print(nack ? "<NACK," : "<ERR,");
     serial_.print(reason);
     if (correlatedMotion) {
@@ -886,7 +899,7 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
       rejectMotion("MODE", true);
       return;
     }
-    if (telemetry.ps2CommandActive) {
+    if (telemetry.ps2Connected || telemetry.ps2CommandActive) {
       rejectMotion("PS2_OVERRIDE");
       return;
     }
@@ -1093,7 +1106,12 @@ void RobotLinkServer::update(const RobotTelemetry& telemetry) {
   } else if (!encoderFault) {
     encoderFaultReported_ = false;
   }
-  if (aiMode_ && telemetry.ps2CommandActive) {
+  // Keep RobotLink's mode arbitration aligned with the STM32 controller:
+  // ps2Connected is the activity-based PS2 ownership proxy, while
+  // ps2CommandActive covers a live stick/button motion. Either one must
+  // cancel an AI session so a stale AI lease cannot remain armed after the
+  // operator takes control.
+  if (aiMode_ && (telemetry.ps2Connected || telemetry.ps2CommandActive)) {
     aiMode_ = false;
     motionRequested_ = false;
     motionRequest_ = {};

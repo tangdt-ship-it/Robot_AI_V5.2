@@ -10,7 +10,11 @@ enum class LcdPage : uint8_t {
 
 struct LcdDisplayData {
   float headingDeg = 0.0f;
+  const char* controlMode = "AI";
   const char* ps2Status = "WAIT";
+  const char* motionOwner = "NONE";
+  bool ps2Connected = false;
+  bool ps2Fresh = false;
   int16_t speed = 0;
   int16_t left = 0;
   int16_t right = 0;
@@ -25,6 +29,20 @@ struct LcdDisplayData {
   bool ultrasonicValid = false;
   float ultrasonicDistanceCm = 0.0f;
   const char* obstacleZone = "UNKNOWN";
+  float frontLeftDistanceCm = 0.0f;
+  float frontRightDistanceCm = 0.0f;
+  bool frontLeftFresh = false;
+  bool frontRightFresh = false;
+  bool frontLeftEchoValid = false;
+  bool frontRightEchoValid = false;
+  bool frontLeftDisplayDistanceValid = false;
+  bool frontRightDisplayDistanceValid = false;
+  bool frontLeftDisplayFar = false;
+  bool frontRightDisplayFar = false;
+  const char* frontLeftZone = "UNKNOWN";
+  const char* frontRightZone = "UNKNOWN";
+  const char* frontLeftHealth = "UNKNOWN";
+  const char* frontRightHealth = "UNKNOWN";
   bool brakeLocked = false;
   const char* imuStatus = "LOST";
   const char* fusionStatus = "LOST";

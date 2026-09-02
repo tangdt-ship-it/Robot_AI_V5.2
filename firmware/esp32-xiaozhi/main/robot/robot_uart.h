@@ -82,6 +82,7 @@ struct RobotDistanceResult {
         TIMEOUT,
         OBSTACLE,
         ENCODER_FAULT,
+        CANCELLED,
         LINK_ERROR,
     };
     Code code = Code::NONE;
@@ -209,6 +210,8 @@ public:
     bool Stop(int timeout_ms = 500) {
         const bool wake_turn = turn_waiting_;
         const bool wake_distance = distance_waiting_;
+        const uint32_t cancelled_session_id = waiting_session_id_;
+        const uint32_t cancelled_operation_id = waiting_operation_id_;
         uint32_t next_generation = motion_cancel_generation_.fetch_add(1U) + 1U;
         if (next_generation == 0U) {
             motion_cancel_generation_.store(1U);
@@ -218,6 +221,17 @@ public:
             timeout_ms > 0 ? static_cast<uint32_t>(timeout_ms) : 0U;
         const bool stopped = Stop(bounded_timeout);
         if (stopped) {
+            if (wake_distance &&
+                xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
+                // The STOP waiter is the authoritative cancellation terminal
+                // when it interrupts a finite MOVE. Keep the result explicit
+                // so the caller cannot misclassify it as a timeout/link loss.
+                distance_result_.completed = false;
+                distance_result_.code = RobotDistanceResult::Code::CANCELLED;
+                distance_result_.session_id = cancelled_session_id;
+                distance_result_.operation_id = cancelled_operation_id;
+                xSemaphoreGive(state_mutex_);
+            }
             EventBits_t wake_bits = 0;
             if (wake_turn) wake_bits |= kResponseTurnError;
             if (wake_distance) wake_bits |= kResponseDistanceError;

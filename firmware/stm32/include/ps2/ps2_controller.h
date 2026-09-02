@@ -47,6 +47,10 @@ class Ps2Controller {
   bool buttonPressed(Ps2Button button) const;
   bool buttonReleased(Ps2Button button) const;
   bool motionCommandActive() const;
+  // The wireless receiver can keep returning valid neutral frames after the
+  // handheld transmitter is powered off. This reports operator activity, not
+  // merely electrical presence of the receiver module.
+  bool controlActive(uint32_t nowMs) const;
   bool frameTimedOut(uint32_t nowMs) const;
   Ps2ReceiverStatus receiverStatus(uint32_t nowMs) const;
   const char* receiverStatusText(uint32_t nowMs) const;

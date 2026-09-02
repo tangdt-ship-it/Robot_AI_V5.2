@@ -56,13 +56,13 @@ static constexpr float WHEEL_PID_RIGHT_KP = 0.20f;
 static constexpr float WHEEL_PID_RIGHT_KI = 0.05f;
 static constexpr float WHEEL_PID_RIGHT_KD = 0.0f;
 
-// Front HC-SR04. PC9/PC12 are used as GPIO so the measurement does not take
-// ownership of a hardware timer already used by PWM/Arduino timing.
-static constexpr uint32_t ULTRASONIC_TRIG_PIN = PC12;
-static constexpr uint32_t ULTRASONIC_ECHO_PIN = PC9;
-// Right-mounted module observes the FRONT-LEFT sector.
-static constexpr uint32_t ULTRASONIC_RIGHT_TRIG_PIN = PC4;
-static constexpr uint32_t ULTRASONIC_RIGHT_ECHO_PIN = PC7;
+// Front HC-SR04. Use the genericSTM32F103VE digital IDs explicitly instead
+// of the Arduino analog aliases (PC4 is PIN_A14 in this variant). This keeps
+// the physical wiring unambiguous: left=PC12/PC9, right=PC4/PC7.
+static constexpr uint32_t ULTRASONIC_TRIG_PIN = 44U;       // PC12
+static constexpr uint32_t ULTRASONIC_ECHO_PIN = 41U;       // PC9
+static constexpr uint32_t ULTRASONIC_RIGHT_TRIG_PIN = 36U; // PC4
+static constexpr uint32_t ULTRASONIC_RIGHT_ECHO_PIN = 39U; // PC7
 
 static constexpr uint32_t LCD_SCL_PIN = PB7;
 static constexpr uint32_t LCD_SDA_PIN = PB6;
@@ -179,15 +179,30 @@ static constexpr uint32_t ULTRASONIC_SAMPLE_PERIOD_MS = 60;
 static constexpr uint32_t ULTRASONIC_INTER_SENSOR_GUARD_MS = 30;
 static constexpr uint32_t ULTRASONIC_ECHO_TIMEOUT_US = 30000;
 static constexpr uint32_t ULTRASONIC_FRESH_MS = 350;
-// A single HC-SR04 timeout can be caused by an echo collision or a narrow
-// electrical glitch.  Keep the fail-safe stop, but allow only a very short,
-// slow continuation when both channels recently proved a wide clear path.
-static constexpr uint32_t ULTRASONIC_DEGRADED_GRACE_MS = 300;
-static constexpr uint32_t ULTRASONIC_DEGRADED_MAX_TIMEOUTS = 2;
+// A single HC-SR04 timeout can be caused by an echo collision, no reflector
+// inside the acoustic cone, or a narrow electrical glitch. Keep the fail-safe
+// stop, but allow a bounded slow continuation when both channels recently
+// proved a wide clear path. The window covers several alternating samples;
+// it never applies to a near/unknown startup state.
+static constexpr uint32_t ULTRASONIC_DEGRADED_GRACE_MS = 1000;
+static constexpr uint32_t ULTRASONIC_DEGRADED_MAX_TIMEOUTS = 6;
 static constexpr float ULTRASONIC_DEGRADED_CLEAR_CM = 50.0f;
 static constexpr int16_t ULTRASONIC_DEGRADED_MAX_FORWARD_COMMAND = 8;
+// The LCD may hold the last real Echo for the same bounded window. This avoids
+// turning one dropped sample into a false "sensor fault" while still exposing
+// a genuinely disconnected sensor after the hold expires.
+static constexpr uint32_t ULTRASONIC_DISPLAY_HOLD_MS = 1000;
+// Reject an isolated large jump (usually a cross-reflection between the two
+// front-facing modules). A real change of range must repeat consistently;
+// close obstacle readings remain eligible for immediate safety handling.
+static constexpr float ULTRASONIC_OUTLIER_REJECT_DELTA_CM = 45.0f;
+static constexpr float ULTRASONIC_OUTLIER_CONFIRM_TOLERANCE_CM = 20.0f;
+static constexpr uint8_t ULTRASONIC_OUTLIER_CONFIRMATIONS = 3;
 static constexpr float ULTRASONIC_MIN_CM = 2.0f;
-static constexpr float ULTRASONIC_MAX_CM = 400.0f;
+// A no-obstacle HC-SR04 Echo can legitimately end just beyond the nominal
+// 4 m module rating.  Keep the acceptance limit below the 30 ms timeout
+// (~514 cm) so a bounded far reading is still distinct from a stuck Echo.
+static constexpr float ULTRASONIC_MAX_CM = 500.0f;
 // Tuned for the 35 x 40 cm chassis. EMERGENCY is intentionally below 10 cm as
 // requested, while BLOCKED/dynamic stop remain earlier so the front corners
 // still have room to sweep during an in-place avoidance turn.
@@ -252,6 +267,8 @@ static constexpr float HEADING_RESPONSE_RECOVERY_MULTIPLIER = 2.5f;
 
 static constexpr int16_t RAMP_STEP = 1;
 static constexpr int16_t RAMP_START = 5;
-static constexpr int16_t SPEED_ADJUST_STEP = 20;
+// PS2 L1/R1 speed changes are deliberately fine-grained so one press does
+// not jump over the useful low-speed range.
+static constexpr int16_t SPEED_ADJUST_STEP = 5;
 
 #endif

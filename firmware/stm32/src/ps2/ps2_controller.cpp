@@ -320,6 +320,15 @@ bool Ps2Controller::motionCommandActive() const {
   return state_.lx != 0 || state_.ly != 0;
 }
 
+bool Ps2Controller::controlActive(uint32_t nowMs) const {
+  if (!state_.receiverConnected || frameTimedOut(nowMs)) return false;
+  // A standard wireless PS2 receiver has no transmitter-power/status bit: it
+  // returns the same centered frame while the handheld is off or idle. Use a
+  // live command or a short post-input hold as the safe software proxy.
+  return motionCommandActive() ||
+         (contentInitialized_ && (nowMs - lastActivityMs_) <= PS2_ACTIVITY_MS);
+}
+
 bool Ps2Controller::frameTimedOut(uint32_t nowMs) const {
   return !state_.receiverConnected || state_.lastGoodFrameMs == 0U ||
          (nowMs - state_.lastGoodFrameMs) > PS2_FAILSAFE_MS;

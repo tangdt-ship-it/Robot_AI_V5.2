@@ -27,7 +27,7 @@ enum class AiMotionMode : uint8_t { NONE, PULSE, CONTINUOUS, TURN, DISTANCE };
 enum class MotionOwner : uint8_t { NONE, MCP, MISSION, REPLAY, DIAGNOSTIC, PS2 };
 
 enum class AiTurnResultCode : uint8_t {
-  NONE, DONE, TIMEOUT, HEADING_LOST, MOTION_FAULT, OBSTACLE
+  NONE, DONE, TIMEOUT, HEADING_LOST, MOTION_FAULT, OBSTACLE, CANCELLED
 };
 
 struct AiTurnResult {
@@ -38,7 +38,7 @@ struct AiTurnResult {
 };
 
 enum class AiDistanceResultCode : uint8_t {
-  NONE, DONE, TIMEOUT, OBSTACLE, ENCODER_FAULT
+  NONE, DONE, TIMEOUT, OBSTACLE, ENCODER_FAULT, CANCELLED
 };
 
 struct AiDistanceResult {
@@ -65,7 +65,10 @@ class RobotController {
   void resetHeadingReference();
   void calculateMotionCommand();
   void applyMotorCommand();
-  void stopImmediately();
+  // Stop the chassis now. An externally requested stop can also require a
+  // fresh PS2 motion frame before Manual is allowed to energize the motors
+  // again; this prevents a stale frame from restarting the last command.
+  void stopImmediately(bool requireFreshManualCommand = false);
   bool startAiMotion(int16_t left, int16_t right, bool headingHold,
                      bool reversing, uint32_t timeoutMs);
   bool startAiContinuous(int16_t left, int16_t right, bool headingHold,
@@ -105,6 +108,7 @@ class RobotController {
   void emitDiagnostics(uint32_t nowMs);
   void updateAiTurn(uint32_t nowMs);
   void updateAiDistance(uint32_t nowMs);
+  void cancelAiMotionForManual();
   int16_t distanceWheelBalance() const;
   bool canStartAiMotion(uint32_t nowMs) const;
   bool headingAvailable() const;
@@ -178,6 +182,7 @@ class RobotController {
   bool aiDistanceResultPending_ = false;
   AiDistanceResult aiDistanceResult_;
   MotionOwner motionOwner_ = MotionOwner::NONE;
+  bool manualResumeRequired_ = false;
 };
 
 #endif

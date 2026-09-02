@@ -388,7 +388,7 @@ bool RobotUart::MoveDistance(bool forward, int distance_mm, int speed,
         // operator with a follow-up STOP.
         if (!Ps2OverrideActive() &&
             motion_cancel_generation_.load() == motion_generation) {
-            Stop(700);
+            Stop(static_cast<uint32_t>(700));
         }
         if (xSemaphoreTake(state_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
             result = distance_result_;
@@ -458,7 +458,7 @@ bool RobotUart::TurnRelative(bool left, int angle_deg, int speed,
         (bits & kResponseTurnError) != 0) {
         if (!Ps2OverrideActive() &&
             motion_cancel_generation_.load() == motion_generation) {
-            Stop(700);
+            Stop(static_cast<uint32_t>(700));
         }
         EndMotionCorrelation();
         return false;
@@ -512,7 +512,7 @@ bool RobotUart::TurnAbsolute(int heading_deg, int speed,
         (bits & kResponseTurnError) != 0) {
         if (!Ps2OverrideActive() &&
             motion_cancel_generation_.load() == motion_generation) {
-            Stop(700);
+            Stop(static_cast<uint32_t>(700));
         }
         EndMotionCorrelation();
         return false;
@@ -888,6 +888,8 @@ void RobotUart::HandleFrame(const char* frame) {
                           ? RobotDistanceResult::Code::ENCODER_FAULT
                           : strcmp(distance_error, "TIMEOUT") == 0
                                 ? RobotDistanceResult::Code::TIMEOUT
+                                : strcmp(distance_error, "CANCELLED") == 0
+                                      ? RobotDistanceResult::Code::CANCELLED
                                 : RobotDistanceResult::Code::LINK_ERROR;
             distance_result_.travelled_mm = distance_travelled;
             xSemaphoreGive(state_mutex_);
@@ -910,6 +912,8 @@ void RobotUart::HandleFrame(const char* frame) {
                     ? RobotDistanceResult::Code::ENCODER_FAULT
                     : strstr(frame, "TIMEOUT") != nullptr
                           ? RobotDistanceResult::Code::TIMEOUT
+                          : strstr(frame, "CANCELLED") != nullptr
+                                ? RobotDistanceResult::Code::CANCELLED
                           : strstr(frame, "OBSTACLE") != nullptr
                                 ? RobotDistanceResult::Code::OBSTACLE
                                 : RobotDistanceResult::Code::LINK_ERROR;

@@ -16,7 +16,11 @@ enum class SensorHealth : uint8_t {
 };
 struct UltrasonicReading {
   float distanceCm=0, rawDistanceCm=0, rateCmS=0;
-  bool valid=false, fresh=false, echoValid=false;
+  bool valid=false, fresh=false, echoValid=false, displayFar=false;
+  // True when the LCD can safely present the last real Echo during the
+  // bounded dropout hold. It is separate from echoValid, which describes the
+  // current measurement attempt.
+  bool displayDistanceValid=false;
   uint32_t lastUpdateMs=0, ageMs=0, failureCount=0;
   ObstacleZone zone=ObstacleZone::UNKNOWN;
   SensorHealth health=SensorHealth::UNKNOWN;
@@ -40,6 +44,14 @@ class UltrasonicSensor {
   const UltrasonicReading& frontRight() const { return frontRight_; }
   float frontLeftDistanceCm() const { return frontLeft_.distanceCm; }
   float frontRightDistanceCm() const { return frontRight_.distanceCm; }
+  uint32_t frontLeftTriggerCount() const { return channels_[0].triggerCount; }
+  uint32_t frontRightTriggerCount() const { return channels_[1].triggerCount; }
+  uint32_t frontLeftIsrCount() const { return channels_[0].isrCount; }
+  uint32_t frontRightIsrCount() const { return channels_[1].isrCount; }
+  uint32_t frontLeftCapturedEdgeCount() const { return channels_[0].capturedEdgeCount; }
+  uint32_t frontRightCapturedEdgeCount() const { return channels_[1].capturedEdgeCount; }
+  uint32_t frontLeftLastPulseUs() const { return channels_[0].lastPulseUs; }
+  uint32_t frontRightLastPulseUs() const { return channels_[1].lastPulseUs; }
   ObstacleZone frontLeftZone() const { return frontLeft_.zone; }
   ObstacleZone frontRightZone() const { return frontRight_.zone; }
   ObstacleZone overallZone() const { return overallZone_; }
@@ -49,6 +61,9 @@ class UltrasonicSensor {
   static const char* healthText(SensorHealth health);
   float stoppingDistanceCm(int16_t forwardCommand) const;
   int16_t limitForwardCommand(int16_t forwardCommand) const;
+  // Bounded grace for in-place turns after a recently validated wide-clear
+  // sector. This never treats an unvalidated/startup sensor as clear.
+  bool hasRecentClearWindow(uint32_t nowMs) const;
  private:
   enum class TriggerState : uint8_t { IDLE, WAIT_ECHO };
   struct Channel {
@@ -56,21 +71,29 @@ class UltrasonicSensor {
     volatile uint32_t echoRiseUs=0, echoPulseUs=0;
     volatile bool echoPulseReady=false;
     volatile TriggerState state=TriggerState::IDLE;
+    volatile uint32_t isrCount=0, capturedEdgeCount=0;
+    uint32_t triggerCount=0;
+    volatile uint32_t lastPulseUs=0;
     uint32_t waitEchoStartedUs=0;
     uint32_t lastTriggerMs=0, lastMeasurementMs=0, measurementSequence=0, failureCount=0;
     float history[5]={}; uint8_t historyCount=0, historyIndex=0;
     float rawDistanceCm=0, filteredDistanceCm=0, approachRateCmS=0;
+    float outlierCandidateCm=0;
+    uint8_t outlierConfirmations=0;
     bool filterReady=false, echoValid=false; ObstacleZone zone=ObstacleZone::UNKNOWN;
     SensorHealth health=SensorHealth::UNKNOWN;
     uint32_t lastValidEchoMs=0, consecutiveTimeouts=0, invalidCount=0;
     uint8_t closerConfirmations=0, fartherConfirmations=0;
+    bool displayFar=false;
   } channels_[2];
   static UltrasonicSensor* instance_;
   static void echoIsrMountLeft(); static void echoIsrMountRight();
   void handleEchoEdge(uint8_t index);
   void acceptPulse(uint8_t index,uint32_t pulseUs,uint32_t nowMs);
-  void acceptTimeout(uint8_t index,uint32_t nowMs); void updateChannelZone(uint8_t index,float distanceCm);
+  void acceptTimeout(uint8_t index,uint32_t nowMs,bool noEcho=true);
+  void updateChannelZone(uint8_t index,float distanceCm);
   float medianHistory(const Channel& channel) const; bool channelFresh(const Channel& channel,uint32_t nowMs) const;
+  bool hasRecentValidEcho(const Channel& channel,uint32_t nowMs) const;
   bool degradedClearWindow(uint32_t nowMs) const;
   void recomputeObstacleModel(uint32_t nowMs);
   UltrasonicReading frontLeft_,frontRight_; float nearestDistanceCm_=0,nearestRawDistanceCm_=0,nearestRateCmS_=0;

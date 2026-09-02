@@ -75,7 +75,16 @@ private:
     MissionManager mission_manager_;
     ObstacleAssist obstacle_assist_;
     TeachRoute teach_route_{&robot_uart_, &mission_manager_};
+    volatile bool diagnostic_move_active_ = false;
     volatile bool diagnostic_turn_active_ = false;
+
+    struct DiagnosticMoveRequest {
+        CompactWifiBoardS3Cam* board;
+        bool forward;
+        int distance_mm;
+        int speed;
+        uint32_t motion_generation;
+    };
 
     struct DiagnosticTurnRequest {
         CompactWifiBoardS3Cam* board;
@@ -83,6 +92,39 @@ private:
         int degrees;
         int speed;
     };
+
+    static void DiagnosticMoveTask(void* context) {
+        auto* request = static_cast<DiagnosticMoveRequest*>(context);
+        CompactWifiBoardS3Cam* board = request->board;
+        const bool forward = request->forward;
+        const int distance_mm = request->distance_mm;
+        const int speed = request->speed;
+        const uint32_t motion_generation = request->motion_generation;
+        delete request;
+
+        RobotDistanceResult result;
+        ESP_LOGI(TAG,
+                 "ROBOT_DIAG MOVE START direction=%s distance_mm=%d speed=%d",
+                 forward ? "forward" : "backward", distance_mm, speed);
+        const bool mode_set = board->robot_uart_.SetMode(true, 700);
+        const bool completed = mode_set &&
+            board->robot_uart_.MoveDistance(
+                forward, distance_mm, speed, result, 31000,
+                motion_generation);
+        if (!completed &&
+            board->robot_uart_.MotionCancellationCurrent(motion_generation)) {
+            board->robot_uart_.Stop(700);
+        }
+        board->robot_uart_.SetMode(false, 700);
+        const bool pose_synced =
+            board->mission_manager_.SyncAfterExternalMotion();
+        ESP_LOGI(TAG,
+                 "ROBOT_DIAG MOVE END completed=%d direction=%s requested_mm=%d travelled_mm=%.1f pose_synced=%d",
+                 completed, forward ? "forward" : "backward", distance_mm,
+                 result.travelled_mm, pose_synced);
+        board->diagnostic_move_active_ = false;
+        vTaskDelete(nullptr);
+    }
 
     static void DiagnosticTurnTask(void* context) {
         auto* request = static_cast<DiagnosticTurnRequest*>(context);
@@ -356,20 +398,24 @@ private:
                         move_distance_mm > 5000 || move_speed < 10 ||
                         move_speed > 20) {
                         ESP_LOGW(TAG,
-                                 "ROBOT_DIAG rejected; use robot_move fwd|back 1..5000 10..20");
+                             "ROBOT_DIAG rejected; use robot_move fwd|back 1..5000 10..20");
                         continue;
                     }
-                    RobotDistanceResult result;
-                    const bool completed = board->robot_uart_.SetMode(true, 700) &&
-                        board->robot_uart_.MoveDistance(
-                            forward, move_distance_mm, move_speed, result, 31000);
-                    board->robot_uart_.SetMode(false, 700);
-                    const bool pose_synced =
-                        board->mission_manager_.SyncAfterExternalMotion();
-                    ESP_LOGI(TAG,
-                             "ROBOT_DIAG MOVE END completed=%d direction=%s requested_mm=%d travelled_mm=%.1f pose_synced=%d",
-                             completed, forward ? "forward" : "backward",
-                             move_distance_mm, result.travelled_mm, pose_synced);
+                    if (board->diagnostic_move_active_) {
+                        ESP_LOGW(TAG, "ROBOT_DIAG move already active");
+                        continue;
+                    }
+                    auto* request = new DiagnosticMoveRequest{
+                        board, forward, move_distance_mm, move_speed,
+                        board->robot_uart_.MotionCancellationToken()};
+                    board->diagnostic_move_active_ = true;
+                    if (xTaskCreatePinnedToCore(
+                            DiagnosticMoveTask, "robot_diag_move", 4096,
+                            request, 2, nullptr, 1) != pdPASS) {
+                        board->diagnostic_move_active_ = false;
+                        delete request;
+                        ESP_LOGE(TAG, "ROBOT_DIAG cannot start move task");
+                    }
                     continue;
                 }
                 if (strcmp(line, "robot_set_home") == 0) {

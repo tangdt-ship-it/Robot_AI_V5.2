@@ -154,37 +154,58 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
 }
 
 void LcdDisplay::buildRobotLines() {
-  const int headingTenths = static_cast<int>(roundf(data_.headingDeg * 10.0f));
-  const int targetTenths = static_cast<int>(roundf(data_.headingTarget * 10.0f));
-  snprintf(desired_[0], 21, "HDG:%4d.%1d PS2:%-4s",
-           headingTenths / 10, abs(headingTenths % 10), data_.ps2Status);
-  snprintf(desired_[1], 21, "SPD:%3d L:%3d R:%3d", data_.speed, data_.left, data_.right);
-  if (!data_.encoderReady) {
-    snprintf(desired_[2], 21, "ENC:%-16.16s",
-             data_.encoderHealth != nullptr ? data_.encoderHealth : "NOT_READY");
+  const int headingDeg = static_cast<int>(lroundf(data_.headingDeg));
+  const char* mode = data_.controlMode != nullptr ? data_.controlMode : "AI";
+  const bool leftDisplayValid = data_.frontLeftDisplayDistanceValid;
+  const bool rightDisplayValid = data_.frontRightDisplayDistanceValid;
+  char leftDistance[5] = "----";
+  char rightDistance[5] = "----";
+  auto formatDistance = [](char (&output)[5], bool displayValid, bool displayFar,
+                           float distanceCm) {
+    if (!displayValid) return;
+    if (displayFar) {
+      snprintf(output, sizeof(output), " OK ");
+      return;
+    }
+    // Show useful numeric data for a nearby object. At or beyond 100 cm the
+    // display stays compact; this does not change the SR04 safety thresholds.
+    if (distanceCm >= 100.0f) {
+      snprintf(output, sizeof(output), " OK ");
+    } else {
+      // Numeric distances are at most two digits. Left-align the compact
+      // value in its fixed 4-column slot so there are no leading blanks;
+      // ---- remains four characters for a sensor fault.
+      snprintf(output, sizeof(output), "%d",
+               static_cast<int>(lroundf(distanceCm)));
+    }
+  };
+  formatDistance(leftDistance, leftDisplayValid, data_.frontLeftDisplayFar,
+                 data_.frontLeftDistanceCm);
+  formatDistance(rightDistance, rightDisplayValid, data_.frontRightDisplayFar,
+                 data_.frontRightDistanceCm);
+
+  // Fixed 20-column main page. Keep the two SR04 channels independent:
+  // nearby values are numeric, confirmed far/held-far is OK, and an expired
+  // value is ----. The display hold never changes the fail-safe motion gate.
+  // Exact RF pair state is not exposed by the PS2 receiver. Restore the
+  // previous truthful presentation: show the PS2 receiver state rather than
+  // claiming that MODEL=PS2 means the handheld is paired.
+  (void)mode;
+  snprintf(desired_[0], 21, "HDG:%4d PS2:%-4.4s", headingDeg,
+           data_.ps2Status != nullptr ? data_.ps2Status : "WAIT");
+  snprintf(desired_[1], 21, "SPD:%3d L:%3d R:%3d", data_.speed, data_.left,
+           data_.right);
+  if (data_.brakeLocked) {
+    // 20 columns exactly; BRK is only present while the active brake is on.
+    snprintf(desired_[2], 21, "L04:%-4s R04:%-4sBRK", leftDistance,
+             rightDistance);
   } else {
-    snprintf(desired_[2], 21, "EL:%6ld ER:%6ld",
-             static_cast<long>(data_.leftEncoderTicks),
-             static_cast<long>(data_.rightEncoderTicks));
+    snprintf(desired_[2], 21, "L04:%-4s R04:%-4s", leftDistance,
+             rightDistance);
   }
-  if (data_.brakeLocked ||
-      (data_.obstacleZone != nullptr &&
-       strcmp(data_.obstacleZone, "CLEAR") != 0 &&
-       strcmp(data_.obstacleZone, "UNKNOWN") != 0)) {
-    snprintf(desired_[3], 21, "US:%3dcm %-5s B:%s",
-             data_.ultrasonicValid
-                 ? static_cast<int>(lroundf(data_.ultrasonicDistanceCm))
-                 : 0,
-             data_.obstacleZone != nullptr ? data_.obstacleZone : "UNK",
-             data_.brakeLocked ? "ON" : "OFF");
-  } else if (data_.headingEnabled) {
-    snprintf(desired_[3], 21, "TGT:%4d.%1d RAMP:%s", targetTenths / 10,
-             abs(targetTenths % 10), data_.rampEnabled ? "ON" : "OFF");
-  } else {
-    snprintf(desired_[3], 21, "IMU:%-4.4s FUS:%-4.4s",
-             data_.imuStatus != nullptr ? data_.imuStatus : "LOST",
-             data_.fusionStatus != nullptr ? data_.fusionStatus : "LOST");
-  }
+  snprintf(desired_[3], 21, "ENL:%5ld ENR:%5ld",
+           static_cast<long>(data_.leftEncoderTicks),
+           static_cast<long>(data_.rightEncoderTicks));
 }
 
 void LcdDisplay::buildMapLines() {

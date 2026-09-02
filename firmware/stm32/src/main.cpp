@@ -59,7 +59,11 @@ void setup() {
   robotDebug.println("TEST,ENCODER_PROBE=START,MANUAL_WHEEL_ROTATION=1");
   return;
 #endif
-  (void)display.begin();
+  const bool lcdOk = display.begin();
+#if ROBOT_DEBUG
+  robotDebug.print("LCD,INIT=");
+  robotDebug.println(lcdOk ? "OK" : "FAILED");
+#endif
   headingFusion.begin();
   const bool imuOk = imu.begin();
 #if ROBOT_DEBUG
@@ -81,7 +85,7 @@ void loop() {
   RobotTelemetry ps2ProbeTelemetry;
   const uint32_t now = millis();
   ps2ProbeTelemetry.ps2Status = static_cast<uint8_t>(ps2.receiverStatus(now));
-  ps2ProbeTelemetry.ps2Connected = ps2.state().receiverConnected;
+  ps2ProbeTelemetry.ps2Connected = ps2.controlActive(now);
   ps2ProbeTelemetry.ps2Fresh = !ps2.frameTimedOut(now);
   ps2ProbeTelemetry.ps2Enabled = ps2.configured();
   ps2ProbeTelemetry.ps2FrameAgeMs = ps2.frameAgeMs(now);
@@ -169,7 +173,7 @@ void loop() {
   telemetry.robotState = static_cast<uint8_t>(robot.state());
   telemetry.motionOwner = static_cast<uint8_t>(robot.motionOwner());
   telemetry.ps2Status = static_cast<uint8_t>(ps2.receiverStatus(millis()));
-  telemetry.ps2Connected = ps2.state().receiverConnected;
+  telemetry.ps2Connected = ps2.controlActive(millis());
   telemetry.ps2Fresh = !ps2.frameTimedOut(millis());
   telemetry.ps2Enabled = ps2.configured();
   telemetry.ps2Mode = ps2.mode();
@@ -242,7 +246,10 @@ void loop() {
   // DONE,STOP means the requested electrical stop/brake is already applied.
   static bool stopCompletionPending = false;
   if (robotLink.takeStopRequest()) {
-    robot.stopImmediately();
+    // A STOP/MODE boundary must not be followed by a stale PS2 frame. The
+    // controller requires a fresh, deliberate PS2 motion frame before
+    // Manual can energize the motors again.
+    robot.stopImmediately(true);
     stopCompletionPending = true;
   }
   if (stopCompletionPending && motors.leftSpeed() == 0 &&
@@ -294,6 +301,16 @@ void loop() {
           break;
         case RobotLinkMotion::NONE:
           break;
+      }
+      if (!started) {
+        robotDebug.print("ROBOT_AI,START_REJECT,MOTION=");
+        robotDebug.print(static_cast<uint8_t>(request.motion));
+        robotDebug.print(",ANGLE=");
+        robotDebug.print(request.angleDeg);
+        robotDebug.print(",DIST=");
+        robotDebug.print(request.distanceMm);
+        robotDebug.print(",SPEED=");
+        robotDebug.println(request.speed);
       }
       robotLink.completeMotionRequest(request, started);
     }

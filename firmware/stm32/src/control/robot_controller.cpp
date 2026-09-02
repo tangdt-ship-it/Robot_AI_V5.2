@@ -272,6 +272,7 @@ void RobotController::applyMotorCommand() {
   updateRamp();
   int16_t left = currentLeft_;
   int16_t right = currentRight_;
+  const bool manualPs2 = motionOwner_ == MotionOwner::PS2;
   if (brakeEnabled_) {
     targetLeft_ = targetRight_ = currentLeft_ = currentRight_ = 0;
     state_ = RobotState::STOP;
@@ -287,7 +288,7 @@ void RobotController::applyMotorCommand() {
   obstacleLimited_ = false;
   const int16_t forward = static_cast<int16_t>((left + right) / 2);
   const int16_t turn = static_cast<int16_t>((left - right) / 2);
-  if (forward > 0) {
+  if (!manualPs2 && forward > 0) {
     const int16_t limitedForward =
         ultrasonic_.limitForwardCommand(forward);
     if (limitedForward < forward) {
@@ -325,6 +326,10 @@ void RobotController::applyMotorCommand() {
     obstacleBrakeActive_ = false;
     obstacleReleaseDistanceCm_ = 0.0f;
   }
+  // Manual PS2 remains the owner and SR04 never gates or reshapes it. A
+  // straight PS2 command is the one deliberate exception: Heading/encoder
+  // feedback may apply only a small left/right trim so wheel mismatch does
+  // not make the chassis arc. Turning and joystick steering remain open-loop.
   if (straightCommand_ && !headingSuppressed_ && headingAvailable()) {
     if (!heading_.isActive()) {
       heading_.capture(currentHeadingDeg());
@@ -374,7 +379,7 @@ void RobotController::applyMotorCommand() {
   }
 }
 
-void RobotController::stopImmediately() {
+void RobotController::stopImmediately(bool requireFreshManualCommand) {
   targetLeft_ = targetRight_ = currentLeft_ = currentRight_ = 0;
   obstacleLimited_ = false;
   state_ = RobotState::STOP;
@@ -400,12 +405,13 @@ void RobotController::stopImmediately() {
   } else {
     motors_.stop();
   }
+  if (requireFreshManualCommand) manualResumeRequired_ = true;
 }
 
 bool RobotController::canStartAiMotion(uint32_t nowMs) const {
   return !brakeEnabled_ && aiMotionMode_ == AiMotionMode::NONE &&
          (motionOwner_ == MotionOwner::NONE || motionOwner_ == MotionOwner::MCP) &&
-         (ps2_.frameTimedOut(nowMs) || !ps2_.motionCommandActive());
+         !ps2_.controlActive(nowMs);
 }
 
 bool RobotController::startAiMotion(int16_t left, int16_t right,
@@ -480,6 +486,16 @@ void RobotController::finishAiDistance(AiDistanceResultCode code) {
   aiDistanceResult_.travelledMm = aiDistanceTravelledMm();
   aiDistanceResultPending_ = true;
   stopImmediately();
+}
+
+void RobotController::cancelAiMotionForManual() {
+  if (aiMotionMode_ == AiMotionMode::DISTANCE) {
+    finishAiDistance(AiDistanceResultCode::CANCELLED);
+  } else if (aiMotionMode_ == AiMotionMode::TURN) {
+    finishAiTurn(AiTurnResultCode::CANCELLED);
+  } else if (aiMotionMode_ != AiMotionMode::NONE) {
+    stopImmediately();
+  }
 }
 
 bool RobotController::takeAiDistanceResult(AiDistanceResult& result) {
@@ -599,7 +615,14 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     motors_.stop();
     if (aiTurnSettleStartMs_ == 0U) aiTurnSettleStartMs_ = nowMs;
     if ((nowMs - aiTurnSettleStartMs_) >= TURN_SETTLE_MS) {
-      finishAiTurn(AiTurnResultCode::DONE);
+      const float settleError = HeadingFusion::shortestDelta(
+          aiTurnTargetDeg_, currentHeadingDeg());
+      if (fabsf(settleError) <= TURN_TOLERANCE_DEG &&
+          fabsf(aiTurnYawRateDegS_) <= TURN_SETTLE_RATE_DEG_S) {
+        finishAiTurn(AiTurnResultCode::DONE);
+      } else {
+        aiTurnSettleStartMs_ = 0U;
+      }
     }
     return;
   }
@@ -609,17 +632,36 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   // temporarily unknown/timeout. Keep every caution/blocked/emergency result
   // as a hard stop, and do not turn when no sector is trustworthy.
   const ObstacleZone turnZone = ultrasonic_.overallZone();
+  const bool leftSectorClear =
+      ultrasonic_.frontLeft().fresh &&
+      ultrasonic_.frontLeftZone() == ObstacleZone::CLEAR;
+  const bool rightSectorClear =
+      ultrasonic_.frontRight().fresh &&
+      ultrasonic_.frontRightZone() == ObstacleZone::CLEAR;
   const bool oneSectorClear =
       turnZone == ObstacleZone::CLEAR ||
       (turnZone == ObstacleZone::UNKNOWN &&
-       (ultrasonic_.frontLeftZone() == ObstacleZone::CLEAR ||
-        ultrasonic_.frontRightZone() == ObstacleZone::CLEAR));
-  if (!ultrasonic_.isFresh() || !oneSectorClear) {
+       (leftSectorClear || rightSectorClear));
+  const bool recentClearWindow =
+      ultrasonic_.hasRecentClearWindow(nowMs);
+  if (!oneSectorClear && !recentClearWindow) {
 #if ROBOT_DEBUG
     debug_.print("TURN,STOP=OBSTACLE,ZONE=");
     debug_.print(UltrasonicSensor::zoneText(turnZone));
     debug_.print(",FRESH=");
-    debug_.println(ultrasonic_.isFresh() ? 1 : 0);
+    debug_.print(ultrasonic_.isFresh() ? 1 : 0);
+    debug_.print(",LAGE=");
+    debug_.print(ultrasonic_.frontLeft().ageMs);
+    debug_.print(",RAGE=");
+    debug_.print(ultrasonic_.frontRight().ageMs);
+    debug_.print(",LH=");
+    debug_.print(UltrasonicSensor::healthText(
+        ultrasonic_.frontLeft().health));
+    debug_.print(",RH=");
+    debug_.print(UltrasonicSensor::healthText(
+        ultrasonic_.frontRight().health));
+    debug_.print(",RCLEAR=");
+    debug_.println(recentClearWindow ? 1 : 0);
 #endif
     finishAiTurn(AiTurnResultCode::OBSTACLE);
     return;
@@ -667,7 +709,14 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     motors_.stop();
     if (aiTurnSettleStartMs_ == 0U) aiTurnSettleStartMs_ = nowMs;
     if ((nowMs - aiTurnSettleStartMs_) >= TURN_SETTLE_MS) {
-      finishAiTurn(AiTurnResultCode::DONE);
+      const float settleError = HeadingFusion::shortestDelta(
+          aiTurnTargetDeg_, currentHeadingDeg());
+      if (fabsf(settleError) <= TURN_TOLERANCE_DEG &&
+          fabsf(aiTurnYawRateDegS_) <= TURN_SETTLE_RATE_DEG_S) {
+        finishAiTurn(AiTurnResultCode::DONE);
+      } else {
+        aiTurnSettleStartMs_ = 0U;
+      }
     }
     return;
   }
@@ -774,6 +823,19 @@ void RobotController::updateFast() {
   motors_.update();
   const uint32_t now = millis();
   const bool ps2Usable = !ps2_.frameTimedOut(now);
+  const bool ps2FrameFresh = ps2_.state().frameFresh;
+  const bool ps2MotionFresh = ps2FrameFresh && ps2Usable &&
+                              ps2_.motionCommandActive();
+  const bool ps2Active = ps2_.controlActive(now);
+  // A fresh neutral frame explicitly arms Manual after an external STOP,
+  // even when the receiver is only in RX (outside the short ACT hold).
+  if (ps2FrameFresh && ps2Usable && !ps2_.motionCommandActive()) {
+    manualResumeRequired_ = false;
+  }
+  if (ps2MotionFresh && aiMotionMode_ != AiMotionMode::NONE) {
+    // Any live PS2 command immediately reclaims the chassis from AI.
+    cancelAiMotionForManual();
+  }
   if (!ps2_.state().frameFresh) {
     if (aiMotionMode_ == AiMotionMode::PULSE &&
         static_cast<int32_t>(now - aiMotionDeadlineMs_) >= 0) {
@@ -804,8 +866,24 @@ void RobotController::updateFast() {
 #endif
 
   if (ps2Usable) handleFunctionButtons();
-  if (ps2Usable && ps2_.motionCommandActive()) {
-    // A live PS2 command always preempts and cancels AI motion.
+  if (ps2Active) {
+    if (ps2MotionFresh && !manualResumeRequired_) {
+      // A live PS2 command always owns the motors. SR04/Heading are not
+      // allowed to reshape or reject Manual output.
+      handleManualControl();
+      applyMotorCommand();
+    } else {
+      // After an external STOP, require a neutral frame first. This prevents
+      // the last held/stale PS2 direction from restarting the chassis.
+      if (!ps2MotionFresh) manualResumeRequired_ = false;
+      stopImmediately();
+    }
+    return;
+  }
+  if (ps2MotionFresh) {
+    // This branch is retained for a frame transition during reconnect; a
+    // receiver that is not connected cannot keep Manual ownership.
+    if (manualResumeRequired_) return;
     aiMotionMode_ = AiMotionMode::NONE;
     aiMotionDeadlineMs_ = 0;
     handleManualControl();
@@ -844,8 +922,18 @@ void RobotController::emitDiagnostics(uint32_t nowMs) {
     debug_.print(",RZ="); debug_.print(UltrasonicSensor::zoneText(ultrasonic_.frontRightZone()));
     debug_.print(",LH="); debug_.print(UltrasonicSensor::healthText(ultrasonic_.frontLeft().health));
     debug_.print(",RH="); debug_.print(UltrasonicSensor::healthText(ultrasonic_.frontRight().health));
+    debug_.print(",LDF="); debug_.print(ultrasonic_.frontLeft().displayFar ? 1 : 0);
+    debug_.print(",RDF="); debug_.print(ultrasonic_.frontRight().displayFar ? 1 : 0);
     debug_.print(",ZONE="); debug_.print(UltrasonicSensor::zoneText(ultrasonic_.overallZone()));
-    debug_.print(",SUG="); debug_.println(UltrasonicSensor::avoidanceText(ultrasonic_.suggestedAvoidance()));
+    debug_.print(",SUG="); debug_.print(UltrasonicSensor::avoidanceText(ultrasonic_.suggestedAvoidance()));
+    debug_.print(",LT="); debug_.print(ultrasonic_.frontLeftTriggerCount());
+    debug_.print(",RT="); debug_.print(ultrasonic_.frontRightTriggerCount());
+    debug_.print(",LI="); debug_.print(ultrasonic_.frontLeftIsrCount());
+    debug_.print(",RI="); debug_.print(ultrasonic_.frontRightIsrCount());
+    debug_.print(",LC="); debug_.print(ultrasonic_.frontLeftCapturedEdgeCount());
+    debug_.print(",RC="); debug_.print(ultrasonic_.frontRightCapturedEdgeCount());
+    debug_.print(",LP="); debug_.print(ultrasonic_.frontLeftLastPulseUs());
+    debug_.print(",RP="); debug_.println(ultrasonic_.frontRightLastPulseUs());
     return;
   }
   static uint32_t lastFusionDebugMs = 0;
@@ -942,7 +1030,32 @@ void RobotController::updateControl() {
   lastControlMs_ += CONTROL_PERIOD_MS;
   if ((now - lastControlMs_) > CONTROL_PERIOD_MS * 4U) lastControlMs_ = now;
   const bool ps2Usable = !ps2_.frameTimedOut(now);
+  const bool ps2FrameFresh = ps2_.state().frameFresh;
+  const bool ps2MotionFresh = ps2FrameFresh && ps2Usable &&
+                              ps2_.motionCommandActive();
+  const bool ps2Active = ps2_.controlActive(now);
   if (ps2Usable) updateSpeedRepeat(now);
+
+  // The wireless receiver may remain electrically connected after the
+  // handheld transmitter is turned off. Treat active PS2 input as Manual;
+  // neutral frames release the mode proxy back to AI after its short hold.
+  if (ps2Active) {
+    // updateFast() owns the high-rate PS2 path. Never re-use a command from
+    // an older frame here: doing so can re-energize the motors after a
+    // completed AI operation or an external STOP.
+    if (!ps2FrameFresh) return;
+    if (ps2MotionFresh && !manualResumeRequired_) {
+      if (aiMotionMode_ != AiMotionMode::NONE) cancelAiMotionForManual();
+      calculateMotionCommand();
+      applyMotorCommand();
+    } else {
+      // After an external STOP, require a neutral frame first. This prevents
+      // the last held/stale PS2 direction from restarting the chassis.
+      if (!ps2MotionFresh) manualResumeRequired_ = false;
+      stopImmediately();
+    }
+    return;
+  }
 
   // Encoder stall detection is enforced for AI-owned motion. Manual PS2 keeps
   // operator authority even if an encoder is unplugged, but autonomous motion
@@ -959,13 +1072,6 @@ void RobotController::updateControl() {
     } else {
       stopImmediately();
     }
-    return;
-  }
-  if (ps2Usable && ps2_.motionCommandActive()) {
-    aiMotionMode_ = AiMotionMode::NONE;
-    aiMotionDeadlineMs_ = 0;
-    calculateMotionCommand();
-    applyMotorCommand();
     return;
   }
   if (aiMotionMode_ == AiMotionMode::TURN) {
@@ -1024,7 +1130,11 @@ void RobotController::updateDisplay() {
   const uint32_t now = millis();
   LcdDisplayData data;
   data.headingDeg = currentHeadingDeg();
+  data.controlMode = ps2_.controlActive(now) ? "PS2" : "AI";
   data.ps2Status = ps2_.receiverStatusText(now);
+  data.motionOwner = motionOwnerText(motionOwner_);
+  data.ps2Connected = ps2_.controlActive(now);
+  data.ps2Fresh = !ps2_.frameTimedOut(now);
   data.speed = speedSetting_;
   data.left = motors_.leftSpeed();
   data.right = motors_.rightSpeed();
@@ -1039,6 +1149,20 @@ void RobotController::updateDisplay() {
   data.ultrasonicValid = ultrasonic_.isFresh();
   data.ultrasonicDistanceCm = ultrasonic_.distanceCm();
   data.obstacleZone = UltrasonicSensor::zoneText(ultrasonic_.zone());
+  data.frontLeftDistanceCm = ultrasonic_.frontLeftDistanceCm();
+  data.frontRightDistanceCm = ultrasonic_.frontRightDistanceCm();
+  data.frontLeftFresh = ultrasonic_.frontLeft().fresh;
+  data.frontRightFresh = ultrasonic_.frontRight().fresh;
+  data.frontLeftEchoValid = ultrasonic_.frontLeft().echoValid;
+  data.frontRightEchoValid = ultrasonic_.frontRight().echoValid;
+  data.frontLeftDisplayDistanceValid = ultrasonic_.frontLeft().displayDistanceValid;
+  data.frontRightDisplayDistanceValid = ultrasonic_.frontRight().displayDistanceValid;
+  data.frontLeftDisplayFar = ultrasonic_.frontLeft().displayFar;
+  data.frontRightDisplayFar = ultrasonic_.frontRight().displayFar;
+  data.frontLeftZone = UltrasonicSensor::zoneText(ultrasonic_.frontLeftZone());
+  data.frontRightZone = UltrasonicSensor::zoneText(ultrasonic_.frontRightZone());
+  data.frontLeftHealth = UltrasonicSensor::healthText(ultrasonic_.frontLeft().health);
+  data.frontRightHealth = UltrasonicSensor::healthText(ultrasonic_.frontRight().health);
   data.brakeLocked = brakeEnabled_ || obstacleBrakeActive_;
   data.imuStatus = imu_.healthText();
   data.fusionStatus = fusion_.healthText();
