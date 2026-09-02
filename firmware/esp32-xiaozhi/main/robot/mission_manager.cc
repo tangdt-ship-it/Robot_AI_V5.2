@@ -269,7 +269,7 @@ bool MissionManager::StartAutonomousForward(int speed,
                  "Live autonomous detour rejected: shadow-only mode enabled");
         return false;
     }
-    speed = std::clamp(speed, 10, 20);
+    speed = std::clamp(speed, 15, 30);
     runtime_seconds = std::clamp<uint32_t>(runtime_seconds, 1, 180);
     // Production forward motion always uses the camera. Keep the argument for
     // API compatibility, but callers cannot disable road monitoring.
@@ -335,7 +335,7 @@ bool MissionManager::StartReturnHome(int speed, bool camera_guidance) {
                  static_cast<unsigned long>(ai_obstacle_hold_event_id_.load()));
         return false;
     }
-    speed = std::clamp(speed, 10, 20);
+    speed = std::clamp(speed, 15, 30);
     bool needs_reference_restore = false;
     bool home_available = false;
     bool mission_active = false;

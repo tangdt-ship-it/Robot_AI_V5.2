@@ -395,10 +395,10 @@ private:
                     const bool backward = strcmp(move_direction, "back") == 0 ||
                                           strcmp(move_direction, "backward") == 0;
                     if ((!forward && !backward) || move_distance_mm < 1 ||
-                        move_distance_mm > 5000 || move_speed < 10 ||
-                        move_speed > 20) {
+                        move_distance_mm > 5000 || move_speed < 15 ||
+                        move_speed > 30) {
                         ESP_LOGW(TAG,
-                             "ROBOT_DIAG rejected; use robot_move fwd|back 1..5000 10..20");
+                             "ROBOT_DIAG rejected; use robot_move fwd|back 1..5000 15..30");
                         continue;
                     }
                     if (board->diagnostic_move_active_) {
@@ -452,9 +452,9 @@ private:
                            &degrees, &speed) != 3 ||
                     (strcmp(direction, "left") != 0 &&
                      strcmp(direction, "right") != 0) ||
-                    degrees < 1 || degrees > 180 || speed < 10 || speed > 20) {
+                    degrees < 1 || degrees > 180 || speed < 15 || speed > 30) {
                     ESP_LOGW(TAG,
-                             "ROBOT_DIAG rejected; use robot_turn left|right 1..180 10..20 or robot_stop");
+                             "ROBOT_DIAG rejected; use robot_turn left|right 1..180 15..30 or robot_stop");
                     continue;
                 }
                 if (board->diagnostic_turn_active_) {
@@ -486,7 +486,7 @@ private:
                                     "robot_diag_console", 4096, this, 1,
                                     nullptr, 1) == pdPASS) {
             ESP_LOGI(TAG,
-                     "ROBOT_DIAG console ready: calibration_status; calibration_begin_straight; calibration_end_straight <mm>; calibration_begin_turn; calibration_end_turn <deg>; calibration_commit; calibration_abort; camera_capture; camera_dump; camera_describe; camera_nav; robot_obstacle; robot_odometry; robot_encoder; robot_set_home; robot_return_home; navigation_status; scan_obstacle_shadow; bypass_obstacle_once; navigate_autonomous_12s; continue_forward_once; robot_move fwd|back 1..5000 10..20; robot_turn left|right 1..180 10..20; robot_stop");
+                             "ROBOT_DIAG console ready: calibration_status; calibration_begin_straight; calibration_end_straight <mm>; calibration_begin_turn; calibration_end_turn <deg>; calibration_commit; calibration_abort; camera_capture; camera_dump; camera_describe; camera_nav; robot_obstacle; robot_odometry; robot_encoder; robot_set_home; robot_return_home; navigation_status; scan_obstacle_shadow; bypass_obstacle_once; navigate_autonomous_12s; continue_forward_once; robot_move fwd|back 1..5000 15..30; robot_turn left|right 1..180 15..30; robot_stop");
         }
     }
 
@@ -562,39 +562,39 @@ private:
                 return 0U;
             });
         const PropertyList continuous_motion_property({
-            Property("speed", kPropertyTypeInteger, 20, 10, 20),
+            Property("speed", kPropertyTypeInteger, 20, 15, 30),
             Property("continuous", kPropertyTypeBoolean, true),
         });
         const PropertyList distance_motion_property({
             Property("distance_mm", kPropertyTypeInteger, 500, 1, 5000),
             Property("forward", kPropertyTypeBoolean, true),
-            Property("speed", kPropertyTypeInteger, 15, 10, 20),
+            Property("speed", kPropertyTypeInteger, 15, 15, 30),
         });
         const PropertyList turn_and_move_property({
             Property("direction", kPropertyTypeString),
             Property("distance_mm", kPropertyTypeInteger, 500, 1, 5000),
-            Property("turn_speed", kPropertyTypeInteger, 15, 10, 20),
-            Property("drive_speed", kPropertyTypeInteger, 15, 10, 20),
+            Property("turn_speed", kPropertyTypeInteger, 15, 15, 30),
+            Property("drive_speed", kPropertyTypeInteger, 15, 15, 30),
         });
         const PropertyList config_speed_property({
-            Property("speed", kPropertyTypeInteger, 30, 10, 255),
+            Property("speed", kPropertyTypeInteger, 30, 15, 30),
         });
         const PropertyList enabled_property({
             Property("enabled", kPropertyTypeBoolean),
         });
         const PropertyList navigation_property({
-            Property("speed", kPropertyTypeInteger, 15, 10, 20),
+            Property("speed", kPropertyTypeInteger, 15, 15, 30),
             Property("runtime_seconds", kPropertyTypeInteger, 30, 1, 180),
             Property("camera_guidance", kPropertyTypeBoolean, true),
         });
         const PropertyList return_home_property({
-            Property("speed", kPropertyTypeInteger, 12, 10, 20),
+            Property("speed", kPropertyTypeInteger, 15, 15, 30),
             Property("camera_guidance", kPropertyTypeBoolean, true),
         });
         const PropertyList turn_revolutions_property({
             Property("direction", kPropertyTypeString),
             Property("revolutions", kPropertyTypeInteger, 1, 2),
-            Property("speed", kPropertyTypeInteger, 15, 10, 20),
+            Property("speed", kPropertyTypeInteger, 15, 15, 30),
         });
         // The individual read-only tools below are retained in source for
         // diagnostics history, but are consolidated into get_diagnostics so
@@ -976,7 +976,7 @@ private:
             });
         mcp_server.AddTool(
             "self.robot.set_speed",
-            "Đặt tốc độ runtime của robot trong dải STM32 cho phép 10 đến 255. Chỉ xác nhận với người dùng sau khi STM32 ACK và đọc lại đúng giá trị. Giai đoạn hiện tại lệnh chuyển động AI ngắn vẫn giới hạn an toàn 10 đến 20.",
+            "Đặt tốc độ di chuyển AI trong dải 15 đến 30. Chỉ xác nhận với người dùng sau khi STM32 ACK và đọc lại đúng giá trị; không suy diễn tốc độ từ bộ nhớ hội thoại.",
             config_speed_property,
             [this](const PropertyList& properties) -> ReturnValue {
                 const int requested = properties["speed"].value<int>();
@@ -1137,7 +1137,7 @@ private:
             "self.robot.turn_left",
             "Cho robot xoay trái. Nếu câu nói có số độ (quay/xoay/rẽ trái X độ), dùng degrees để quay vòng kín đến đúng góc; nếu không có góc thì dùng nhịp/liên tục như cũ.",
             PropertyList({
-                Property("speed", kPropertyTypeInteger, 20, 10, 20),
+                Property("speed", kPropertyTypeInteger, 20, 15, 30),
                 Property("continuous", kPropertyTypeBoolean, true),
                 Property("degrees", kPropertyTypeInteger, 1, 180),
             }),
@@ -1180,7 +1180,7 @@ private:
             "self.robot.turn_right",
             "Cho robot xoay phải. Nếu câu nói có số độ (quay/xoay/rẽ phải X độ), dùng degrees để quay vòng kín đến đúng góc; nếu không có góc thì dùng nhịp/liên tục như cũ.",
             PropertyList({
-                Property("speed", kPropertyTypeInteger, 20, 10, 20),
+                Property("speed", kPropertyTypeInteger, 20, 15, 30),
                 Property("continuous", kPropertyTypeBoolean, true),
                 Property("degrees", kPropertyTypeInteger, 1, 180),
             }),
@@ -1224,7 +1224,7 @@ private:
             "Xoay robot liên tục tại chỗ sang trái hoặc phải cho tới khi người dùng ra lệnh dừng. Heartbeat được firmware gửi tự động. Tool này không nhắm góc; nếu người dùng nói số độ phải dùng self.robot.turn_relative.",
             PropertyList({
                 Property("direction", kPropertyTypeString),
-                Property("speed", kPropertyTypeInteger, 20, 10, 20),
+                Property("speed", kPropertyTypeInteger, 20, 15, 30),
             }),
             [this](const PropertyList& properties) -> ReturnValue {
                 if (mission_manager_.IsActive()) {
@@ -1248,7 +1248,7 @@ private:
             PropertyList({
                 Property("direction", kPropertyTypeString),
                 Property("degrees", kPropertyTypeInteger, 1, 180),
-                Property("speed", kPropertyTypeInteger, 15, 10, 20),
+            Property("speed", kPropertyTypeInteger, 15, 15, 30),
             }),
             [this](const PropertyList& properties) -> ReturnValue {
                 if (mission_manager_.IsActive()) {
@@ -1368,7 +1368,7 @@ private:
             "Yêu cầu STM32 quay tới Heading tuyệt đối -180..180 độ bằng vòng kín Heading hợp nhất từ Encoder + MPU6050 Gyro Z; chờ DONE. Dùng cho câu như quay về hướng 0 độ. Chỉ xác nhận hoàn tất khi completed=true.",
             PropertyList({
                 Property("heading", kPropertyTypeInteger, -180, 180),
-                Property("speed", kPropertyTypeInteger, 15, 10, 20),
+            Property("speed", kPropertyTypeInteger, 15, 15, 30),
             }),
             [this](const PropertyList& properties) -> ReturnValue {
                 if (mission_manager_.IsActive()) {

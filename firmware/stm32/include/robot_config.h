@@ -119,8 +119,10 @@ static constexpr uint32_t ROBOT_LINK_TIMEOUT_MS = 1500;
 static constexpr uint32_t ROBOT_AI_SESSION_TIMEOUT_MS = 30000;
 static constexpr uint32_t ROBOT_MOTION_LEASE_TIMEOUT_MS = 700;
 static constexpr uint32_t ROBOT_AI_MOTION_PULSE_MS = 650;
-static constexpr int16_t ROBOT_AI_SPEED_MAX = 20;
-static constexpr int16_t ROBOT_AI_SPEED_MIN = 10;
+// AI motion speed is intentionally separate from the manual PS2 range.
+// Voice-controlled motion accepts only the commissioned 15..30 range.
+static constexpr int16_t ROBOT_AI_SPEED_MAX = 30;
+static constexpr int16_t ROBOT_AI_SPEED_MIN = 15;
 static constexpr uint32_t ROBOT_AI_DISTANCE_MAX_MM = 5000;
 static constexpr uint32_t ROBOT_AI_DISTANCE_TIMEOUT_MS = 30000;
 static constexpr uint32_t ROBOT_AI_DISTANCE_PROGRESS_MS = 250;
@@ -131,18 +133,15 @@ static constexpr uint32_t ROBOT_AI_HEARTBEAT_MS = 200;
 
 // Heading closed-loop turns. The controller estimates yaw rate, predicts the
 // mechanical coast angle and uses short correction pulses close to target.
-static constexpr int16_t TURN_MIN_SPEED = 10;
-static constexpr int16_t TURN_MAX_SPEED = 20;
+static constexpr int16_t TURN_MIN_SPEED = 15;
+static constexpr int16_t TURN_MAX_SPEED = 30;
 static constexpr float TURN_SLOW_ZONE_DEG = 25.0f;
 static constexpr float TURN_PULSE_ZONE_DEG = 8.0f;
-// Angle-command turns use the fused Heading source and must account for the
-// estimator's quantization plus the chassis' mechanical coast.  A 0.5-degree
-// acceptance window was below the repeatable resolution observed on HIL and
-// caused valid near-target turns to timeout.  Ground HIL reproduced final
-// errors in the 2.2..3.6-degree range on direction changes, so use the
-// smallest practical bounded margin above that observation while keeping
-// correction pulses active near target.
-static constexpr float TURN_TOLERANCE_DEG = 4.0f;
+// Angle-command turns use the fused Heading source and finish only inside the
+// public +/-0.5-degree accuracy contract.  Bounded correction pulses remain
+// active near target so this is a measured completion window, not a display
+// rounding rule.
+static constexpr float TURN_TOLERANCE_DEG = 0.5f;
 static constexpr float TURN_RATE_FILTER = 0.30f;
 static constexpr float TURN_PREDICT_TIME_S = 0.18f;
 static constexpr float TURN_SETTLE_RATE_DEG_S = 2.0f;

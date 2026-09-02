@@ -604,6 +604,15 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     return;
   }
 
+  // Keep the position error coherent with the heading used by the settle
+  // check even when the fusion sample sequence is temporarily unchanged.
+  // Previously aiTurnErrorDeg_ was refreshed only in the fresh-sample branch;
+  // after a fast turn this could leave a stale in-window error while the
+  // current Heading was still outside the target window, blocking correction
+  // pulses indefinitely.
+  aiTurnErrorDeg_ = HeadingFusion::shortestDelta(
+      aiTurnTargetDeg_, currentHeadingDeg());
+
   // An absolute turn can legitimately be a no-op (for example Return Home
   // already being aligned with HOME).  It does not energize the motors, so a
   // missing ultrasonic echo must not turn this safe completion into an

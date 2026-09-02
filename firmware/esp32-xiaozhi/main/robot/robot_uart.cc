@@ -15,11 +15,9 @@
 namespace {
 constexpr const char* kTag = "RobotUart";
 constexpr size_t kDriverBufferSize = 1024;
-// The assembled chassis does not reliably break static friction at the
-// protocol minimum of 10. Keep turns at the commissioned minimum, but give
-// translation commands a small torque margin. The STM32-local wheel PID
-// remains disabled because each motor driver already closes its own loop.
-constexpr int kMinimumDriveSpeed = 12;
+// AI motion uses the commissioned 15..30 range. The STM32 parser applies the
+// same contract, while PS2 remains a separate manual-control path.
+constexpr int kMinimumDriveSpeed = 15;
 
 uint32_t NowMs() {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
@@ -109,11 +107,11 @@ bool RobotUart::Begin() {
 }
 
 int RobotUart::ClampSpeed(int speed) {
-    return std::max(10, std::min(speed, 20));
+    return std::max(15, std::min(speed, 30));
 }
 
 int RobotUart::ClampDriveSpeed(int speed) {
-    return std::max(kMinimumDriveSpeed, std::min(speed, 20));
+    return std::max(kMinimumDriveSpeed, std::min(speed, 30));
 }
 
 bool RobotUart::SendFrame(const char* body) {
