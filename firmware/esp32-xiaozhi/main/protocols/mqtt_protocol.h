@@ -70,6 +70,8 @@ private:
     size_t audio_jitter_max_ = 0;
     int64_t last_audio_gap_log_us_ = 0;
     std::mutex audio_reorder_mutex_;
+    std::mutex audio_dispatch_mutex_;
+    uint32_t audio_reorder_generation_ = 0;
     esp_timer_handle_t audio_reorder_timer_ = nullptr;
     bool audio_reorder_timer_armed_ = false;
     esp_timer_handle_t reconnect_timer_;
@@ -79,7 +81,10 @@ private:
     std::string DecodeHexString(const std::string& hex_string);
     void ResetAudioReorderState();
     void QueueAudioPacket(uint32_t sequence, std::unique_ptr<AudioStreamPacket> packet);
-    void DrainAudioReorderBuffer(bool force_gap);
+    void DrainAudioReorderBuffer(bool force_gap,
+                                 std::deque<std::unique_ptr<AudioStreamPacket>>& ready_packets);
+    void DispatchAudioPackets(std::deque<std::unique_ptr<AudioStreamPacket>>& ready_packets,
+                              uint32_t generation);
     void LogLateAudioPacket(uint32_t sequence);
     void UpdateAudioReorderTimer();
 

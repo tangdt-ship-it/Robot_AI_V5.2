@@ -800,20 +800,7 @@ void Application::HandleWakeWordDetectedEvent() {
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
 
     if (state == kDeviceStateIdle) {
-        audio_service_.EncodeWakeWord();
-        auto wake_word = audio_service_.GetLastWakeWord();
-
-        if (!protocol_->IsAudioChannelOpened()) {
-            SetDeviceState(kDeviceStateConnecting);
-            // Schedule to let the state change be processed first (UI update),
-            // then continue with OpenAudioChannel which may block for ~1 second
-            Schedule([this, wake_word]() {
-                ContinueWakeWordInvoke(wake_word);
-            });
-            return;
-        }
-        // Channel already opened, continue directly
-        ContinueWakeWordInvoke(wake_word);
+        BeginWakeWordInvoke(wake_word);
     } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
         AbortSpeaking(kAbortReasonWakeWordDetected);
         // Clear send queue to avoid sending residues to server
@@ -836,28 +823,86 @@ void Application::HandleWakeWordDetectedEvent() {
     }
 }
 
+void Application::BeginWakeWordInvoke(const std::string& wake_word) {
+    wake_latency_start_us_ = esp_timer_get_time();
+    wake_encode_begin_us_ = esp_timer_get_time();
+    audio_service_.EncodeWakeWord();
+    wake_encode_end_us_ = esp_timer_get_time();
+
+    if (!protocol_) {
+        ESP_LOGW(TAG, "Wake word invoke aborted: protocol unavailable");
+        audio_service_.EnableWakeWordDetection(true);
+        return;
+    }
+
+    // Always enter CONNECTING before continuing, including when the audio
+    // channel is already open. ContinueWakeWordInvoke rejects other states.
+    if (!SetDeviceState(kDeviceStateConnecting)) {
+        ESP_LOGW(TAG, "Wake word invoke rejected from state %d", (int)GetDeviceState());
+        audio_service_.EnableWakeWordDetection(true);
+        return;
+    }
+
+    if (!protocol_->IsAudioChannelOpened()) {
+        // Let the state transition/UI update complete before the potentially
+        // blocking OpenAudioChannel call.
+        Schedule([this, wake_word]() {
+            ContinueWakeWordInvoke(wake_word);
+        });
+        return;
+    }
+
+    ContinueWakeWordInvoke(wake_word);
+}
+
 void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     // Check state again in case it was changed during scheduling
     if (GetDeviceState() != kDeviceStateConnecting) {
         return;
     }
 
+    if (!protocol_) {
+        ESP_LOGW(TAG, "Wake word invoke aborted: protocol unavailable");
+        SetDeviceState(kDeviceStateIdle);
+        audio_service_.EnableWakeWordDetection(true);
+        return;
+    }
+
+    // Wake-word handling can reach this function with an already-open channel;
+    // performance mode must be selected before any audio-channel work.
+    auto& board = Board::GetInstance();
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+
+    int64_t open_begin_us = 0;
+    int64_t open_end_us = 0;
     if (!protocol_->IsAudioChannelOpened()) {
+        open_begin_us = esp_timer_get_time();
         if (!protocol_->OpenAudioChannel()) {
+            ESP_LOGW(TAG, "Wake word audio channel open failed; returning to idle");
+            SetDeviceState(kDeviceStateIdle);
             audio_service_.EnableWakeWordDetection(true);
             return;
         }
+        open_end_us = esp_timer_get_time();
     }
 
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
 #if CONFIG_SEND_WAKE_WORD_DATA
     // Encode and send the wake word data to the server
+    const int64_t upload_begin_us = esp_timer_get_time();
     while (auto packet = audio_service_.PopWakeWordPacket()) {
         protocol_->SendAudio(std::move(packet));
     }
+    const int64_t upload_end_us = esp_timer_get_time();
     // Set the chat state to wake word detected
     protocol_->SendWakeWordDetected(wake_word);
     SetListeningMode(GetDefaultListeningMode());
+    const int64_t total_end_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "WAKE,LATENCY,OPEN_MS=%lld,ENCODE_MS=%lld,UPLOAD_MS=%lld,TOTAL_MS=%lld",
+             (long long)((open_end_us - open_begin_us) / 1000),
+             (long long)((wake_encode_end_us_ - wake_encode_begin_us_) / 1000),
+             (long long)((upload_end_us - upload_begin_us) / 1000),
+             (long long)((total_end_us - wake_latency_start_us_) / 1000));
 #else
     // Set flag to play popup sound after state changes to listening
     // (PlaySound here would be cleared by ResetDecoder in EnableVoiceProcessing)
@@ -1041,18 +1086,13 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
     auto state = GetDeviceState();
     
     if (state == kDeviceStateIdle) {
-        audio_service_.EncodeWakeWord();
-
-        if (!protocol_->IsAudioChannelOpened()) {
-            SetDeviceState(kDeviceStateConnecting);
-            // Schedule to let the state change be processed first (UI update)
-            Schedule([this, wake_word]() {
-                ContinueWakeWordInvoke(wake_word);
-            });
-            return;
-        }
-        // Channel already opened, continue directly
-        ContinueWakeWordInvoke(wake_word);
+        // WakeWordInvoke may be called from a non-main task. Keep the complete
+        // wake transition serialized on the application task.
+        Schedule([this, wake_word]() {
+            if (GetDeviceState() == kDeviceStateIdle) {
+                BeginWakeWordInvoke(wake_word);
+            }
+        });
     } else if (state == kDeviceStateSpeaking) {
         Schedule([this]() {
             AbortSpeaking(kAbortReasonNone);

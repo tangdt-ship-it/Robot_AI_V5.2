@@ -103,6 +103,15 @@ struct DebugStatistics {
     uint32_t playback_count = 0;
 };
 
+enum class AudioPlaybackState {
+    kIdle,
+    kStartupPrebuffer,
+    kPlaying,
+    kWaitingForNextFrame,
+    kTrueUnderrun,
+    kRebuffer,
+};
+
 class AudioService {
 public:
     AudioService();
@@ -184,12 +193,12 @@ private:
     esp_timer_handle_t audio_power_timer_ = nullptr;
     std::chrono::steady_clock::time_point last_input_time_;
     std::chrono::steady_clock::time_point last_output_time_;
-    bool playback_started_ = false;
+    AudioPlaybackState playback_state_ = AudioPlaybackState::kIdle;
     size_t playback_queue_min_ = MAX_PLAYBACK_TASKS_IN_QUEUE;
     uint32_t playback_underrun_count_ = 0;
     int64_t last_playback_underrun_log_us_ = 0;
     int64_t last_playback_queue_log_us_ = 0;
-    bool playback_waiting_for_more_ = false;
+    uint32_t playback_reset_generation_ = 0;
 
     void AudioInputTask();
     void AudioOutputTask();

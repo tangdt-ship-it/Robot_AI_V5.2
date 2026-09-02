@@ -62,6 +62,7 @@ void CustomWakeWord::ParseWakenetModelConfig() {
         }
         if (cJSON_IsNumber(threshold)) {
             threshold_ = threshold->valuedouble;
+            threshold_source_ = "asset:index.json";
         }
         if (cJSON_IsArray(commands)) {
             for (int i = 0; i < cJSON_GetArraySize(commands); i++) {
@@ -85,12 +86,13 @@ void CustomWakeWord::ParseWakenetModelConfig() {
 bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     codec_ = codec;
     commands_.clear();
+    threshold_ = CONFIG_CUSTOM_WAKE_WORD_THRESHOLD / 100.0f;
+    threshold_source_ = "CONFIG_CUSTOM_WAKE_WORD_THRESHOLD";
 
     if (models_list == nullptr) {
         language_ = "cn";
         models_ = esp_srmodel_init("model");
 #ifdef CONFIG_CUSTOM_WAKE_WORD
-        threshold_ = CONFIG_CUSTOM_WAKE_WORD_THRESHOLD / 100.0f;
         commands_.push_back({CONFIG_CUSTOM_WAKE_WORD, CONFIG_CUSTOM_WAKE_WORD_DISPLAY, "wake"});
 #endif
     } else {
@@ -118,6 +120,8 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
     multinet_ = esp_mn_handle_from_name(mn_name_);
     multinet_model_data_ = multinet_->create(mn_name_, duration_);
     multinet_->set_det_threshold(multinet_model_data_, threshold_);
+    ESP_LOGI(TAG, "WAKE,THRESHOLD_SOURCE=%s,CONFIG_THRESHOLD=%d,RUNTIME_THRESHOLD=%.3f",
+             threshold_source_, CONFIG_CUSTOM_WAKE_WORD_THRESHOLD, threshold_);
     esp_mn_commands_clear();
     for (int i = 0; i < commands_.size(); i++) {
         esp_mn_commands_add(i + 1, commands_[i].command.c_str());
@@ -172,10 +176,18 @@ void CustomWakeWord::Feed(const std::vector<int16_t>& data) {
         
         if (mn_state == ESP_MN_STATE_DETECTED) {
             esp_mn_results_t *mn_result = multinet_->get_results(multinet_model_data_);
-            for (int i = 0; i < mn_result->num && running_; i++) {
-                ESP_LOGI(TAG, "Custom wake word detected: command_id=%d, string=%s, prob=%f", 
-                        mn_result->command_id[i], mn_result->string, mn_result->prob[i]);
-                auto& command = commands_[mn_result->command_id[i] - 1];
+            if (mn_result == nullptr) {
+                ESP_LOGW(TAG, "Wake word detector returned no result");
+            }
+            for (int i = 0; mn_result != nullptr && i < mn_result->num && running_; i++) {
+                const int command_id = mn_result->command_id[i];
+                ESP_LOGI(TAG, "WAKE,DETECTED,PROB=%.3f,THRESHOLD=%.3f,COMMAND_ID=%d",
+                         mn_result->prob[i], threshold_, command_id);
+                if (command_id < 1 || command_id > static_cast<int>(commands_.size())) {
+                    ESP_LOGW(TAG, "Ignoring invalid wake command id %d", command_id);
+                    continue;
+                }
+                auto& command = commands_[command_id - 1];
                 if (command.action == "wake") {
                     last_detected_wake_word_ = command.text;
                     running_ = false;

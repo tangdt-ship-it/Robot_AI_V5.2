@@ -36,12 +36,18 @@ MqttProtocol::MqttProtocol() {
     esp_timer_create_args_t audio_reorder_timer_args = {
         .callback = [](void* arg) {
             auto* protocol = static_cast<MqttProtocol*>(arg);
-            std::lock_guard<std::mutex> lock(protocol->audio_reorder_mutex_);
-            protocol->audio_reorder_timer_armed_ = false;
-            if (*protocol->alive_) {
-                protocol->DrainAudioReorderBuffer(true);
-                protocol->UpdateAudioReorderTimer();
+            std::deque<std::unique_ptr<AudioStreamPacket>> ready_packets;
+            uint32_t dispatch_generation = 0;
+            {
+                std::lock_guard<std::mutex> lock(protocol->audio_reorder_mutex_);
+                protocol->audio_reorder_timer_armed_ = false;
+                if (*protocol->alive_) {
+                    protocol->DrainAudioReorderBuffer(true, ready_packets);
+                    protocol->UpdateAudioReorderTimer();
+                    dispatch_generation = protocol->audio_reorder_generation_;
+                }
             }
+            protocol->DispatchAudioPackets(ready_packets, dispatch_generation);
         },
         .arg = this,
         .dispatch_method = ESP_TIMER_TASK,
@@ -213,6 +219,9 @@ bool MqttProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
 }
 
 void MqttProtocol::ResetAudioReorderState() {
+    // Serialize reset against dispatch, but never invoke the application
+    // callback while either state mutex is held.
+    std::lock_guard<std::mutex> dispatch_lock(audio_dispatch_mutex_);
     std::lock_guard<std::mutex> lock(audio_reorder_mutex_);
     if (audio_reorder_timer_ != nullptr) {
         esp_timer_stop(audio_reorder_timer_);
@@ -226,6 +235,7 @@ void MqttProtocol::ResetAudioReorderState() {
     audio_reordered_count_ = 0;
     audio_jitter_max_ = 0;
     last_audio_gap_log_us_ = 0;
+    ++audio_reorder_generation_;
 }
 
 void MqttProtocol::UpdateAudioReorderTimer() {
@@ -259,7 +269,8 @@ void MqttProtocol::LogLateAudioPacket(uint32_t sequence) {
     }
 }
 
-void MqttProtocol::DrainAudioReorderBuffer(bool force_gap) {
+void MqttProtocol::DrainAudioReorderBuffer(
+    bool force_gap, std::deque<std::unique_ptr<AudioStreamPacket>>& ready_packets) {
     while (!audio_reorder_buffer_.empty()) {
         auto expected = std::find_if(audio_reorder_buffer_.begin(), audio_reorder_buffer_.end(),
             [this](const PendingAudioPacket& pending) {
@@ -278,17 +289,15 @@ void MqttProtocol::DrainAudioReorderBuffer(bool force_gap) {
                          static_cast<unsigned long>(sequence),
                          static_cast<unsigned long>(audio_reordered_count_));
             }
-            if (on_incoming_audio_ != nullptr) {
-                on_incoming_audio_(std::move(packet));
-            }
-            force_gap = audio_reorder_buffer_.size() >= kTargetAudioJitterFrames;
+            ready_packets.push_back(std::move(packet));
+            force_gap = audio_reorder_buffer_.size() >= kMaxAudioJitterFrames;
             continue;
         }
 
         // A packet is ahead of the expected sequence. Hold it until the
         // bounded reorder window is reached so ordinary UDP reordering is not
         // mistaken for loss.
-        if (!force_gap && audio_reorder_buffer_.size() < kTargetAudioJitterFrames) {
+        if (!force_gap && audio_reorder_buffer_.size() < kMaxAudioJitterFrames) {
             break;
         }
 
@@ -318,42 +327,70 @@ void MqttProtocol::DrainAudioReorderBuffer(bool force_gap) {
     }
 }
 
+void MqttProtocol::DispatchAudioPackets(
+    std::deque<std::unique_ptr<AudioStreamPacket>>& ready_packets, uint32_t generation) {
+    std::lock_guard<std::mutex> dispatch_lock(audio_dispatch_mutex_);
+    {
+        std::lock_guard<std::mutex> reorder_lock(audio_reorder_mutex_);
+        if (generation != audio_reorder_generation_) {
+            ready_packets.clear();
+            return;
+        }
+    }
+    if (on_incoming_audio_ == nullptr) {
+        ready_packets.clear();
+        return;
+    }
+    while (!ready_packets.empty()) {
+        auto packet = std::move(ready_packets.front());
+        ready_packets.pop_front();
+        on_incoming_audio_(std::move(packet));
+    }
+}
+
 void MqttProtocol::QueueAudioPacket(uint32_t sequence, std::unique_ptr<AudioStreamPacket> packet) {
-    std::lock_guard<std::mutex> lock(audio_reorder_mutex_);
-    if (packet == nullptr) {
-        return;
-    }
-    if (!expected_remote_sequence_valid_) {
-        expected_remote_sequence_ = sequence;
-        expected_remote_sequence_valid_ = true;
-    }
+    std::deque<std::unique_ptr<AudioStreamPacket>> ready_packets;
+    uint32_t dispatch_generation = 0;
+    {
+        std::lock_guard<std::mutex> lock(audio_reorder_mutex_);
+        if (packet == nullptr) {
+            return;
+        }
+        if (!expected_remote_sequence_valid_) {
+            expected_remote_sequence_ = sequence;
+            expected_remote_sequence_valid_ = true;
+        }
 
-    // Signed subtraction gives a wrap-safe ordering as long as a stream does
-    // not span more than half the uint32 sequence space.
-    const int32_t signed_distance = static_cast<int32_t>(sequence - expected_remote_sequence_);
-    if (signed_distance < 0) {
-        LogLateAudioPacket(sequence);
-        return;
-    }
-    if (std::find_if(audio_reorder_buffer_.begin(), audio_reorder_buffer_.end(),
-            [sequence](const PendingAudioPacket& pending) {
-                return pending.sequence == sequence;
-            }) != audio_reorder_buffer_.end()) {
-        LogLateAudioPacket(sequence);
-        return;
-    }
+        // Signed subtraction gives a wrap-safe ordering as long as a stream
+        // does not span more than half the uint32 sequence space.
+        const int32_t signed_distance = static_cast<int32_t>(sequence - expected_remote_sequence_);
+        if (signed_distance < 0) {
+            LogLateAudioPacket(sequence);
+            return;
+        }
+        if (std::find_if(audio_reorder_buffer_.begin(), audio_reorder_buffer_.end(),
+                [sequence](const PendingAudioPacket& pending) {
+                    return pending.sequence == sequence;
+                }) != audio_reorder_buffer_.end()) {
+            LogLateAudioPacket(sequence);
+            return;
+        }
 
-    audio_reorder_buffer_.push_back({sequence, std::move(packet)});
-    const size_t previous_jitter_max = audio_jitter_max_;
-    audio_jitter_max_ = std::max(audio_jitter_max_, audio_reorder_buffer_.size());
-    if (audio_jitter_max_ > previous_jitter_max && audio_jitter_max_ > 1) {
-        ESP_LOGI(TAG, "AUDIO,JITTER_MAX=%u", static_cast<unsigned>(audio_jitter_max_));
-    }
+        audio_reorder_buffer_.push_back({sequence, std::move(packet)});
+        const size_t previous_jitter_max = audio_jitter_max_;
+        audio_jitter_max_ = std::max(audio_jitter_max_, audio_reorder_buffer_.size());
+        if (audio_jitter_max_ > previous_jitter_max && audio_jitter_max_ > 1) {
+            ESP_LOGI(TAG, "AUDIO,JITTER_MAX=%u", static_cast<unsigned>(audio_jitter_max_));
+        }
 
-    const bool bounded_window_reached = audio_reorder_buffer_.size() >= kTargetAudioJitterFrames ||
-        audio_reorder_buffer_.size() > kMaxAudioJitterFrames;
-    DrainAudioReorderBuffer(bounded_window_reached);
-    UpdateAudioReorderTimer();
+        // Target is only the desired buffering level. A loss is declared
+        // only after the reorder deadline or the hard memory bound.
+        const bool hard_bound_reached = audio_reorder_buffer_.size() >= kMaxAudioJitterFrames;
+        DrainAudioReorderBuffer(hard_bound_reached, ready_packets);
+        UpdateAudioReorderTimer();
+        dispatch_generation = audio_reorder_generation_;
+    }
+    DispatchAudioPackets(ready_packets, dispatch_generation);
 }
 
 void MqttProtocol::CloseAudioChannel(bool send_goodbye) {

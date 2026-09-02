@@ -145,6 +145,13 @@ private:
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
+    // Wake-word latency instrumentation. The encoder itself runs asynchronously;
+    // ENCODE_MS records enqueue overhead and UPLOAD_MS includes any wait for
+    // encoded wake-word packets to become available.
+    int64_t wake_latency_start_us_ = 0;
+    int64_t wake_encode_begin_us_ = 0;
+    int64_t wake_encode_end_us_ = 0;
+
 
     // Event handlers
     void HandleStateChangedEvent();
@@ -156,6 +163,7 @@ private:
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
     void ContinueOpenAudioChannel(ListeningMode mode);
+    void BeginWakeWordInvoke(const std::string& wake_word);
     void ContinueWakeWordInvoke(const std::string& wake_word);
 
     // Activation task (runs in background)

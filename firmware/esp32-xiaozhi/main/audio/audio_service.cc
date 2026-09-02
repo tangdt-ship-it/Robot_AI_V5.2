@@ -189,12 +189,12 @@ void AudioService::Stop() {
     audio_decode_queue_.clear();
     audio_playback_queue_.clear();
     audio_testing_queue_.clear();
-    playback_started_ = false;
+    playback_state_ = AudioPlaybackState::kIdle;
     playback_queue_min_ = MAX_PLAYBACK_TASKS_IN_QUEUE;
     playback_underrun_count_ = 0;
     last_playback_underrun_log_us_ = 0;
     last_playback_queue_log_us_ = 0;
-    playback_waiting_for_more_ = false;
+    ++playback_reset_generation_;
     audio_queue_cv_.notify_all();
 }
 
@@ -307,62 +307,80 @@ void AudioService::AudioInputTask() {
 void AudioService::AudioOutputTask() {
     while (true) {
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-        if (playback_started_ && playback_waiting_for_more_) {
-            const bool packet_arrived = audio_queue_cv_.wait_for(lock,
-                std::chrono::milliseconds(OPUS_FRAME_DURATION_MS * PLAYBACK_PREBUFFER_TARGET_FRAMES),
-                [this]() { return !audio_playback_queue_.empty() || service_stopped_; });
+        if (playback_state_ == AudioPlaybackState::kWaitingForNextFrame) {
+            // The previous frame has completed. Wait for a continuation
+            // without counting the queue's transient empty state as a loss.
+            // If the stream really continues after this deadline, enter the
+            // recovery path and count one confirmed underrun.
+            const uint32_t wait_generation = playback_reset_generation_;
+            audio_queue_cv_.wait(lock, [this, wait_generation]() {
+                return !audio_playback_queue_.empty() || service_stopped_ ||
+                    playback_reset_generation_ != wait_generation;
+            });
             if (service_stopped_) {
                 break;
             }
-            if (audio_playback_queue_.empty()) {
-                // A quiet period completed the current short stream. The
-                // next stream will get a fresh prebuffer window.
-                playback_started_ = false;
-                playback_waiting_for_more_ = false;
+            if (playback_reset_generation_ != wait_generation) {
+                playback_state_ = AudioPlaybackState::kIdle;
                 continue;
             }
-            if (packet_arrived) {
-                ++playback_underrun_count_;
-                const int64_t now_us = esp_timer_get_time();
-                if (last_playback_underrun_log_us_ == 0 || now_us - last_playback_underrun_log_us_ >= 1000000) {
-                    ESP_LOGW(TAG, "AUDIO,UNDERRUN,COUNT=%lu",
-                             static_cast<unsigned long>(playback_underrun_count_));
-                    last_playback_underrun_log_us_ = now_us;
-                }
+            if (audio_playback_queue_.empty()) {
+                continue;
             }
-            // Re-enter the bounded prebuffer path after a real queue gap.
-            playback_started_ = false;
-            playback_waiting_for_more_ = false;
-        } else {
+
+            playback_state_ = AudioPlaybackState::kTrueUnderrun;
+            ++playback_underrun_count_;
+            const int64_t now_us = esp_timer_get_time();
+            if (last_playback_underrun_log_us_ == 0 || now_us - last_playback_underrun_log_us_ >= 1000000) {
+                ESP_LOGW(TAG, "AUDIO,UNDERRUN,COUNT=%lu",
+                         static_cast<unsigned long>(playback_underrun_count_));
+                last_playback_underrun_log_us_ = now_us;
+            }
+            playback_state_ = AudioPlaybackState::kRebuffer;
+        }
+
+        const bool recovering = playback_state_ == AudioPlaybackState::kRebuffer;
+        if (playback_state_ == AudioPlaybackState::kIdle || recovering) {
             audio_queue_cv_.wait(lock, [this]() { return !audio_playback_queue_.empty() || service_stopped_; });
             if (service_stopped_) {
                 break;
             }
-        }
 
-        // Wait for two decoded frames before starting a new stream. The
-        // timeout keeps short TTS responses from waiting forever.
-        if (!playback_started_ && audio_playback_queue_.size() < PLAYBACK_PREBUFFER_TARGET_FRAMES) {
-            audio_queue_cv_.wait_for(lock,
-                std::chrono::milliseconds(OPUS_FRAME_DURATION_MS * PLAYBACK_PREBUFFER_TARGET_FRAMES),
-                [this]() {
-                    return service_stopped_ ||
-                        audio_playback_queue_.size() >= PLAYBACK_PREBUFFER_TARGET_FRAMES;
-                });
-            if (service_stopped_) {
-                break;
+            playback_state_ = AudioPlaybackState::kStartupPrebuffer;
+            const uint32_t prebuffer_generation = playback_reset_generation_;
+            if (audio_playback_queue_.size() < PLAYBACK_PREBUFFER_TARGET_FRAMES) {
+                audio_queue_cv_.wait_for(lock,
+                    std::chrono::milliseconds(OPUS_FRAME_DURATION_MS * PLAYBACK_PREBUFFER_TARGET_FRAMES),
+                    [this, prebuffer_generation]() {
+                        return service_stopped_ ||
+                            playback_reset_generation_ != prebuffer_generation ||
+                            audio_playback_queue_.size() >= PLAYBACK_PREBUFFER_TARGET_FRAMES;
+                    });
+                if (service_stopped_) {
+                    break;
+                }
+                if (playback_reset_generation_ != prebuffer_generation) {
+                    playback_state_ = AudioPlaybackState::kIdle;
+                    continue;
+                }
+                if (audio_playback_queue_.empty()) {
+                    playback_state_ = AudioPlaybackState::kIdle;
+                    continue;
+                }
             }
-            if (audio_playback_queue_.empty()) {
-                continue;
-            }
-        }
 
-        if (!playback_started_) {
-            playback_started_ = true;
+            if (recovering) {
+                ESP_LOGI(TAG, "AUDIO,REBUFFER,QUEUED=%u", static_cast<unsigned>(audio_playback_queue_.size()));
+            }
+            playback_state_ = AudioPlaybackState::kPlaying;
             playback_queue_min_ = audio_playback_queue_.size();
-            ESP_LOGI(TAG, "AUDIO,REBUFFER,QUEUED=%u", static_cast<unsigned>(audio_playback_queue_.size()));
         }
 
+        if (playback_state_ != AudioPlaybackState::kPlaying || audio_playback_queue_.empty()) {
+            continue;
+        }
+
+        const uint32_t output_generation = playback_reset_generation_;
         auto task = std::move(audio_playback_queue_.front());
         audio_playback_queue_.pop_front();
         const size_t remaining = audio_playback_queue_.size();
@@ -374,7 +392,6 @@ void AudioService::AudioOutputTask() {
                 last_playback_queue_log_us_ = now_us;
             }
         }
-        playback_waiting_for_more_ = remaining == 0;
         audio_queue_cv_.notify_all();
         lock.unlock();
 
@@ -390,13 +407,48 @@ void AudioService::AudioOutputTask() {
         last_output_time_ = std::chrono::steady_clock::now();
         debug_statistics_.playback_count++;
 
+        lock.lock();
+        if (playback_reset_generation_ != output_generation || service_stopped_) {
+            continue;
+        }
 #if CONFIG_USE_SERVER_AEC
         /* Record the timestamp for server AEC */
         if (task->timestamp > 0) {
-            lock.lock();
             timestamp_queue_.push_back(task->timestamp);
         }
 #endif
+        if (!audio_playback_queue_.empty()) {
+            // The next frame was already queued while the current frame was
+            // being handed to the blocking I2S writer: this is not an
+            // underrun and must not trigger rebuffering.
+            playback_state_ = AudioPlaybackState::kPlaying;
+            continue;
+        }
+
+        // Only after OutputData() has returned do we evaluate whether the
+        // next frame missed its playout deadline. A short TTS stream remains
+        // quiet here and is not falsely counted as an underrun.
+        const uint32_t deadline_generation = playback_reset_generation_;
+        audio_queue_cv_.wait_for(lock, std::chrono::milliseconds(OPUS_FRAME_DURATION_MS),
+            [this, deadline_generation]() {
+                return service_stopped_ ||
+                    playback_reset_generation_ != deadline_generation ||
+                    !audio_playback_queue_.empty();
+            });
+        if (service_stopped_) {
+            break;
+        }
+        if (playback_reset_generation_ != deadline_generation) {
+            playback_state_ = AudioPlaybackState::kIdle;
+            continue;
+        }
+        if (!audio_playback_queue_.empty()) {
+            playback_state_ = AudioPlaybackState::kPlaying;
+        } else {
+            // Defer the counter until a later packet proves that this was a
+            // continuing stream rather than the natural end of short TTS.
+            playback_state_ = AudioPlaybackState::kWaitingForNextFrame;
+        }
     }
 
     ESP_LOGW(TAG, "Audio output task stopped");
@@ -754,12 +806,12 @@ void AudioService::ResetDecoder() {
     audio_decode_queue_.clear();
     audio_playback_queue_.clear();
     audio_testing_queue_.clear();
-    playback_started_ = false;
+    playback_state_ = AudioPlaybackState::kIdle;
     playback_queue_min_ = MAX_PLAYBACK_TASKS_IN_QUEUE;
     playback_underrun_count_ = 0;
     last_playback_underrun_log_us_ = 0;
     last_playback_queue_log_us_ = 0;
-    playback_waiting_for_more_ = false;
+    ++playback_reset_generation_;
     audio_queue_cv_.notify_all();
 }
 
