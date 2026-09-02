@@ -186,10 +186,10 @@ public:
                       uint32_t cancellation_token = 0);
     bool TurnRelative(bool left, int angle_deg, int speed,
                       RobotTurnResult& result,
-                      uint32_t timeout_ms = 13000,
+                      uint32_t timeout_ms = 25000,
                       uint32_t cancellation_token = 0);
     bool TurnAbsolute(int heading_deg, int speed, RobotTurnResult& result,
-                      uint32_t timeout_ms = 13000,
+                      uint32_t timeout_ms = 25000,
                       uint32_t cancellation_token = 0);
 
     // A motion callback may be queued behind a STOP in the MCP executor.  The

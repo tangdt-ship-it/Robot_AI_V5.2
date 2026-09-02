@@ -495,7 +495,7 @@ bool MissionManager::TurnToShadow(float heading_deg, int speed) {
     const int target = static_cast<int>(std::lround(NormalizeHeading(heading_deg)));
     const bool mode_ok = robot_uart_->SetMode(true, 700);
     const bool turn_ok = mode_ok &&
-        robot_uart_->TurnAbsolute(target, speed, result, 13000);
+        robot_uart_->TurnAbsolute(target, speed, result, 25000);
     if (!turn_ok) {
         robot_uart_->Stop(700);
         // STM32 intentionally has a tighter completion tolerance than the
@@ -1676,7 +1676,7 @@ bool MissionManager::TurnTo(float heading_deg) {
         if (lock.locked()) speed = context_.speed;
     }
     const bool ok = robot_uart_->SetMode(true, 700) &&
-                    robot_uart_->TurnAbsolute(target, speed, result, 13000);
+                    robot_uart_->TurnAbsolute(target, speed, result, 25000);
     if (!ok) {
         // STM32 has already transferred motor authority to PS2.  A STOP here
         // would race the operator and reclaim that authority.

@@ -161,7 +161,11 @@ static constexpr uint32_t TURN_CORRECTION_PULSE_FAR_MS = 100;
 static constexpr uint32_t TURN_CORRECTION_COAST_MS = 80;
 static constexpr uint32_t TURN_OVERSHOOT_COAST_MS = 120;
 static constexpr uint32_t TURN_SETTLE_MS = 250;
-static constexpr uint32_t TURN_TIMEOUT_MS = 12000;
+// A 180-degree turn at the minimum commissioned speed can legitimately need
+// more than 12 seconds on the tested chassis. Keep a bounded deadline with
+// enough margin for the full allowed angle; Heading loss, obstacle and STOP
+// still terminate the turn immediately.
+static constexpr uint32_t TURN_TIMEOUT_MS = 24000;
 static constexpr uint32_t TURN_PROGRESS_MS = 250;
 static constexpr int16_t TURN_MAX_RELATIVE_DEG = 180;
 

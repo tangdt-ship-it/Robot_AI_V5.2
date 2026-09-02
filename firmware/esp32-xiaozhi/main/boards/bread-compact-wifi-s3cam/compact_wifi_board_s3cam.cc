@@ -140,7 +140,7 @@ private:
         ESP_LOGI(TAG, "ROBOT_DIAG TURN START dir=%s relative=%d speed=%d",
                  left ? "left" : "right", degrees, speed);
         const bool completed = board->robot_uart_.SetMode(true, 700) &&
-            board->robot_uart_.TurnRelative(left, degrees, speed, result, 13000);
+            board->robot_uart_.TurnRelative(left, degrees, speed, result, 25000);
         if (!completed &&
             board->robot_uart_.MotionCancellationToken() == motion_generation) {
             board->robot_uart_.Stop(700);
@@ -822,7 +822,7 @@ private:
                 }
                 RobotTurnResult turn;
                 const bool turned = robot_uart_.SetMode(true, 700) &&
-                    robot_uart_.TurnRelative(left, 90, turn_speed, turn, 13000,
+                    robot_uart_.TurnRelative(left, 90, turn_speed, turn, 25000,
                                              cancellation_token);
                 if (!turned) {
                     if (robot_uart_.MotionCancellationCurrent(cancellation_token)) {
@@ -1150,7 +1150,7 @@ private:
                     }
                     RobotTurnResult turn;
                     const bool completed = robot_uart_.SetMode(true, 700) &&
-                        robot_uart_.TurnRelative(true, degrees, speed, turn, 13000,
+                        robot_uart_.TurnRelative(true, degrees, speed, turn, 25000,
                                                   cancellation_token);
                     if (!completed &&
                         robot_uart_.MotionCancellationCurrent(cancellation_token)) {
@@ -1193,7 +1193,7 @@ private:
                     }
                     RobotTurnResult turn;
                     const bool completed = robot_uart_.SetMode(true, 700) &&
-                        robot_uart_.TurnRelative(false, degrees, speed, turn, 13000,
+                        robot_uart_.TurnRelative(false, degrees, speed, turn, 25000,
                                                   cancellation_token);
                     if (!completed &&
                         robot_uart_.MotionCancellationCurrent(cancellation_token)) {
@@ -1266,7 +1266,7 @@ private:
                 }
                 RobotTurnResult turn;
                 const bool completed = robot_uart_.SetMode(true, 700) &&
-                    robot_uart_.TurnRelative(left, degrees, speed, turn, 13000,
+                    robot_uart_.TurnRelative(left, degrees, speed, turn, 25000,
                                               cancellation_token);
                 if (!completed &&
                     robot_uart_.MotionCancellationCurrent(cancellation_token)) {
@@ -1301,7 +1301,7 @@ private:
                 }
                 RobotTurnResult turn;
                 const bool completed = robot_uart_.SetMode(true, 700) &&
-                    robot_uart_.TurnAbsolute(heading, speed, turn, 13000,
+                    robot_uart_.TurnAbsolute(heading, speed, turn, 25000,
                                               cancellation_token);
                 if (!completed &&
                     robot_uart_.MotionCancellationCurrent(cancellation_token)) {

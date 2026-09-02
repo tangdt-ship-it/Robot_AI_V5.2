@@ -437,7 +437,7 @@ bool RobotUart::TurnRelative(bool left, int angle_deg, int speed,
     // STM32 may be busy completing the preceding MODE,AI/STOP boundary while
     // camera and sensor telemetry are active. Do not abort a valid turn after
     // the old 700 ms ACK window; once accepted, the terminal wait below still
-    // remains bounded by the caller's 13 s turn timeout.
+    // remains bounded by the caller's 25 s turn timeout.
     const bool started = SendAndWait(command, kResponseAck, 2000,
                                      cancellation_token);
     motion_ack_waiting_ = false;

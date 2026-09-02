@@ -1402,7 +1402,7 @@ void TeachRoute::RunReplayTurnAtWp2() {
         ESP_LOGI(kTag, "ROUTE,REPLAY=B2_SESSION,PASS=1,MODE=AI");
         ok = robot_uart_ != nullptr && robot_uart_->TurnRelative(
             replay_turn_delta_deg_ > 0.0f, static_cast<int>(lroundf(abs_delta)),
-            kReplayB1Speed, result, 13000);
+            kReplayB1Speed, result, 25000);
     } else {
         result.completed = true;
         result.target_deg = 0.0f;
@@ -1889,7 +1889,7 @@ void TeachRoute::RunFullReplay() {
             RobotTurnResult turn_result;
             const bool turned = robot_uart_->TurnRelative(
                 turn_delta > 0.0f, static_cast<int>(lroundf(fabsf(turn_delta))),
-                kReplayB1Speed, turn_result, 13000);
+                kReplayB1Speed, turn_result, 25000);
             if (!turned || !turn_result.completed) {
                 stop_hold("TURN_FAIL");
                 return;
