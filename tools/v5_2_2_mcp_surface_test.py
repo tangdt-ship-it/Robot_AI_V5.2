@@ -101,10 +101,18 @@ def main() -> int:
     ):
         require(board, f'tool_name == "{name}"', f"STOP cancellation token {name}")
 
-    require(board, "revolutions * kSegmentsPerRevolution", "bounded 360-degree revolution expansion")
-    require(board, "kSegmentDegrees = 90", "timeout-safe revolution segment")
-    require(board, "vTaskDelay(pdMS_TO_TICKS(400))", "inter-segment heading settle")
-    require(board, "completed_segments", "revolution completion reporting")
+    require(board, "const int requested_degrees = revolutions * 360",
+            "single-command 360-degree revolution expansion")
+    require(board, "TurnRelative(\n                        left, requested_degrees",
+            "single continuous revolution command")
+    for forbidden in (
+        "kSegmentsPerRevolution",
+        "kSegmentDegrees = 90",
+        "vTaskDelay(pdMS_TO_TICKS(400))",
+        "completed_segments",
+    ):
+        if forbidden in board:
+            raise AssertionError(f"legacy segmented revolution path remains: {forbidden}")
 
     # STOP must not be queued behind a blocking finite-motion callback. The
     # UART implementation therefore has an urgent path that bypasses the

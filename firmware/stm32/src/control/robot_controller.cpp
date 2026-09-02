@@ -507,43 +507,29 @@ bool RobotController::takeAiDistanceResult(AiDistanceResult& result) {
   return true;
 }
 
-bool RobotController::startAiTurnRelative(bool left, float degrees,
-                                          int16_t maxSpeed) {
-  if (!headingAvailable() || degrees <= 0.0f ||
-      degrees > static_cast<float>(TURN_MAX_RELATIVE_DEG)) {
-    return false;
-  }
-  // Capture the current heading exactly once. Physical measurement on this
-  // Physical measurement shows LEFT increases Heading and RIGHT decreases it.
-  const float startHeading = currentHeadingDeg();
-  const float delta = left ? degrees : -degrees;
-  const float target = HeadingFusion::normalize(startHeading + delta);
-#if ROBOT_DEBUG
-  debug_.print("TURN,MODE=REL,DIR=");
-  debug_.print(left ? "LEFT" : "RIGHT");
-  debug_.print(",FROM="); debug_.print(startHeading, 2);
-  debug_.print(",DELTA="); debug_.print(delta, 2);
-  debug_.print(",TARGET="); debug_.println(target, 2);
-#endif
-  return startAiTurnAbsolute(target, maxSpeed);
-}
-
-bool RobotController::startAiTurnAbsolute(float targetHeading,
+bool RobotController::startAiTurnSession(float targetHeading,
+                                          float targetUnwrappedHeading,
+                                          bool multiTurn,
                                           int16_t maxSpeed) {
   const uint32_t now = millis();
   if (!canStartAiMotion(now) || !headingAvailable()) return false;
+  const float startHeading = currentHeadingDeg();
   motionOwner_ = MotionOwner::MCP;
   aiMotionMode_ = AiMotionMode::TURN;
   aiMotionDeadlineMs_ = now + TURN_TIMEOUT_MS;
   aiTurnTargetDeg_ = HeadingFusion::normalize(targetHeading);
-  aiTurnErrorDeg_ = HeadingFusion::shortestDelta(
-      aiTurnTargetDeg_, currentHeadingDeg());
+  aiTurnTargetUnwrappedDeg_ = targetUnwrappedHeading;
+  aiTurnUnwrappedHeadingDeg_ = startHeading;
+  aiTurnMultiTurn_ = multiTurn;
+  aiTurnErrorDeg_ = aiTurnMultiTurn_
+      ? aiTurnTargetUnwrappedDeg_ - aiTurnUnwrappedHeadingDeg_
+      : HeadingFusion::shortestDelta(aiTurnTargetDeg_, startHeading);
   aiTurnMaxSpeed_ = constrain(maxSpeed, TURN_MIN_SPEED, TURN_MAX_SPEED);
   aiTurnCommandSpeed_ = 0;
   aiTurnSettleStartMs_ = 0;
   aiTurnLastSampleSequence_ = currentHeadingSequence();
   aiTurnYawRateDegS_ = 0.0f;
-  aiTurnPreviousHeadingDeg_ = currentHeadingDeg();
+  aiTurnPreviousHeadingDeg_ = startHeading;
   aiTurnPreviousSampleMs_ = now;
   aiTurnLastErrorSign_ = aiTurnErrorDeg_ < 0.0f ? -1 : 1;
   aiTurnStartBoostUntilMs_ = now + TURN_START_BOOST_MS;
@@ -560,10 +546,41 @@ bool RobotController::startAiTurnAbsolute(float targetHeading,
   return true;
 }
 
+bool RobotController::startAiTurnRelative(bool left, float degrees,
+                                           int16_t maxSpeed) {
+  if (!headingAvailable() || degrees <= 0.0f ||
+      degrees > static_cast<float>(TURN_MAX_RELATIVE_DEG)) {
+    return false;
+  }
+  // Capture the current heading exactly once. Physical measurement shows LEFT
+  // increases Heading and RIGHT decreases it. Keep an unwrapped target for a
+  // multi-turn request so crossing +/-180 degrees cannot shorten the command.
+  const float startHeading = currentHeadingDeg();
+  const float delta = left ? degrees : -degrees;
+  const float target = HeadingFusion::normalize(startHeading + delta);
+#if ROBOT_DEBUG
+  debug_.print("TURN,MODE=REL,DIR=");
+  debug_.print(left ? "LEFT" : "RIGHT");
+  debug_.print(",FROM="); debug_.print(startHeading, 2);
+  debug_.print(",DELTA="); debug_.print(delta, 2);
+  debug_.print(",TARGET="); debug_.println(target, 2);
+#endif
+  return startAiTurnSession(target, startHeading + delta,
+                            fabsf(degrees) > 180.0f, maxSpeed);
+}
+
+bool RobotController::startAiTurnAbsolute(float targetHeading,
+                                           int16_t maxSpeed) {
+  const float target = HeadingFusion::normalize(targetHeading);
+  return startAiTurnSession(target, target, false, maxSpeed);
+}
+
 void RobotController::finishAiTurn(AiTurnResultCode code) {
   const float headingNow = currentHeadingDeg();
   const float target = aiTurnTargetDeg_;
-  const float error = HeadingFusion::shortestDelta(target, headingNow);
+  const float error = aiTurnMultiTurn_
+      ? aiTurnTargetUnwrappedDeg_ - aiTurnUnwrappedHeadingDeg_
+      : HeadingFusion::shortestDelta(target, headingNow);
   stopImmediately();
   aiTurnResult_.code = code;
   aiTurnResult_.headingDeg = headingNow;
@@ -610,8 +627,9 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   // after a fast turn this could leave a stale in-window error while the
   // current Heading was still outside the target window, blocking correction
   // pulses indefinitely.
-  aiTurnErrorDeg_ = HeadingFusion::shortestDelta(
-      aiTurnTargetDeg_, currentHeadingDeg());
+  aiTurnErrorDeg_ = aiTurnMultiTurn_
+      ? aiTurnTargetUnwrappedDeg_ - aiTurnUnwrappedHeadingDeg_
+      : HeadingFusion::shortestDelta(aiTurnTargetDeg_, currentHeadingDeg());
 
   // An absolute turn can legitimately be a no-op (for example Return Home
   // already being aligned with HOME).  It does not energize the motors, so a
@@ -626,8 +644,9 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     motors_.stop();
     if (aiTurnSettleStartMs_ == 0U) aiTurnSettleStartMs_ = nowMs;
     if ((nowMs - aiTurnSettleStartMs_) >= TURN_SETTLE_MS) {
-      const float settleError = HeadingFusion::shortestDelta(
-          aiTurnTargetDeg_, currentHeadingDeg());
+      const float settleError = aiTurnMultiTurn_
+          ? aiTurnTargetUnwrappedDeg_ - aiTurnUnwrappedHeadingDeg_
+          : HeadingFusion::shortestDelta(aiTurnTargetDeg_, currentHeadingDeg());
       if (fabsf(settleError) <= TURN_TOLERANCE_DEG &&
           fabsf(aiTurnYawRateDegS_) <= TURN_SETTLE_RATE_DEG_S) {
         finishAiTurn(AiTurnResultCode::DONE);
@@ -696,10 +715,14 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
       aiTurnYawRateDegS_ +=
           TURN_RATE_FILTER * (rawRate - aiTurnYawRateDegS_);
     }
+    const float headingDelta = HeadingFusion::shortestDelta(
+        headingNow, aiTurnPreviousHeadingDeg_);
     aiTurnPreviousHeadingDeg_ = headingNow;
     aiTurnPreviousSampleMs_ = nowMs;
-    aiTurnErrorDeg_ = HeadingFusion::shortestDelta(
-        aiTurnTargetDeg_, headingNow);
+    if (aiTurnMultiTurn_) aiTurnUnwrappedHeadingDeg_ += headingDelta;
+    aiTurnErrorDeg_ = aiTurnMultiTurn_
+        ? aiTurnTargetUnwrappedDeg_ - aiTurnUnwrappedHeadingDeg_
+        : HeadingFusion::shortestDelta(aiTurnTargetDeg_, headingNow);
     const int8_t errorSign = aiTurnErrorDeg_ < 0.0f ? -1 : 1;
     if (fabsf(aiTurnErrorDeg_) > TURN_TOLERANCE_DEG &&
         aiTurnLastErrorSign_ != 0 && errorSign != aiTurnLastErrorSign_) {
@@ -743,8 +766,9 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     motors_.stop();
     if (aiTurnSettleStartMs_ == 0U) aiTurnSettleStartMs_ = nowMs;
     if ((nowMs - aiTurnSettleStartMs_) >= TURN_SETTLE_MS) {
-      const float settleError = HeadingFusion::shortestDelta(
-          aiTurnTargetDeg_, currentHeadingDeg());
+      const float settleError = aiTurnMultiTurn_
+          ? aiTurnTargetUnwrappedDeg_ - aiTurnUnwrappedHeadingDeg_
+          : HeadingFusion::shortestDelta(aiTurnTargetDeg_, currentHeadingDeg());
       if (fabsf(settleError) <= TURN_TOLERANCE_DEG &&
           turnRateSettled) {
         finishAiTurn(AiTurnResultCode::DONE);

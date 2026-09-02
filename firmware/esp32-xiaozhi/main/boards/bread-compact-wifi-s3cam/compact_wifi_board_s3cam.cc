@@ -452,9 +452,9 @@ private:
                            &degrees, &speed) != 3 ||
                     (strcmp(direction, "left") != 0 &&
                      strcmp(direction, "right") != 0) ||
-                    degrees < 1 || degrees > 180 || speed < 15 || speed > 30) {
+                    degrees < 1 || degrees > 720 || speed < 15 || speed > 30) {
                     ESP_LOGW(TAG,
-                             "ROBOT_DIAG rejected; use robot_turn left|right 1..180 15..30 or robot_stop");
+                             "ROBOT_DIAG rejected; use robot_turn left|right 1..720 15..30 or robot_stop");
                     continue;
                 }
                 if (board->diagnostic_turn_active_) {
@@ -486,7 +486,7 @@ private:
                                     "robot_diag_console", 4096, this, 1,
                                     nullptr, 1) == pdPASS) {
             ESP_LOGI(TAG,
-                             "ROBOT_DIAG console ready: calibration_status; calibration_begin_straight; calibration_end_straight <mm>; calibration_begin_turn; calibration_end_turn <deg>; calibration_commit; calibration_abort; camera_capture; camera_dump; camera_describe; camera_nav; robot_obstacle; robot_odometry; robot_encoder; robot_set_home; robot_return_home; navigation_status; scan_obstacle_shadow; bypass_obstacle_once; navigate_autonomous_12s; continue_forward_once; robot_move fwd|back 1..5000 15..30; robot_turn left|right 1..180 15..30; robot_stop");
+                     "ROBOT_DIAG console ready: calibration_status; calibration_begin_straight; calibration_end_straight <mm>; calibration_begin_turn; calibration_end_turn <deg>; calibration_commit; calibration_abort; camera_capture; camera_dump; camera_describe; camera_nav; robot_obstacle; robot_odometry; robot_encoder; robot_set_home; robot_return_home; navigation_status; scan_obstacle_shadow; bypass_obstacle_once; navigate_autonomous_12s; continue_forward_once; robot_move fwd|back 1..5000 15..30; robot_turn left|right 1..720 15..30; robot_stop");
         }
     }
 
@@ -1289,7 +1289,7 @@ private:
             });
         mcp_server.AddTool(
             "self.robot.turn_revolutions",
-            "Quay theo so vong bang Heading kin: 1 vong=360 do, toi da 2 vong moi lan goi. Moi vong gom bon doan 90 do de tranh timeout TURN 180 do; STOP huy duoc giua cac doan. Chuoi trai 2 vong roi phai 2 vong phai goi tool hai lan tuan tu.",
+            "Quay lien tuc theo so vong bang Heading kin: 1 vong=360 do, toi da 2 vong moi lan goi. Mot lan goi gui mot lenh TURN tong, robot khong dung giua cac vong va chi dung khi dat du tong so do. STOP van huy ngay duoc lenh dang chay. Chuoi trai 2 vong roi phai 2 vong phai goi tool hai lan tuan tu.",
             turn_revolutions_property,
             [this](const PropertyList& properties) -> ReturnValue {
                 if (mission_manager_.IsActive()) {
@@ -1313,40 +1313,21 @@ private:
                         "{\"completed\":false,\"error\":\"motion_cancelled_before_start\"}");
                 }
 
-                constexpr int kSegmentsPerRevolution = 4;
-                constexpr int kSegmentDegrees = 90;
-                const int total_segments = revolutions * kSegmentsPerRevolution;
-                int completed_segments = 0;
-                RobotTurnResult last_turn;
+                const int requested_degrees = revolutions * 360;
+                RobotTurnResult turn;
                 bool completed = robot_uart_.SetMode(true, 700);
-                for (int segment = 0; completed && segment < total_segments;
-                     ++segment) {
-                    if (!robot_uart_.MotionCancellationCurrent(cancellation_token)) {
-                        completed = false;
-                        break;
-                    }
-                    RobotTurnResult segment_result;
+                if (completed &&
+                    robot_uart_.MotionCancellationCurrent(cancellation_token)) {
                     completed = robot_uart_.TurnRelative(
-                        left, kSegmentDegrees, speed, segment_result, 25000,
+                        left, requested_degrees, speed, turn, 25000,
                         cancellation_token);
-                    last_turn = segment_result;
-                    if (completed) ++completed_segments;
                     if (!completed &&
                         robot_uart_.MotionCancellationCurrent(cancellation_token)) {
                         robot_uart_.Stop(700);
                     }
-                    if (completed && segment + 1 < total_segments) {
-                        // Let the fused heading and wheel state settle before
-                        // starting the next bounded segment. STOP remains an
-                        // urgent protocol task during this short dwell; the
-                        // token is checked again at the top of the loop.
-                        vTaskDelay(pdMS_TO_TICKS(400));
-                    }
                 }
                 robot_uart_.SetMode(false, 700);
 
-                const int requested_degrees = revolutions * 360;
-                const int completed_degrees = completed_segments * kSegmentDegrees;
                 const char* error = completed
                     ? ""
                     : (robot_uart_.MotionCancellationCurrent(cancellation_token)
@@ -1355,12 +1336,12 @@ private:
                 char json[384];
                 snprintf(
                     json, sizeof(json),
-                    "{\"completed\":%s,\"direction\":\"%s\",\"requested_revolutions\":%d,\"requested_degrees\":%d,\"completed_revolutions\":%d,\"completed_degrees\":%d,\"completed_segments\":%d,\"heading_deg\":%.1f,\"target_deg\":%.1f,\"error_deg\":%.1f,\"heading_closed_loop\":true,\"error\":\"%s\"}",
+                    "{\"completed\":%s,\"direction\":\"%s\",\"requested_revolutions\":%d,\"requested_degrees\":%d,\"completed_revolutions\":%d,\"completed_degrees\":%d,\"heading_deg\":%.1f,\"target_deg\":%.1f,\"error_deg\":%.1f,\"continuous_single_command\":true,\"heading_closed_loop\":true,\"error\":\"%s\"}",
                     completed ? "true" : "false", left ? "left" : "right",
                     revolutions, requested_degrees,
-                    completed_segments / kSegmentsPerRevolution,
-                    completed_degrees, completed_segments, last_turn.heading_deg,
-                    last_turn.target_deg, last_turn.error_deg, error);
+                    completed ? revolutions : 0,
+                    completed ? requested_degrees : 0, turn.heading_deg,
+                    turn.target_deg, turn.error_deg, error);
                 return std::string(json);
             });
         mcp_server.AddTool(

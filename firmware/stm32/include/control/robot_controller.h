@@ -114,6 +114,8 @@ class RobotController {
   bool headingAvailable() const;
   float currentHeadingDeg() const;
   uint32_t currentHeadingSequence() const;
+  bool startAiTurnSession(float targetHeading, float targetUnwrappedHeading,
+                          bool multiTurn, int16_t maxSpeed);
   void finishAiTurn(AiTurnResultCode code);
   void finishAiDistance(AiDistanceResultCode code);
   static int16_t rampToward(int16_t current, int16_t target);
@@ -160,6 +162,9 @@ class RobotController {
   AiMotionMode aiMotionMode_ = AiMotionMode::NONE;
   uint32_t aiMotionDeadlineMs_ = 0;
   float aiTurnTargetDeg_ = 0.0f;
+  float aiTurnTargetUnwrappedDeg_ = 0.0f;
+  float aiTurnUnwrappedHeadingDeg_ = 0.0f;
+  bool aiTurnMultiTurn_ = false;
   float aiTurnErrorDeg_ = 0.0f;
   int16_t aiTurnMaxSpeed_ = TURN_MIN_SPEED;
   int16_t aiTurnCommandSpeed_ = 0;

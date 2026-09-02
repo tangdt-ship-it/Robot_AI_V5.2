@@ -173,7 +173,10 @@ static constexpr uint32_t TURN_SETTLE_MS = 250;
 // still terminate the turn immediately.
 static constexpr uint32_t TURN_TIMEOUT_MS = 24000;
 static constexpr uint32_t TURN_PROGRESS_MS = 250;
-static constexpr int16_t TURN_MAX_RELATIVE_DEG = 180;
+// Relative turns may span complete revolutions.  Public turn_relative still
+// exposes 1..180 degrees; turn_revolutions uses the same correlated RobotLink
+// command with one continuous 360-degree multiple.
+static constexpr int16_t TURN_MAX_RELATIVE_DEG = 720;
 
 static constexpr int16_t SPEED_DEFAULT = 30;
 static constexpr int16_t SPEED_MIN = 10;

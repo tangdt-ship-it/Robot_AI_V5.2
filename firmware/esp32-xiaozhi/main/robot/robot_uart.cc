@@ -15,6 +15,7 @@
 namespace {
 constexpr const char* kTag = "RobotUart";
 constexpr size_t kDriverBufferSize = 1024;
+constexpr int kMaximumRelativeTurnDegrees = 720;
 // AI motion uses the commissioned 15..30 range. The STM32 parser applies the
 // same contract, while PS2 remains a separate manual-control path.
 constexpr int kMinimumDriveSpeed = 15;
@@ -419,7 +420,7 @@ bool RobotUart::TurnRelative(bool left, int angle_deg, int speed,
                              uint32_t timeout_ms,
                              uint32_t cancellation_token) {
     const uint32_t motion_generation = motion_cancel_generation_.load();
-    angle_deg = std::max(1, std::min(angle_deg, 180));
+    angle_deg = std::max(1, std::min(angle_deg, kMaximumRelativeTurnDegrees));
     uint32_t session_id = 0;
     uint32_t operation_id = 0;
     if (!BeginMotionCorrelation(session_id, operation_id,
