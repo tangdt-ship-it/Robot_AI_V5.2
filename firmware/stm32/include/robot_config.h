@@ -135,13 +135,15 @@ static constexpr int16_t TURN_MIN_SPEED = 10;
 static constexpr int16_t TURN_MAX_SPEED = 20;
 static constexpr float TURN_SLOW_ZONE_DEG = 25.0f;
 static constexpr float TURN_PULSE_ZONE_DEG = 8.0f;
-// Angle-command turns are required to settle within half a degree. The
-// controller therefore uses short correction pulses close to target instead
-// of declaring DONE in the old 3-degree window.
-static constexpr float TURN_TOLERANCE_DEG = 0.5f;
+// Angle-command turns use the fused Heading source and must account for the
+// estimator's quantization plus the chassis' mechanical coast.  A 0.5-degree
+// acceptance window was below the repeatable resolution observed on HIL and
+// caused valid near-target turns to timeout.  Keep correction pulses active
+// near the target, but finish only inside this commissioned 1.5-degree band.
+static constexpr float TURN_TOLERANCE_DEG = 1.5f;
 static constexpr float TURN_RATE_FILTER = 0.30f;
 static constexpr float TURN_PREDICT_TIME_S = 0.18f;
-static constexpr float TURN_SETTLE_RATE_DEG_S = 1.0f;
+static constexpr float TURN_SETTLE_RATE_DEG_S = 2.0f;
 static constexpr float TURN_CORRECTION_START_RATE_DEG_S = 2.5f;
 // Speed 10 was not sufficient to overcome static friction on the tested
 // chassis. Keep the final correction short, but give it the same torque as
