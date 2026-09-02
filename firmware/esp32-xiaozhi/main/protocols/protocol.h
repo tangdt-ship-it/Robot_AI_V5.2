@@ -12,6 +12,8 @@ struct AudioStreamPacket {
     int frame_duration = 0;
     uint32_t timestamp = 0;
     std::vector<uint8_t> payload;
+    // Marks a missing UDP frame that must be concealed before playback.
+    bool packet_loss_concealment = false;
 };
 
 struct BinaryProtocol2 {

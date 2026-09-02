@@ -5,6 +5,7 @@
 
 #include <esp_log.h>
 #include <cstring>
+#include <algorithm>
 #include <arpa/inet.h>
 #include "assets/lang_config.h"
 
@@ -283,6 +284,26 @@ bool MqttProtocol::OpenAudioChannel() {
                     ESP_LOGW(TAG, "Audio UDP sequence gap: got %lu, expected %lu, missing=%lu, total_missing=%lu",
                              sequence, remote_sequence_ + 1, missing, remote_sequence_gap_count_);
                     last_remote_sequence_warning_us_ = now_us;
+                }
+
+                // Preserve real-time playback when UDP drops a small burst.
+                // The audio service inserts a bounded PCM concealment frame;
+                // feeding the next Opus frame directly produces clicks and
+                // speech discontinuities.
+                constexpr uint32_t kMaxPlcFramesPerGap = 4;
+                const uint32_t plc_frames = std::min(missing, kMaxPlcFramesPerGap);
+                if (on_incoming_audio_ != nullptr) {
+                    for (uint32_t i = 0; i < plc_frames; ++i) {
+                        auto plc_packet = std::make_unique<AudioStreamPacket>();
+                        plc_packet->sample_rate = server_sample_rate_;
+                        plc_packet->frame_duration = server_frame_duration_;
+                        plc_packet->packet_loss_concealment = true;
+                        on_incoming_audio_(std::move(plc_packet));
+                    }
+                }
+                if (missing > kMaxPlcFramesPerGap) {
+                    ESP_LOGW(TAG, "Audio UDP gap too large for PLC: missing=%lu, recovered=%lu",
+                             missing, plc_frames);
                 }
             }
         }

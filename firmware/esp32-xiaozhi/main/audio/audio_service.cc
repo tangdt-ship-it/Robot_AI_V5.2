@@ -8,6 +8,7 @@ constexpr uint32_t kAudioOutputTaskStackBytes = 2048 * 2;
 constexpr uint32_t kOpusCodecTaskStackBytes = 2048 * 12;
 #include <esp_log.h>
 #include <cstring>
+#include <algorithm>
 
 #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)        \
     (esp_ae_rate_cvt_cfg_t)                                  \
@@ -358,6 +359,33 @@ void AudioService::OpusCodecTask() {
             task->timestamp = packet->timestamp;
 
             SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
+            if (packet->packet_loss_concealment) {
+                // The bundled Opus decoder rejects an empty input frame even
+                // when frame_recover is set to PLC. Generate a bounded PCM
+                // concealment frame instead so packet loss cannot inject a
+                // decoder error/click into the speaker path.
+                task->pcm.assign(decoder_frame_size_, 0);
+                {
+                    std::lock_guard<std::mutex> decoder_lock(decoder_mutex_);
+                    if (!previous_frame_was_concealed_ && !last_decoded_pcm_.empty()) {
+                        const size_t fade_samples = std::min(
+                            task->pcm.size(),
+                            static_cast<size_t>(std::max(1, decoder_sample_rate_ * 8 / 1000)));
+                        const int32_t anchor = last_decoded_pcm_.back();
+                        for (size_t i = 0; i < fade_samples; ++i) {
+                            task->pcm[i] = static_cast<int16_t>(
+                                (anchor * static_cast<int32_t>(fade_samples - i)) /
+                                static_cast<int32_t>(fade_samples));
+                        }
+                    }
+                    previous_frame_was_concealed_ = true;
+                }
+                lock.lock();
+                audio_playback_queue_.push_back(std::move(task));
+                audio_queue_cv_.notify_all();
+                debug_statistics_.decode_count++;
+                continue;
+            }
             if (opus_decoder_ != nullptr) {
                 task->pcm.resize(decoder_frame_size_);
                 esp_audio_dec_in_raw_t raw = {
@@ -387,12 +415,27 @@ void AudioService::OpusCodecTask() {
                         resampled.resize(actual_output);
                         task->pcm = std::move(resampled);
                     }
+                    {
+                        std::lock_guard<std::mutex> decoder_lock(decoder_mutex_);
+                        if (previous_frame_was_concealed_ && !task->pcm.empty()) {
+                            const size_t fade_samples = std::min(
+                                task->pcm.size(),
+                                static_cast<size_t>(std::max(1, codec_->output_sample_rate() * 5 / 1000)));
+                            for (size_t i = 0; i < fade_samples; ++i) {
+                                task->pcm[i] = static_cast<int16_t>(
+                                    (static_cast<int32_t>(task->pcm[i]) * static_cast<int32_t>(i + 1)) /
+                                    static_cast<int32_t>(fade_samples));
+                            }
+                        }
+                        last_decoded_pcm_ = task->pcm;
+                        previous_frame_was_concealed_ = false;
+                    }
                     lock.lock();
                     audio_playback_queue_.push_back(std::move(task));
                     audio_queue_cv_.notify_all();
                     debug_statistics_.decode_count++;
                 } else {
-                    ESP_LOGE(TAG, "Failed to decode audio after resize, error code: %d", ret);
+                    ESP_LOGW(TAG, "Failed to decode audio frame, error code: %d", ret);
                     lock.lock();
                 }
             } else {
@@ -464,6 +507,8 @@ void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
         esp_opus_dec_close(opus_decoder_);
         opus_decoder_ = nullptr;
     }
+    last_decoded_pcm_.clear();
+    previous_frame_was_concealed_ = false;
     decoder_lock.unlock();
     esp_opus_dec_cfg_t opus_dec_cfg = OPUS_DEC_CFG(sample_rate, frame_duration);
     auto ret = esp_opus_dec_open(&opus_dec_cfg, sizeof(esp_opus_dec_cfg_t), &opus_decoder_);
@@ -681,6 +726,8 @@ void AudioService::ResetDecoder() {
     if (opus_decoder_ != nullptr) {
         esp_opus_dec_reset(opus_decoder_);
     }
+    last_decoded_pcm_.clear();
+    previous_frame_was_concealed_ = false;
     decoder_lock.unlock();
     timestamp_queue_.clear();
     audio_decode_queue_.clear();
