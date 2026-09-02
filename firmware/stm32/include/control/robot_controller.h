@@ -169,6 +169,7 @@ class RobotController {
   float aiTurnPreviousHeadingDeg_ = 0.0f;
   uint32_t aiTurnPreviousSampleMs_ = 0;
   int8_t aiTurnLastErrorSign_ = 0;
+  uint32_t aiTurnStartBoostUntilMs_ = 0;
   bool aiTurnPulseDriving_ = false;
   uint32_t aiTurnPulseUntilMs_ = 0;
   uint32_t aiTurnCoastUntilMs_ = 0;

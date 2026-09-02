@@ -397,6 +397,7 @@ void RobotController::stopImmediately(bool requireFreshManualCommand) {
   aiTurnCoastUntilMs_ = 0;
   motionOwner_ = MotionOwner::NONE;
   aiTurnYawRateDegS_ = 0.0f;
+  aiTurnStartBoostUntilMs_ = 0;
   const bool lockBrake = !freeStop_ &&
                          (brakeEnabled_ || obstacleBrakeActive_);
   stopPwmLatched_ = !lockBrake;
@@ -545,6 +546,7 @@ bool RobotController::startAiTurnAbsolute(float targetHeading,
   aiTurnPreviousHeadingDeg_ = currentHeadingDeg();
   aiTurnPreviousSampleMs_ = now;
   aiTurnLastErrorSign_ = aiTurnErrorDeg_ < 0.0f ? -1 : 1;
+  aiTurnStartBoostUntilMs_ = now + TURN_START_BOOST_MS;
   aiTurnPulseDriving_ = false;
   aiTurnPulseUntilMs_ = 0;
   aiTurnCoastUntilMs_ = 0;
@@ -821,7 +823,15 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     ratio = constrain(ratio, 0.0f, 1.0f);
     const int16_t speed = static_cast<int16_t>(lroundf(
         TURN_MIN_SPEED + ratio * (aiTurnMaxSpeed_ - TURN_MIN_SPEED)));
-    aiTurnCommandSpeed_ = constrain(speed, TURN_MIN_SPEED, aiTurnMaxSpeed_);
+    const bool startBoostActive =
+        static_cast<int32_t>(nowMs - aiTurnStartBoostUntilMs_) < 0;
+    aiTurnCommandSpeed_ = startBoostActive
+                              ? constrain(
+                                    max(TURN_START_BOOST_SPEED,
+                                        aiTurnMaxSpeed_),
+                                    TURN_MIN_SPEED, TURN_MAX_SPEED)
+                              : constrain(speed, TURN_MIN_SPEED,
+                                           aiTurnMaxSpeed_);
   }
 
   // Measured turn polarity: L=-,R=+ increases Heading (left turn),

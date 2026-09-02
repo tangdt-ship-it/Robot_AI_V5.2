@@ -155,6 +155,11 @@ static constexpr float TURN_STOP_RATE_DECAY = 0.80f;
 // chassis. Keep the final correction short, but give it the same torque as
 // the normal angle command.
 static constexpr int16_t TURN_CORRECTION_SPEED = 15;
+// A low-speed turn can occasionally fail to break static friction on the
+// first command after a stop. Give only the initial slew a bounded torque
+// boost; the requested speed is used immediately afterwards.
+static constexpr int16_t TURN_START_BOOST_SPEED = 15;
+static constexpr uint32_t TURN_START_BOOST_MS = 250;
 static constexpr uint32_t TURN_CORRECTION_PULSE_NEAR_MS = 25;
 static constexpr uint32_t TURN_CORRECTION_PULSE_MID_MS = 50;
 static constexpr uint32_t TURN_CORRECTION_PULSE_FAR_MS = 100;
