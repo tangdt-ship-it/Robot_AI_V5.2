@@ -101,7 +101,9 @@ def main() -> int:
     ):
         require(board, f'tool_name == "{name}"', f"STOP cancellation token {name}")
 
-    require(board, "revolutions * 2", "bounded 360-degree revolution expansion")
+    require(board, "revolutions * kSegmentsPerRevolution", "bounded 360-degree revolution expansion")
+    require(board, "kSegmentDegrees = 90", "timeout-safe revolution segment")
+    require(board, "vTaskDelay(pdMS_TO_TICKS(400))", "inter-segment heading settle")
     require(board, "completed_segments", "revolution completion reporting")
 
     # STOP must not be queued behind a blocking finite-motion callback. The

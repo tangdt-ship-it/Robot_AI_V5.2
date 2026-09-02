@@ -1289,7 +1289,7 @@ private:
             });
         mcp_server.AddTool(
             "self.robot.turn_revolutions",
-            "Quay theo so vong bang Heading kin: 1 vong=360 do, toi da 2 vong moi lan goi. Moi vong gom hai doan 180 do; STOP huy duoc giua cac doan. Chuoi trai 2 vong roi phai 2 vong phai goi tool hai lan tuan tu.",
+            "Quay theo so vong bang Heading kin: 1 vong=360 do, toi da 2 vong moi lan goi. Moi vong gom bon doan 90 do de tranh timeout TURN 180 do; STOP huy duoc giua cac doan. Chuoi trai 2 vong roi phai 2 vong phai goi tool hai lan tuan tu.",
             turn_revolutions_property,
             [this](const PropertyList& properties) -> ReturnValue {
                 if (mission_manager_.IsActive()) {
@@ -1313,7 +1313,9 @@ private:
                         "{\"completed\":false,\"error\":\"motion_cancelled_before_start\"}");
                 }
 
-                const int total_segments = revolutions * 2;
+                constexpr int kSegmentsPerRevolution = 4;
+                constexpr int kSegmentDegrees = 90;
+                const int total_segments = revolutions * kSegmentsPerRevolution;
                 int completed_segments = 0;
                 RobotTurnResult last_turn;
                 bool completed = robot_uart_.SetMode(true, 700);
@@ -1325,7 +1327,7 @@ private:
                     }
                     RobotTurnResult segment_result;
                     completed = robot_uart_.TurnRelative(
-                        left, 180, speed, segment_result, 25000,
+                        left, kSegmentDegrees, speed, segment_result, 25000,
                         cancellation_token);
                     last_turn = segment_result;
                     if (completed) ++completed_segments;
@@ -1333,11 +1335,18 @@ private:
                         robot_uart_.MotionCancellationCurrent(cancellation_token)) {
                         robot_uart_.Stop(700);
                     }
+                    if (completed && segment + 1 < total_segments) {
+                        // Let the fused heading and wheel state settle before
+                        // starting the next bounded segment. STOP remains an
+                        // urgent protocol task during this short dwell; the
+                        // token is checked again at the top of the loop.
+                        vTaskDelay(pdMS_TO_TICKS(400));
+                    }
                 }
                 robot_uart_.SetMode(false, 700);
 
                 const int requested_degrees = revolutions * 360;
-                const int completed_degrees = completed_segments * 180;
+                const int completed_degrees = completed_segments * kSegmentDegrees;
                 const char* error = completed
                     ? ""
                     : (robot_uart_.MotionCancellationCurrent(cancellation_token)
@@ -1348,7 +1357,8 @@ private:
                     json, sizeof(json),
                     "{\"completed\":%s,\"direction\":\"%s\",\"requested_revolutions\":%d,\"requested_degrees\":%d,\"completed_revolutions\":%d,\"completed_degrees\":%d,\"completed_segments\":%d,\"heading_deg\":%.1f,\"target_deg\":%.1f,\"error_deg\":%.1f,\"heading_closed_loop\":true,\"error\":\"%s\"}",
                     completed ? "true" : "false", left ? "left" : "right",
-                    revolutions, requested_degrees, completed_segments / 2,
+                    revolutions, requested_degrees,
+                    completed_segments / kSegmentsPerRevolution,
                     completed_degrees, completed_segments, last_turn.heading_deg,
                     last_turn.target_deg, last_turn.error_deg, error);
                 return std::string(json);
