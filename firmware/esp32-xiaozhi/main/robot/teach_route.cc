@@ -96,6 +96,10 @@ void TeachRoute::SetDisplay(Display* display) {
 }
 
 bool TeachRoute::Begin() {
+#if ROBOT_MAP_OWNER_STM32
+    ESP_LOGI(kTag, "ROUTE,OWNER=STM32,LEGACY_ESP32_MAP_RUNTIME=DORMANT");
+    return true;
+#endif
     if (!store_.Begin()) {
         ESP_LOGE(kTag, "ROUTE,STORAGE=ERROR");
         return false;
@@ -149,6 +153,10 @@ bool TeachRoute::Begin() {
 }
 
 bool TeachRoute::StartInputTask() {
+#if ROBOT_MAP_OWNER_STM32
+    ESP_LOGI(kTag, "ROUTE,INPUT_OWNER=STM32,LEGACY_INPUT_TASK=DISABLED");
+    return true;
+#endif
     if (robot_uart_ == nullptr) {
         ESP_LOGE(kTag, "ROUTE,MAP_EVENT_CALLBACK=FAIL,REASON=NO_UART");
         return false;
@@ -170,6 +178,11 @@ void TeachRoute::SetSelectedSlot(uint8_t slot) {
 }
 
 void TeachRoute::HandleMapEvent(const char* action, uint8_t slot) {
+#if ROBOT_MAP_OWNER_STM32
+    (void)action;
+    (void)slot;
+    return;
+#endif
     if (action == nullptr || (slot != 1U && slot != 2U)) {
         ESP_LOGW(kTag, "ROUTE,EVENT=REJECT,REASON=INVALID,ACT=%s,SLOT=%u",
                  action != nullptr ? action : "NULL",
@@ -351,6 +364,9 @@ void TeachRoute::Notify(const char* message, int duration_ms) const {
 }
 
 void TeachRoute::UpdateMapStatus() const {
+#if ROBOT_MAP_OWNER_STM32
+    return;
+#endif
     const RouteSlotMetadata metadata = store_.GetMetadata(selected_slot_);
     const char* mode = mode_ == Mode::TEACHING ? "TEACH" :
                        mode_ == Mode::LOADED ? "LOADED" :

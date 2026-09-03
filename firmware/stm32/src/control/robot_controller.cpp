@@ -139,9 +139,15 @@ void RobotController::handleFunctionButtons() {
     debug_.println(odometry_.resetGeneration());
 #endif
   }
-  if (ps2_.buttonPressed(Ps2Button::START))
+  // On the MAP page START belongs exclusively to MapController replay. Keep
+  // the V5.2.8 Robot-page brake shortcut without letting it reject MAP START
+  // through a side effect.
+  if (!display_.isMapPage() && ps2_.buttonPressed(Ps2Button::START))
     setBrakeEnabled(!brakeEnabled_);
-  if (ps2_.buttonPressed(Ps2Button::CROSS)) rampEnabled_ = !rampEnabled_;
+  // Likewise, CROSS is MAP cancel/STOP on the MAP page; ramp toggle remains
+  // available on the Robot page only.
+  if (!display_.isMapPage() && ps2_.buttonPressed(Ps2Button::CROSS))
+    rampEnabled_ = !rampEnabled_;
   freeStop_ = ps2_.state().r3;
 }
 
@@ -150,6 +156,7 @@ void RobotController::resetHeadingReference() {
   heading_.reset();
   // Reset the fused heading reference and refresh the display immediately.
   fusion_.reset(0.0f, odometry_.data().encoderHeadingRad);
+  ++headingResetGeneration_;
   display_.forceRefresh();
 #if ROBOT_DEBUG
   debug_.print("HDG_BEFORE=");
@@ -396,6 +403,7 @@ void RobotController::stopImmediately(bool requireFreshManualCommand) {
   aiTurnPulseUntilMs_ = 0;
   aiTurnCoastUntilMs_ = 0;
   motionOwner_ = MotionOwner::NONE;
+  aiMotionGeneration_ = 0U;
   aiTurnYawRateDegS_ = 0.0f;
   aiTurnStartBoostUntilMs_ = 0;
   const bool lockBrake = !freeStop_ &&
@@ -410,9 +418,22 @@ void RobotController::stopImmediately(bool requireFreshManualCommand) {
 }
 
 bool RobotController::canStartAiMotion(uint32_t nowMs) const {
-  return !brakeEnabled_ && aiMotionMode_ == AiMotionMode::NONE &&
-         (motionOwner_ == MotionOwner::NONE || motionOwner_ == MotionOwner::MCP) &&
+  return canStartMotion(nowMs, MotionOwner::MCP) &&
          !ps2_.controlActive(nowMs);
+}
+
+bool RobotController::canStartMotion(uint32_t nowMs, MotionOwner owner) const {
+  if (brakeEnabled_ || aiMotionMode_ != AiMotionMode::NONE ||
+      ps2_.frameTimedOut(nowMs)) {
+    return false;
+  }
+  if (owner == MotionOwner::REPLAY) {
+    // A MAP START frame is itself PS2 activity. Require a neutral frame but
+    // do not apply the general activity hold, or START would cancel replay.
+    return motionOwner_ == MotionOwner::NONE &&
+           !ps2_.motionCommandActive();
+  }
+  return motionOwner_ == MotionOwner::NONE || motionOwner_ == owner;
 }
 
 bool RobotController::startAiMotion(int16_t left, int16_t right,
@@ -441,14 +462,18 @@ bool RobotController::startAiContinuous(int16_t left, int16_t right,
   return true;
 }
 
-bool RobotController::startAiDistance(bool forward, uint32_t distanceMm,
-                                      int16_t speed) {
+bool RobotController::startDistance(MotionOwner owner, bool forward,
+                                    uint32_t distanceMm, int16_t speed,
+                                    uint32_t motionGeneration) {
   const uint32_t now = millis();
-  if (!canStartAiMotion(now) || !odometry_.ready() || !odometry_.healthy() ||
+  const bool canStart = owner == MotionOwner::REPLAY
+                            ? canStartReplayMotion(now)
+                            : canStartAiMotion(now);
+  if (!canStart || !odometry_.ready() || !odometry_.healthy() ||
       distanceMm == 0U || distanceMm > ROBOT_AI_DISTANCE_MAX_MM) {
     return false;
   }
-  motionOwner_ = MotionOwner::MCP;
+  motionOwner_ = owner;
   aiMotionMode_ = AiMotionMode::DISTANCE;
   aiMotionDeadlineMs_ = now + ROBOT_AI_DISTANCE_TIMEOUT_MS;
   aiDistanceStartMm_ = odometry_.data().distanceMm;
@@ -456,11 +481,28 @@ bool RobotController::startAiDistance(bool forward, uint32_t distanceMm,
   aiDistanceStartRightMm_ = odometry_.data().rightDistanceMm;
   aiDistanceTargetMm_ = static_cast<float>(distanceMm);
   aiDistanceForward_ = forward;
+  aiMotionGeneration_ = motionGeneration;
   aiDistanceResultPending_ = false;
   const int16_t command = forward ? speed : -speed;
   setMotionCommand(command, command, RobotState::AI_MODE, true, !forward);
   applyMotorCommand();
   return true;
+}
+
+bool RobotController::startAiDistance(bool forward, uint32_t distanceMm,
+                                      int16_t speed) {
+  return startDistance(MotionOwner::MCP, forward, distanceMm, speed);
+}
+
+bool RobotController::canStartReplayMotion(uint32_t nowMs) const {
+  return canStartMotion(nowMs, MotionOwner::REPLAY);
+}
+
+bool RobotController::startReplayDistance(bool forward, uint32_t distanceMm,
+                                           int16_t speed,
+                                           uint32_t motionGeneration) {
+  return startDistance(MotionOwner::REPLAY, forward, distanceMm, speed,
+                       motionGeneration);
 }
 
 float RobotController::aiDistanceTravelledMm() const {
@@ -482,7 +524,10 @@ int16_t RobotController::distanceWheelBalance() const {
 }
 
 void RobotController::finishAiDistance(AiDistanceResultCode code) {
+  const MotionOwner owner = motionOwner_;
+  aiDistanceResult_.owner = owner;
   aiDistanceResult_.code = code;
+  aiDistanceResult_.motionGeneration = aiMotionGeneration_;
   aiDistanceResult_.targetMm = aiDistanceTargetMm_;
   aiDistanceResult_.travelledMm = aiDistanceTravelledMm();
   aiDistanceResultPending_ = true;
@@ -507,14 +552,17 @@ bool RobotController::takeAiDistanceResult(AiDistanceResult& result) {
   return true;
 }
 
-bool RobotController::startAiTurnSession(float targetHeading,
-                                          float targetUnwrappedHeading,
-                                          bool multiTurn,
-                                          int16_t maxSpeed) {
+bool RobotController::startTurnSession(MotionOwner owner, float targetHeading,
+                                        float targetUnwrappedHeading,
+                                        bool multiTurn, int16_t maxSpeed,
+                                        uint32_t motionGeneration) {
   const uint32_t now = millis();
-  if (!canStartAiMotion(now) || !headingAvailable()) return false;
+  const bool canStart = owner == MotionOwner::REPLAY
+                            ? canStartReplayMotion(now)
+                            : canStartAiMotion(now);
+  if (!canStart || !headingAvailable()) return false;
   const float startHeading = currentHeadingDeg();
-  motionOwner_ = MotionOwner::MCP;
+  motionOwner_ = owner;
   aiMotionMode_ = AiMotionMode::TURN;
   aiMotionDeadlineMs_ = now + TURN_TIMEOUT_MS;
   aiTurnTargetDeg_ = HeadingFusion::normalize(targetHeading);
@@ -537,6 +585,7 @@ bool RobotController::startAiTurnSession(float targetHeading,
   aiTurnPulseUntilMs_ = 0;
   aiTurnCoastUntilMs_ = 0;
   aiTurnResultPending_ = false;
+  aiMotionGeneration_ = motionGeneration;
   stopPwmLatched_ = false;
   straightCommand_ = false;
   reversing_ = false;
@@ -565,24 +614,43 @@ bool RobotController::startAiTurnRelative(bool left, float degrees,
   debug_.print(",DELTA="); debug_.print(delta, 2);
   debug_.print(",TARGET="); debug_.println(target, 2);
 #endif
-  return startAiTurnSession(target, startHeading + delta,
-                            fabsf(degrees) > 180.0f, maxSpeed);
+  return startTurnSession(MotionOwner::MCP, target, startHeading + delta,
+                          fabsf(degrees) > 180.0f, maxSpeed);
 }
 
 bool RobotController::startAiTurnAbsolute(float targetHeading,
                                            int16_t maxSpeed) {
   const float target = HeadingFusion::normalize(targetHeading);
-  return startAiTurnSession(target, target, false, maxSpeed);
+  return startTurnSession(MotionOwner::MCP, target, target, false, maxSpeed);
+}
+
+bool RobotController::startReplayTurnRelative(bool left, float degrees,
+                                               int16_t maxSpeed,
+                                               uint32_t motionGeneration) {
+  if (!headingAvailable() || degrees <= 0.0f ||
+      degrees > static_cast<float>(TURN_MAX_RELATIVE_DEG)) {
+    return false;
+  }
+  const float startHeading = currentHeadingDeg();
+  const float delta = left ? degrees : -degrees;
+  return startTurnSession(MotionOwner::REPLAY,
+                          HeadingFusion::normalize(startHeading + delta),
+                          startHeading + delta, fabsf(degrees) > 180.0f,
+                          maxSpeed, motionGeneration);
 }
 
 void RobotController::finishAiTurn(AiTurnResultCode code) {
+  const MotionOwner owner = motionOwner_;
+  const uint32_t motionGeneration = aiMotionGeneration_;
   const float headingNow = currentHeadingDeg();
   const float target = aiTurnTargetDeg_;
   const float error = aiTurnMultiTurn_
       ? aiTurnTargetUnwrappedDeg_ - aiTurnUnwrappedHeadingDeg_
       : HeadingFusion::shortestDelta(target, headingNow);
   stopImmediately();
+  aiTurnResult_.owner = owner;
   aiTurnResult_.code = code;
+  aiTurnResult_.motionGeneration = motionGeneration;
   aiTurnResult_.headingDeg = headingNow;
   aiTurnResult_.targetDeg = target;
   aiTurnResult_.errorDeg = error;
@@ -893,6 +961,8 @@ void RobotController::updateFast() {
   const bool ps2MotionFresh = ps2FrameFresh && ps2Usable &&
                               ps2_.motionCommandActive();
   const bool ps2Active = ps2_.controlActive(now);
+  const bool ps2SafetyStop = ps2FrameFresh && ps2Usable &&
+                             ps2_.state().r3;
   // A fresh neutral frame explicitly arms Manual after an external STOP,
   // even when the receiver is only in RX (outside the short ACT hold).
   if (ps2FrameFresh && ps2Usable && !ps2_.motionCommandActive()) {
@@ -932,7 +1002,7 @@ void RobotController::updateFast() {
 #endif
 
   if (ps2Usable) handleFunctionButtons();
-  if (ps2Active) {
+  if (ps2Active && (ps2MotionFresh || ps2SafetyStop)) {
     if (ps2MotionFresh && !manualResumeRequired_) {
       // A live PS2 command always owns the motors. SR04/Heading are not
       // allowed to reshape or reject Manual output.
@@ -1100,12 +1170,14 @@ void RobotController::updateControl() {
   const bool ps2MotionFresh = ps2FrameFresh && ps2Usable &&
                               ps2_.motionCommandActive();
   const bool ps2Active = ps2_.controlActive(now);
+  const bool ps2SafetyStop = ps2FrameFresh && ps2Usable &&
+                             ps2_.state().r3;
   if (ps2Usable) updateSpeedRepeat(now);
 
   // The wireless receiver may remain electrically connected after the
   // handheld transmitter is turned off. Treat active PS2 input as Manual;
   // neutral frames release the mode proxy back to AI after its short hold.
-  if (ps2Active) {
+  if (ps2Active && (ps2MotionFresh || ps2SafetyStop)) {
     // updateFast() owns the high-rate PS2 path. Never re-use a command from
     // an older frame here: doing so can re-energize the motors after a
     // completed AI operation or an external STOP.

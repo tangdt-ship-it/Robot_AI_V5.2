@@ -37,11 +37,36 @@ enum class Ps2Button : uint8_t {
 
 enum class Ps2ReceiverStatus : uint8_t { WAIT, ACT, RX, LOST };
 
+enum class Ps2MapAction : uint8_t {
+  SLOT,
+  START,
+  TRIANGLE,
+  SQUARE,
+  SQUARE_LONG,
+  CIRCLE,
+  CROSS,
+  CROSS_LONG,
+  SELECT_LONG,
+};
+
+struct Ps2MapEvent {
+  Ps2MapAction action = Ps2MapAction::SLOT;
+  uint8_t slot = 1U;
+};
+
 class Ps2Controller {
  public:
   Ps2Controller();
   void begin();
   void update();
+  bool takeMapEvent(Ps2MapEvent& event);
+  // Safety boundary used by local MAP cancellation. It drops any queued MAP
+  // action and requires released buttons plus fresh neutral frames before a
+  // new START edge can be generated.
+  void disarmMapInput();
+  // Same re-arm boundary for USER HOLD, but preserve the currently-held X so
+  // the long-press timer can still escalate HOLD to CANCEL.
+  void holdMapInput();
 
   const Ps2State& state() const { return state_; }
   bool buttonPressed(Ps2Button button) const;
@@ -71,7 +96,9 @@ class Ps2Controller {
   void captureState(uint32_t nowMs);
   void updateActivity(uint32_t nowMs, uint16_t buttons, uint8_t lx,
                       uint8_t ly, uint8_t rx, uint8_t ry);
+  bool queueMapEvent(Ps2MapAction action);
   void resetMapPressTracking();
+  void resetMapCrossTracking();
 
   PS2X_STM32 driver_;
   Ps2State state_;
@@ -87,6 +114,8 @@ class Ps2Controller {
   uint32_t lastFrameIntervalMs_ = 0;
   uint32_t goodFrameCount_ = 0;
   uint8_t configResult_ = 1;
+  bool mapEventPending_ = false;
+  Ps2MapEvent mapEvent_{};
 
   // Map UI events use explicit controller-level edges instead of the PS2X
   // ButtonPressed() helper. This prevents a stale helper edge from leaking a
@@ -99,6 +128,10 @@ class Ps2Controller {
   bool previousMapSquare_ = false;
   bool previousMapCircle_ = false;
   bool previousMapCross_ = false;
+
+  bool mapCrossPressActive_ = false;
+  bool mapCrossLongFired_ = false;
+  uint32_t mapCrossStartedMs_ = 0U;
 
   // Map actions are deliberately disarmed on every page transition and after
   // reconnect. They are armed only after two consecutive fresh frames show

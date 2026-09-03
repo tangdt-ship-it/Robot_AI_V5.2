@@ -1,20 +1,24 @@
 #include <ps2/ps2_controller.h>
+#include <debug/debug_output.h>
 #include <robot_config.h>
 #include <display/lcd_display.h>
 #include <string.h>
 
-// These objects are owned by main.cpp. Map page/slot presentation is kept on
-// STM32 so L3/SELECT never depend on ESP32 polling. Map actions are sent
-// upward as lightweight unsolicited RobotLink events; ESP32 owns route/NVS.
+// These objects are owned by main.cpp. Map page/slot presentation and action
+// delivery are kept on STM32 when local MAP is enabled.
 extern LcdDisplay display;
 extern HardwareSerial robotAiSerial;
+extern DebugOutput robotDebug;
 
 namespace {
 constexpr uint32_t kMapPageToggleGuardMs = 250U;
 constexpr uint8_t kMapNeutralFramesToArm = 2U;
+// X is the safety HOLD/CANCEL boundary. Give the operator more time to make
+// an intentional long press without changing SELECT/SQUARE semantics.
+constexpr uint32_t kMapCrossLongPressMs = 1200U;
 constexpr uint32_t kMapLongPressMs = 800U;
 
-void emitMapEvent(const char* action, uint8_t slot) {
+void emitLegacyMapEvent(const char* action, uint8_t slot) {
   const uint8_t normalizedSlot = slot == 2U ? 2U : 1U;
   if (strcmp(action, "SLOT") == 0) {
     robotAiSerial.print("<EVENT,MAP,SLOT,");
@@ -33,6 +37,107 @@ void emitMapEvent(const char* action, uint8_t slot) {
 Ps2Controller::Ps2Controller()
     : driver_(PS2_CLK_PIN, PS2_CMD_PIN, PS2_ATT_PIN, PS2_DAT_PIN) {}
 
+bool Ps2Controller::queueMapEvent(Ps2MapAction action) {
+  // The main loop drains one debounced event per iteration. A second event in
+  // the same frame cannot be meaningful for the physical controller. CROSS is
+  // the local safety action and must win over a queued START or any other MAP
+  // action in that frame.
+  if (mapEventPending_) {
+    if (action == Ps2MapAction::CROSS_LONG &&
+        mapEvent_.action != Ps2MapAction::CROSS_LONG) {
+      // A long X is the strongest local MAP action. It must replace a queued
+      // short X/START/UI event so HOLD can never mask the requested CANCEL.
+      mapEvent_.action = action;
+      mapEvent_.slot = display.mapSlot();
+#if ROBOT_DEBUG
+      robotDebug.println("MAP,INPUT,CROSS_LONG_ACTION,PRIORITY_REPLACE=1");
+#endif
+      return true;
+    }
+    if (action == Ps2MapAction::CROSS &&
+        mapEvent_.action != Ps2MapAction::CROSS &&
+        mapEvent_.action != Ps2MapAction::CROSS_LONG) {
+#if ROBOT_DEBUG
+      if (mapEvent_.action == Ps2MapAction::START) {
+        robotDebug.println("MAP,START,REJECT,REASON=SAFETY_PRIORITY");
+      }
+#endif
+      mapEvent_.action = action;
+      mapEvent_.slot = display.mapSlot();
+      return true;
+    }
+    if (action == Ps2MapAction::START &&
+        mapEvent_.action != Ps2MapAction::CROSS &&
+        mapEvent_.action != Ps2MapAction::START) {
+      // START is the primary MAP action. Do not lose its first edge behind a
+      // lower-priority UI event generated in the same polling window.
+      mapEvent_.action = action;
+      mapEvent_.slot = display.mapSlot();
+#if ROBOT_DEBUG
+      robotDebug.println("MAP,INPUT,START_ACTION,PRIORITY_REPLACE=1");
+#endif
+      return true;
+    }
+#if ROBOT_DEBUG
+    if (action == Ps2MapAction::START) {
+      robotDebug.println("MAP,INPUT,START_ACTION,DROPPED=QUEUE_FULL");
+      robotDebug.println("MAP,START,REJECT,REASON=QUEUE_FULL");
+    }
+#endif
+    return false;
+  }
+  mapEvent_.action = action;
+  mapEvent_.slot = display.mapSlot();
+  mapEventPending_ = true;
+#if ROBOT_DEBUG
+  if (action == Ps2MapAction::START) {
+    robotDebug.println("MAP,INPUT,START_ACTION");
+  }
+#endif
+#if !STM32_LOCAL_MAP_ENABLE
+  const char* legacyAction = action == Ps2MapAction::START ? "START" :
+                             action == Ps2MapAction::TRIANGLE ? "TRIANGLE" :
+                             action == Ps2MapAction::SQUARE ? "SQUARE" :
+                             action == Ps2MapAction::SQUARE_LONG ? "SQUARE_LONG" :
+                             action == Ps2MapAction::CIRCLE ? "CIRCLE" :
+                             action == Ps2MapAction::CROSS ? "CROSS" :
+                             action == Ps2MapAction::CROSS_LONG ? "CROSS_LONG" :
+                             action == Ps2MapAction::SELECT_LONG ? "SELECT_LONG" :
+                             "SLOT";
+  emitLegacyMapEvent(legacyAction, mapEvent_.slot);
+#endif
+  return true;
+}
+
+bool Ps2Controller::takeMapEvent(Ps2MapEvent& event) {
+  if (!mapEventPending_) return false;
+  event = mapEvent_;
+  mapEventPending_ = false;
+  return true;
+}
+
+void Ps2Controller::disarmMapInput() {
+  mapEventPending_ = false;
+  mapActionsArmed_ = false;
+  mapNeutralReleaseFrames_ = 0U;
+  resetMapPressTracking();
+  resetMapCrossTracking();
+#if ROBOT_DEBUG
+  robotDebug.println("MAP,INPUT,DISARM_AFTER_CANCEL");
+#endif
+}
+
+void Ps2Controller::holdMapInput() {
+  mapEventPending_ = false;
+  mapActionsArmed_ = false;
+  mapNeutralReleaseFrames_ = 0U;
+  // Preserve X press timing so a held X can still escalate HOLD to CANCEL.
+  resetMapPressTracking();
+#if ROBOT_DEBUG
+  robotDebug.println("MAP,INPUT,DISARM_AFTER_HOLD");
+#endif
+}
+
 void Ps2Controller::begin() {
   const uint32_t now = millis();
   reconnect(now);
@@ -46,6 +151,12 @@ void Ps2Controller::resetMapPressTracking() {
   mapSquarePressActive_ = false;
   mapSquareLongFired_ = false;
   mapSquareStartedMs_ = 0U;
+}
+
+void Ps2Controller::resetMapCrossTracking() {
+  mapCrossPressActive_ = false;
+  mapCrossLongFired_ = false;
+  mapCrossStartedMs_ = 0U;
 }
 
 void Ps2Controller::reconnect(uint32_t nowMs) {
@@ -62,9 +173,11 @@ void Ps2Controller::reconnect(uint32_t nowMs) {
   previousMapSquare_ = false;
   previousMapCircle_ = false;
   previousMapCross_ = false;
+  resetMapCrossTracking();
   mapActionsArmed_ = false;
   mapNeutralReleaseFrames_ = 0U;
   lastMapPageToggleMs_ = 0U;
+  mapEventPending_ = false;
   resetMapPressTracking();
 }
 
@@ -142,9 +255,34 @@ void Ps2Controller::captureState(uint32_t nowMs) {
     const bool squareReleased = !state_.square && previousMapSquare_;
     const bool circlePressed = state_.circle && !previousMapCircle_;
     const bool crossPressed = state_.cross && !previousMapCross_;
+    const bool crossReleased = !state_.cross && previousMapCross_;
     const bool allMapButtonsReleased =
         !state_.l3 && !state_.start && !state_.select && !state_.triangle &&
         !state_.square && !state_.circle && !state_.cross;
+
+#if ROBOT_DEBUG
+    if (startPressed) {
+      robotDebug.println("MAP,INPUT,START_RAW_DOWN");
+      robotDebug.println("MAP,INPUT,START_EDGE");
+    }
+#endif
+
+    // X is a safety boundary, so its down edge is handled independently of
+    // MAP arming. The down event produces HOLD immediately; the timer event
+    // later escalates the same physical press to long-CANCEL.
+    if (crossPressed && display.isMapPage()) {
+      mapCrossPressActive_ = true;
+      mapCrossLongFired_ = false;
+      mapCrossStartedMs_ = nowMs;
+      queueMapEvent(Ps2MapAction::CROSS);
+    }
+    if (mapCrossPressActive_ && state_.cross && !mapCrossLongFired_ &&
+        display.isMapPage() &&
+        (nowMs - mapCrossStartedMs_) >= kMapCrossLongPressMs) {
+      queueMapEvent(Ps2MapAction::CROSS_LONG);
+      mapCrossLongFired_ = true;
+    }
+    if (crossReleased) resetMapCrossTracking();
 
     if (l3Pressed) {
       if (lastMapPageToggleMs_ == 0U ||
@@ -155,11 +293,28 @@ void Ps2Controller::captureState(uint32_t nowMs) {
       mapActionsArmed_ = false;
       mapNeutralReleaseFrames_ = 0U;
       resetMapPressTracking();
+      resetMapCrossTracking();
+#if ROBOT_DEBUG
+      if (startPressed) {
+        robotDebug.println("MAP,START,REJECT,REASON=PAGE_TRANSITION");
+      }
+#endif
     } else if (!display.isMapPage()) {
       mapActionsArmed_ = false;
       mapNeutralReleaseFrames_ = 0U;
       resetMapPressTracking();
+      resetMapCrossTracking();
+#if ROBOT_DEBUG
+      if (startPressed) {
+        robotDebug.println("MAP,START,REJECT,REASON=NOT_MAP_PAGE");
+      }
+#endif
     } else if (!mapActionsArmed_) {
+#if ROBOT_DEBUG
+      if (startPressed) {
+        robotDebug.println("MAP,START,REJECT,REASON=NOT_ARMED");
+      }
+#endif
       if (allMapButtonsReleased) {
         if (mapNeutralReleaseFrames_ < kMapNeutralFramesToArm) {
           ++mapNeutralReleaseFrames_;
@@ -167,18 +322,16 @@ void Ps2Controller::captureState(uint32_t nowMs) {
         if (mapNeutralReleaseFrames_ >= kMapNeutralFramesToArm) {
           mapActionsArmed_ = true;
           resetMapPressTracking();
+#if ROBOT_DEBUG
+          robotDebug.println("MAP,INPUT,ARMED");
+#endif
         }
       } else {
         mapNeutralReleaseFrames_ = 0U;
       }
     } else {
-      // START is free from the Robot page and becomes an intuitive Map alias
-      // for TRIANGLE: start Teach when idle/loaded, or mark while teaching.
-      if (startPressed) emitMapEvent("TRIANGLE", display.mapSlot());
-
-      // CROSS (X) no longer toggles ramp. In Map it is a quick Cancel alias
-      // for SELECT_LONG, so Teach can be cancelled without a long press.
-      if (crossPressed) emitMapEvent("SELECT_LONG", display.mapSlot());
+      // START runs the selected route. TRIANGLE is reserved for Teach/marks.
+      if (startPressed) queueMapEvent(Ps2MapAction::START);
 
       if (selectPressed) {
         mapSelectPressActive_ = true;
@@ -187,13 +340,13 @@ void Ps2Controller::captureState(uint32_t nowMs) {
       }
       if (mapSelectPressActive_ && state_.select && !mapSelectLongFired_ &&
           (nowMs - mapSelectStartedMs_) >= kMapLongPressMs) {
-        emitMapEvent("SELECT_LONG", display.mapSlot());
+        queueMapEvent(Ps2MapAction::SELECT_LONG);
         mapSelectLongFired_ = true;
       }
       if (selectReleased && mapSelectPressActive_) {
         if (!mapSelectLongFired_ && !display.mapSlotLocked()) {
           display.toggleMapSlot();
-          emitMapEvent("SLOT", display.mapSlot());
+          queueMapEvent(Ps2MapAction::SLOT);
         }
         mapSelectPressActive_ = false;
         mapSelectLongFired_ = false;
@@ -207,18 +360,18 @@ void Ps2Controller::captureState(uint32_t nowMs) {
       }
       if (mapSquarePressActive_ && state_.square && !mapSquareLongFired_ &&
           (nowMs - mapSquareStartedMs_) >= kMapLongPressMs) {
-        emitMapEvent("SQUARE_LONG", display.mapSlot());
+        queueMapEvent(Ps2MapAction::SQUARE_LONG);
         mapSquareLongFired_ = true;
       }
       if (squareReleased && mapSquarePressActive_) {
-        if (!mapSquareLongFired_) emitMapEvent("SQUARE", display.mapSlot());
+        if (!mapSquareLongFired_) queueMapEvent(Ps2MapAction::SQUARE);
         mapSquarePressActive_ = false;
         mapSquareLongFired_ = false;
         mapSquareStartedMs_ = 0U;
       }
 
-      if (trianglePressed) emitMapEvent("TRIANGLE", display.mapSlot());
-      if (circlePressed) emitMapEvent("CIRCLE", display.mapSlot());
+      if (trianglePressed) queueMapEvent(Ps2MapAction::TRIANGLE);
+      if (circlePressed) queueMapEvent(Ps2MapAction::CIRCLE);
     }
 
     previousMapL3_ = state_.l3;

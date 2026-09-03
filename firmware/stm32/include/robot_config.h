@@ -194,10 +194,12 @@ static constexpr uint8_t BRAKE_PWM_LOCK_MAX = 254;
 // HC-SR04 timing and obstacle policy. A speed-dependent stopping distance is
 // added by the sensor policy, while these values define the physical floor.
 static constexpr uint32_t ULTRASONIC_SAMPLE_PERIOD_MS = 60;
-// Allow acoustic ringing and late echoes from one HC-SR04 to decay before
-// triggering the other module. This prevents cross-talk without blocking the
-// main loop because Echo capture is interrupt-driven.
-static constexpr uint32_t ULTRASONIC_INTER_SENSOR_GUARD_MS = 30;
+// The two front modules are physically adjacent. Keep a quiet acoustic gap
+// after a completed Echo before triggering the other module; this is in
+// addition to the one-active-channel rule in ultrasonic_sensor.cpp.
+// With 60 ms per-channel spacing this still gives each SR04 roughly 13-16 Hz
+// observation in the normal 0-4 m range, so front coverage remains continuous.
+static constexpr uint32_t ULTRASONIC_INTER_SENSOR_GUARD_MS = 45;
 static constexpr uint32_t ULTRASONIC_ECHO_TIMEOUT_US = 30000;
 static constexpr uint32_t ULTRASONIC_FRESH_MS = 350;
 // A single HC-SR04 timeout can be caused by an echo collision, no reflector
@@ -213,6 +215,11 @@ static constexpr int16_t ULTRASONIC_DEGRADED_MAX_FORWARD_COMMAND = 8;
 // turning one dropped sample into a false "sensor fault" while still exposing
 // a genuinely disconnected sensor after the hold expires.
 static constexpr uint32_t ULTRASONIC_DISPLAY_HOLD_MS = 1000;
+// Keep the LCD far/near state stable around the 100 cm presentation boundary.
+// Safety decisions continue to use the obstacle-zone thresholds below; these
+// values affect only the compact L04/R04 display classification.
+static constexpr float ULTRASONIC_DISPLAY_FAR_ENTER_CM = 105.0f;
+static constexpr float ULTRASONIC_DISPLAY_FAR_EXIT_CM = 95.0f;
 // Reject an isolated large jump (usually a cross-reflection between the two
 // front-facing modules). A real change of range must repeat consistently;
 // close obstacle readings remain eligible for immediate safety handling.
@@ -255,6 +262,14 @@ static constexpr uint32_t CONTROL_PERIOD_MS = 5;
 #endif
 static constexpr bool IWDG_ENABLED = ROBOT_IWDG_ENABLE != 0;
 static constexpr uint32_t IWDG_TIMEOUT_MS = 2500;
+
+// MAP ownership is deliberately compile-time and fail-closed. The legacy
+// ESP32 TeachRoute sources remain in the repository for rollback/reference,
+// but the production runtime is owned by STM32 when this is enabled.
+#ifndef STM32_LOCAL_MAP_ENABLE
+#define STM32_LOCAL_MAP_ENABLE 0
+#endif
+static constexpr bool STM32_LOCAL_MAP_ENABLED = STM32_LOCAL_MAP_ENABLE != 0;
 static constexpr uint32_t LCD_RENDER_MS = 100;
 
 // Cascaded heading controller. The outer loop requests a deliberately slow

@@ -1495,13 +1495,17 @@ public:
         InitializeSpi();
         InitializeLcdDisplay();
         teach_route_.SetDisplay(display_);
+#if !ROBOT_MAP_OWNER_STM32
         teach_route_.Begin();
+#endif
         InitializeButtons();
         InitializeCamera();
         if (robot_uart_.Begin()) {
             robot_uart_.SetObstacleStoppedCallback(&ObstacleAssist::OnStopped,
                                                    &obstacle_assist_);
+#if !ROBOT_MAP_OWNER_STM32
             teach_route_.StartInputTask();
+#endif
             InitializeRobotTools();
             InitializeDiagnosticConsole();
         }

@@ -31,7 +31,11 @@ enum class AiTurnResultCode : uint8_t {
 };
 
 struct AiTurnResult {
+  MotionOwner owner = MotionOwner::NONE;
   AiTurnResultCode code = AiTurnResultCode::NONE;
+  // Non-zero for STM32-local MAP replay. MCP results keep the default zero
+  // value, so the replay fence never changes RobotLink correlation semantics.
+  uint32_t motionGeneration = 0U;
   float headingDeg = 0.0f;
   float targetDeg = 0.0f;
   float errorDeg = 0.0f;
@@ -42,7 +46,10 @@ enum class AiDistanceResultCode : uint8_t {
 };
 
 struct AiDistanceResult {
+  MotionOwner owner = MotionOwner::NONE;
   AiDistanceResultCode code = AiDistanceResultCode::NONE;
+  // Non-zero for STM32-local MAP replay; see AiTurnResult above.
+  uint32_t motionGeneration = 0U;
   float targetMm = 0.0f;
   float travelledMm = 0.0f;
 };
@@ -76,6 +83,13 @@ class RobotController {
   bool startAiDistance(bool forward, uint32_t distanceMm, int16_t speed);
   bool startAiTurnRelative(bool left, float degrees, int16_t maxSpeed);
   bool startAiTurnAbsolute(float targetHeading, int16_t maxSpeed);
+  // MAP replay uses the same closed-loop primitives but a distinct owner and
+  // result path. This prevents replay from borrowing MCP SID/OP correlation.
+  bool canStartReplayMotion(uint32_t nowMs) const;
+  bool startReplayDistance(bool forward, uint32_t distanceMm, int16_t speed,
+                           uint32_t motionGeneration = 0U);
+  bool startReplayTurnRelative(bool left, float degrees, int16_t maxSpeed,
+                               uint32_t motionGeneration = 0U);
   bool takeAiTurnResult(AiTurnResult& result);
   bool takeAiDistanceResult(AiDistanceResult& result);
 
@@ -89,11 +103,20 @@ class RobotController {
   bool aiMotionActive() const { return aiMotionMode_ != AiMotionMode::NONE; }
   bool aiTurnActive() const { return aiMotionMode_ == AiMotionMode::TURN; }
   bool aiDistanceActive() const { return aiMotionMode_ == AiMotionMode::DISTANCE; }
+  bool motorsStopped() const { return motors_.leftSpeed() == 0 && motors_.rightSpeed() == 0; }
+  uint32_t headingResetGeneration() const { return headingResetGeneration_; }
   float aiDistanceTargetMm() const { return aiDistanceTargetMm_; }
   float aiDistanceTravelledMm() const;
   float aiTurnTarget() const { return aiTurnTargetDeg_; }
   float aiTurnError() const { return aiTurnErrorDeg_; }
   int16_t aiTurnSpeed() const { return aiTurnCommandSpeed_; }
+  int16_t targetLeftCommand() const { return targetLeft_; }
+  int16_t targetRightCommand() const { return targetRight_; }
+  int16_t currentLeftCommand() const { return currentLeft_; }
+  int16_t currentRightCommand() const { return currentRight_; }
+  uint8_t aiMotionModeValue() const {
+    return static_cast<uint8_t>(aiMotionMode_);
+  }
   bool obstacleLimited() const { return obstacleLimited_; }
   bool encoderFault() const { return odometry_.stallFault(); }
   MotionOwner motionOwner() const { return motionOwner_; }
@@ -111,11 +134,15 @@ class RobotController {
   void cancelAiMotionForManual();
   int16_t distanceWheelBalance() const;
   bool canStartAiMotion(uint32_t nowMs) const;
+  bool canStartMotion(uint32_t nowMs, MotionOwner owner) const;
   bool headingAvailable() const;
   float currentHeadingDeg() const;
   uint32_t currentHeadingSequence() const;
-  bool startAiTurnSession(float targetHeading, float targetUnwrappedHeading,
-                          bool multiTurn, int16_t maxSpeed);
+  bool startDistance(MotionOwner owner, bool forward, uint32_t distanceMm,
+                     int16_t speed, uint32_t motionGeneration = 0U);
+  bool startTurnSession(MotionOwner owner, float targetHeading,
+                        float targetUnwrappedHeading, bool multiTurn,
+                        int16_t maxSpeed, uint32_t motionGeneration = 0U);
   void finishAiTurn(AiTurnResultCode code);
   void finishAiDistance(AiDistanceResultCode code);
   static int16_t rampToward(int16_t current, int16_t target);
@@ -180,6 +207,7 @@ class RobotController {
   uint32_t aiTurnCoastUntilMs_ = 0;
   bool aiTurnResultPending_ = false;
   AiTurnResult aiTurnResult_;
+  uint32_t aiMotionGeneration_ = 0U;
   float aiDistanceStartMm_ = 0.0f;
   float aiDistanceStartLeftMm_ = 0.0f;
   float aiDistanceStartRightMm_ = 0.0f;
@@ -189,6 +217,7 @@ class RobotController {
   AiDistanceResult aiDistanceResult_;
   MotionOwner motionOwner_ = MotionOwner::NONE;
   bool manualResumeRequired_ = false;
+  uint32_t headingResetGeneration_ = 0;
 };
 
 #endif

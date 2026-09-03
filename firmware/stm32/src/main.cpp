@@ -7,6 +7,7 @@
 #include <encoders/wheel_odometry.h>
 #include <imu/mpu6050.h>
 #include <localization/heading_fusion.h>
+#include <map/map_controller.h>
 #include <motor/motor_controller.h>
 #include <ps2/ps2_controller.h>
 #include <robot_config.h>
@@ -29,6 +30,8 @@ HeadingFusion headingFusion;
 SafetyWatchdog safetyWatchdog;
 RobotController robot(motors, ps2, display, heading, ultrasonic,
                       wheelOdometry, imu, headingFusion, robotDebug);
+MapController mapController(robot, ps2, display, wheelOdometry, headingFusion,
+                             ultrasonic, robotDebug);
 
 void setup() {
   motors.begin();
@@ -76,6 +79,7 @@ void setup() {
   ps2.begin();
   robot.begin();
   robotLink.begin(ROBOT_LINK_BAUD);
+  mapController.begin();
   safetyWatchdog.begin();
 }
 
@@ -160,6 +164,11 @@ void loop() {
       wheelOdometry.data().encoderHeadingRad,
       wheelOdometry.healthy(), chassisMoving);
   wheelOdometry.integratePose(headingFusion.headingDeg(), headingFusion.ready());
+  // Process physical MAP X immediately after the sensor snapshot and before
+  // motion control. X-down must stop a replay primitive in this iteration;
+  // asynchronous result delivery remains below and is still fenced by the
+  // replay generation.
+  mapController.processInput();
   robot.updateFast();
   robot.updateControl();
   RobotTelemetry telemetry;
@@ -439,16 +448,29 @@ void loop() {
   }
   AiTurnResult turnResult;
   if (robot.takeAiTurnResult(turnResult)) {
-    robotLink.reportTurnResult(static_cast<uint8_t>(turnResult.code),
-                               turnResult.headingDeg, turnResult.targetDeg,
-                               turnResult.errorDeg);
+    if (turnResult.owner != MotionOwner::REPLAY) {
+      robotLink.reportTurnResult(static_cast<uint8_t>(turnResult.code),
+                                 turnResult.headingDeg, turnResult.targetDeg,
+                                 turnResult.errorDeg);
+    } else {
+      // A replay result is local-only, including a late/stale result after
+      // STOP or CANCEL. Never expose it as an MCP terminal frame.
+      (void)mapController.consumeReplayTurnResult(turnResult);
+    }
   }
   AiDistanceResult distanceResult;
   if (robot.takeAiDistanceResult(distanceResult)) {
-    robotLink.reportDistanceResult(static_cast<uint8_t>(distanceResult.code),
-                                   distanceResult.targetMm,
-                                   distanceResult.travelledMm);
+    if (distanceResult.owner != MotionOwner::REPLAY) {
+      robotLink.reportDistanceResult(
+          static_cast<uint8_t>(distanceResult.code), distanceResult.targetMm,
+          distanceResult.travelledMm);
+    } else {
+      (void)mapController.consumeReplayDistanceResult(distanceResult);
+    }
   }
+  // MAP is cooperative and observes the already-updated localization and
+  // motion result state. It never drives MotorController directly.
+  mapController.update();
   // Apply the optional STM32-local wheel-speed loop after all command/safety
   // owners for this iteration have had a chance to update the requested
   // command. Encoder velocity was sampled at the beginning of this loop.

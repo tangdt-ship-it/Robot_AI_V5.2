@@ -634,6 +634,12 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
   }
 
   if (strncmp(frame, "MAP,UI,", 7) == 0) {
+#if STM32_LOCAL_MAP_ENABLE
+    // The STM32-local MapController is the sole MAP/LCD owner. Keep this
+    // parser for compatibility diagnostics, but never let legacy ESP32 UI
+    // status overwrite local state.
+    return;
+#else
     unsigned int slot = 0;
     unsigned int storeState = 0;
     unsigned int mode = 0;
@@ -694,6 +700,7 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
                          static_cast<uint32_t>(replayErrorMm),
                          static_cast<uint8_t>(replayOperation));
     return;
+#endif
   }
 
   RobotLinkCalibrationRequest calibration;

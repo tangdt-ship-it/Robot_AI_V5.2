@@ -27,6 +27,8 @@ void UltrasonicSensor::begin() {
                   echoIsrMountLeft,CHANGE);
   attachInterrupt(digitalPinToInterrupt(channels_[RIGHT_MOUNT].echoPin),
                   echoIsrMountRight,CHANGE);
+  activeChannel_=0xFF;
+  nextChannel_=LEFT_MOUNT;
   nextTriggerAllowedMs_=now;
 }
 void UltrasonicSensor::echoIsrMountLeft(){if(instance_)instance_->handleEchoEdge(LEFT_MOUNT);}
@@ -98,19 +100,23 @@ void UltrasonicSensor::acceptPulse(uint8_t i,uint32_t pulse,uint32_t now){
       return;
     }
     c.outlierConfirmations=0;
-    // Start the history at the newly confirmed range so old samples cannot
-    // pull the filter back toward the previous scene.
-    c.historyCount=0;
-    c.historyIndex=0;
+    // Keep the previous history when a non-emergency range jump is confirmed.
+    // A short-lived second echo must not replace the established range in one
+    // step; the normal rolling median will adopt a genuinely persistent new
+    // target, while alternating 82/127/145 cm reflections remain rejected.
   }else{
     c.outlierConfirmations=0;
   }
-  const bool recoveredFromNoEcho=c.displayFar;
   c.history[c.historyIndex]=d;c.historyIndex=(c.historyIndex+1)%5;if(c.historyCount<5)c.historyCount++;
-  const float med=medianHistory(c);if(!c.filterReady||recoveredFromNoEcho){c.filteredDistanceCm=d;c.filterReady=true;}else{const float target=d<c.filteredDistanceCm?d:med;const float alpha=target<c.filteredDistanceCm?0.72f:0.24f;c.filteredDistanceCm+=alpha*(target-c.filteredDistanceCm);}
-  // A real near Echo immediately overrides the far/OK presentation. A real
-  // far Echo is always clear for display purposes.
-  c.displayFar=d>=100.0f;
+  const float med=medianHistory(c);if(!c.filterReady){c.filteredDistanceCm=d;c.filterReady=true;}else{const float target=d<c.filteredDistanceCm?d:med;const float alpha=target<c.filteredDistanceCm?0.72f:0.24f;c.filteredDistanceCm+=alpha*(target-c.filteredDistanceCm);}
+  // Drive the far/OK presentation from the filtered range, never from the
+  // current raw pulse. The hysteresis prevents a single noisy sample near the
+  // 100 cm presentation boundary from making the LCD flicker.
+  if(!c.displayFar && c.filteredDistanceCm>=ULTRASONIC_DISPLAY_FAR_ENTER_CM) {
+    c.displayFar=true;
+  }else if(c.displayFar && c.filteredDistanceCm<=ULTRASONIC_DISPLAY_FAR_EXIT_CM) {
+    c.displayFar=false;
+  }
   static uint32_t prevMs[2]={};static float prevD[2]={};if(prevMs[i]&&now>prevMs[i]){const float rate=(prevD[i]-c.filteredDistanceCm)/(float)(now-prevMs[i])*1000.0f;c.approachRateCmS=constrain(0.30f*rate+0.70f*c.approachRateCmS,-250.0f,250.0f);}prevMs[i]=now;prevD[i]=c.filteredDistanceCm;updateChannelZone(i,c.filteredDistanceCm);
 }
 void UltrasonicSensor::acceptTimeout(uint8_t i,uint32_t now,bool noEcho){
@@ -129,7 +135,11 @@ void UltrasonicSensor::acceptTimeout(uint8_t i,uint32_t now,bool noEcho){
     // removes UNKNOWN/CLEAR oscillation without allowing a near obstacle to
     // become clear: degradedClearWindow() still rejects near distances.
     c.health=SensorHealth::DEGRADED;
-    c.displayFar=c.filteredDistanceCm>=100.0f;
+    if(!c.displayFar && c.filteredDistanceCm>=ULTRASONIC_DISPLAY_FAR_ENTER_CM) {
+      c.displayFar=true;
+    }else if(c.displayFar && c.filteredDistanceCm<=ULTRASONIC_DISPLAY_FAR_EXIT_CM) {
+      c.displayFar=false;
+    }
   }else{
     c.health=noEcho?SensorHealth::TIMEOUT:SensorHealth::INVALID;
     c.displayFar=false;
@@ -195,6 +205,13 @@ void UltrasonicSensor::update(){
       const uint8_t i=(nextChannel_+n)%2;
       Channel& c=channels_[i];
       if(ms-c.lastTriggerMs<ULTRASONIC_SAMPLE_PERIOD_MS) continue;
+
+      // Check only the channel about to be triggered. A disconnected or
+      // floating Echo input must not globally block the healthy SR04 and make
+      // both LCD fields expire to ----. The 45 ms inter-sensor guard still
+      // separates acoustic bursts; a channel whose own Echo is stuck HIGH is
+      // skipped and retried on a later round.
+      if(digitalRead(c.echoPin)==HIGH) continue;
 
       // Clear a previous capture before selecting the channel.  TRIG and the
       // start of Echo capture are kept in one call; a delayed second loop

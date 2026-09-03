@@ -10,6 +10,12 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+// The complete ESP32 MAP V1 implementation remains in source as a reference,
+// but runtime ownership is migrated to the STM32.
+#ifndef ROBOT_MAP_OWNER_STM32
+#define ROBOT_MAP_OWNER_STM32 1
+#endif
+
 class Display;
 class MissionManager;
 class RobotUart;
