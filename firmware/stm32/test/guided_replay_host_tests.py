@@ -80,6 +80,19 @@ def without_comments(text):
     return re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
 
 
+def sequencer_action(distance_mm, heading_error_deg, realign_pending):
+    """Return the required next action for the near-target state machine."""
+    position_tolerance = config_number("MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM")
+    preturn_tolerance = config_number("MAP_REPLAY_PRETURN_TOLERANCE_DEG")
+    if not realign_pending and distance_mm <= position_tolerance:
+        return "ADVANCE"
+    if realign_pending:
+        if abs(heading_error_deg) > preturn_tolerance:
+            return "COARSE_TURN"
+        return "ADVANCE" if distance_mm <= position_tolerance else "GUIDED"
+    return "COARSE_TURN" if abs(heading_error_deg) > preturn_tolerance else "GUIDED"
+
+
 class GuidedReplayHostTests(unittest.TestCase):
     def test_named_map_profile_constants(self):
         self.assertEqual(config_number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"), 5.0)
@@ -175,8 +188,76 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertIn("startReplayGuidedWaypoint", MAP)
         # REALIGN clears only the current operation; the sequencer's target
         # index remains unchanged until DONE calls advanceReplayAfterTarget.
-        realign_block = MAP[MAP.find("REALIGN_REQUIRED"):MAP.find("} else if (result.code == AiDistanceResultCode::DONE", MAP.find("REALIGN_REQUIRED"))]
+        realign_start = MAP.find(
+            "if (result.code == AiDistanceResultCode::REALIGN_REQUIRED)"
+        )
+        realign_block = MAP[realign_start:MAP.find(
+            "} else if (result.code == AiDistanceResultCode::DONE",
+            realign_start,
+        )]
         self.assertNotIn("advanceReplayAfterTarget", realign_block)
+
+    def test_40mm_20deg_realign_forces_coarse_turn_without_advance(self):
+        self.assertEqual(sequencer_action(40.0, 20.0, True), "COARSE_TURN")
+        self.assertIn("bool replayRealignPending_ = false;", MAP_HEADER)
+        self.assertIn("const bool realignPending = replayRealignPending_;", MAP)
+        self.assertIn(
+            "if (!realignPending && targetDistance <= kWaypointToleranceMm)",
+            MAP,
+        )
+        self.assertIn("replayRealignPending_ = true;", MAP)
+        pending_cycle = MAP[MAP.find("const bool realignPending"):
+                            MAP.find("void MapController::logSegmentStart")]
+        self.assertIn("AiTurnProfile::MAP_COARSE", pending_cycle)
+        self.assertNotIn(
+            "advanceReplayAfterTarget();\n      return true;",
+            pending_cycle[pending_cycle.find("if (realignPending)"):],
+        )
+
+    def test_coarse_done_at_40mm_5deg_advances_once(self):
+        self.assertEqual(sequencer_action(40.0, 5.0, True), "ADVANCE")
+        self.assertIn("replayRealignPending_ = false;", MAP)
+        self.assertIn("MAP,GUIDE,REALIGN,COARSE_DONE=1", MAP)
+        self.assertIn("advanceReplayAfterTarget();", MAP)
+
+    def test_realign_at_100mm_resumes_guided_same_target(self):
+        self.assertEqual(sequencer_action(100.0, 20.0, True), "COARSE_TURN")
+        self.assertEqual(sequencer_action(100.0, 5.0, True), "GUIDED")
+        self.assertIn("startReplayGuidedWaypoint", MAP)
+        self.assertIn("replayTarget_.xMm, replayTarget_.yMm", MAP)
+
+    def test_stale_result_after_realign_is_dropped(self):
+        self.assertIn("result.motionGeneration != replaySegmentGeneration_", MAP)
+        self.assertIn("MAP,SEGMENT_DROP_STALE", MAP)
+        self.assertIn("replayRealignPending_ = true;", MAP)
+
+    def test_hold_and_cancel_during_realign_keep_safety_semantics(self):
+        hold_start = MAP.find("void MapController::enterReplayHold")
+        hold_end = MAP.find("void MapController::abortReplay", hold_start)
+        hold_block = MAP[hold_start:hold_end]
+        self.assertIn("stopImmediately", hold_block)
+        self.assertNotIn("clearReplayResumeContext", hold_block)
+        cancel_start = MAP.find("void MapController::cancelReplay")
+        cancel_end = MAP.find("void MapController::clearReplayResumeContext", cancel_start)
+        cancel_block = MAP[cancel_start:cancel_end]
+        self.assertIn("stopImmediately", cancel_block)
+        self.assertIn("clearReplayResumeContext", cancel_block)
+        clear_start = MAP.find("void MapController::clearReplayResumeContext")
+        clear_end = MAP.find("bool MapController::canResumeReplay", clear_start)
+        self.assertIn("replayRealignPending_ = false;", MAP[clear_start:clear_end])
+
+    def test_done_telemetry_uses_live_bearing(self):
+        done_start = MAP.find(
+            "} else if (result.code == AiDistanceResultCode::DONE)"
+        )
+        obstacle_start = MAP.find(
+            "} else if (result.code == AiDistanceResultCode::OBSTACLE)",
+            done_start,
+        )
+        done_block = MAP[done_start:obstacle_start]
+        self.assertIn("const float liveBearing", done_block)
+        self.assertIn("atan2f(replayTarget_.yMm - current.yMm", done_block)
+        self.assertNotIn("replayGuideBearingDeg_", done_block)
 
     def test_mcp_precise_turn_contract_is_unchanged(self):
         self.assertEqual(config_number("TURN_TOLERANCE_DEG"), 0.5)

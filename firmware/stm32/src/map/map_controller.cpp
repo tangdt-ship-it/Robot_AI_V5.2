@@ -924,6 +924,7 @@ bool MapController::prepareReplay(const char*& rejectReason) {
   }
   replayOrigin_ = live;
   replayOriginValid_ = true;
+  replayRealignPending_ = false;
   replayContextSlot_ = selectedSlot_;
   replayOriginResetGeneration_ = odometry_.resetGeneration();
   replayOriginHeadingResetGeneration_ = robot_.headingResetGeneration();
@@ -1041,11 +1042,16 @@ bool MapController::startNextReplaySegment() {
   replayTarget_ = routePointWorld(replayTargetIndex_);
   const float targetDistance = distanceMm(current.xMm, current.yMm,
                                           replayTarget_.xMm, replayTarget_.yMm);
+  const bool realignPending = replayRealignPending_;
   replayTargetDistanceMm_ = static_cast<uint32_t>(lroundf(targetDistance));
   replayTargetDeg_ = 0;
   replayTravelMm_ = 0U;
   replayErrorMm_ = replayTargetDistanceMm_;
-  if (targetDistance <= kWaypointToleranceMm) {
+  // A REALIGN_REQUIRED result deliberately keeps the same target even when
+  // the robot is already inside the position tolerance. Do not let the
+  // ordinary near-target shortcut advance the waypoint before coarse heading
+  // correction has run.
+  if (!realignPending && targetDistance <= kWaypointToleranceMm) {
     advanceReplayAfterTarget();
     return true;
   }
@@ -1056,14 +1062,26 @@ bool MapController::startNextReplaySegment() {
   logGuidePlan(replayCurrentIndex_, replayTargetIndex_, targetDistance,
                bearing, current.headingDeg, turnDelta);
   const uint32_t segmentGeneration = nextReplayGeneration();
-  const bool startupNoiseTurn = replayCurrentIndex_ == 0U &&
+  const bool startupNoiseTurn = !realignPending &&
+                                replayCurrentIndex_ == 0U &&
                                 replayTargetIndex_ == 1U &&
                                 fabsf(turnDelta) <=
                                     kReplayStartupTurnDeadbandDeg;
-  const bool coarsePreturn = fabsf(turnDelta) >
-                                  MAP_REPLAY_PRETURN_TOLERANCE_DEG &&
-                              !startupNoiseTurn;
+  const bool coarsePreturn = realignPending
+                                 ? fabsf(turnDelta) >
+                                       MAP_REPLAY_PRETURN_TOLERANCE_DEG
+                                 : fabsf(turnDelta) >
+                                       MAP_REPLAY_PRETURN_TOLERANCE_DEG &&
+                                   !startupNoiseTurn;
   const bool skipPreturn = !coarsePreturn;
+  if (realignPending && skipPreturn) {
+    replayRealignPending_ = false;
+    if (targetDistance <= kWaypointToleranceMm) {
+      debug_.println("MAP,GUIDE,REALIGN,DONE=POSITION_WITHIN_TOLERANCE");
+      advanceReplayAfterTarget();
+      return true;
+    }
+  }
   if (!skipPreturn) {
     replayTargetDeg_ = static_cast<int16_t>(lroundf(fabsf(turnDelta)));
     replayOperation_ = MapReplayOperation::TURN;
@@ -1235,6 +1253,7 @@ void MapController::clearReplayResumeContext() {
   replayResumeAllowed_ = false;
   replayHoldPoseValid_ = false;
   replayOriginValid_ = false;
+  replayRealignPending_ = false;
   holdReason_ = MapHoldReason::NONE;
   replayOperation_ = MapReplayOperation::NONE;
   replayCurrentIndex_ = 0U;
@@ -1362,6 +1381,10 @@ bool MapController::consumeReplayTurnResult(const AiTurnResult& result) {
                  MapReplayOperation::TURN, 0.0f, 0.0f, targetDeg,
                  result.headingDeg);
   if (result.code == AiTurnResultCode::DONE) {
+    if (replayRealignPending_) {
+      replayRealignPending_ = false;
+      debug_.println("MAP,GUIDE,REALIGN,COARSE_DONE=1");
+    }
     logGuidePreturn(result.errorDeg, "DONE");
     return true;
   }
@@ -1402,6 +1425,9 @@ bool MapController::consumeReplayDistanceResult(const AiDistanceResult& result) 
                        ? replayTargetDistanceMm_ - replayTravelMm_
                        : replayTravelMm_ - replayTargetDistanceMm_;
   if (result.code == AiDistanceResultCode::REALIGN_REQUIRED) {
+    // Keep the current target index and explicitly fence the next sequencer
+    // cycle into coarse heading correction before any near-target advance.
+    replayRealignPending_ = true;
     Pose current;
     float headingError = 0.0f;
     if (currentReplayPose(current)) {
@@ -1417,8 +1443,10 @@ bool MapController::consumeReplayDistanceResult(const AiDistanceResult& result) 
     if (currentReplayPose(current)) {
       positionError = distanceMm(current.xMm, current.yMm,
                                  replayTarget_.xMm, replayTarget_.yMm);
-      headingError = shortestDeltaDeg(replayGuideBearingDeg_,
-                                      current.headingDeg);
+      const float liveBearing =
+          atan2f(replayTarget_.yMm - current.yMm,
+                 replayTarget_.xMm - current.xMm) * kRadToDeg;
+      headingError = shortestDeltaDeg(liveBearing, current.headingDeg);
     }
     logSegmentDone(generation, from, to, MapReplayOperation::MOVE,
                    static_cast<float>(replayTargetDistanceMm_),

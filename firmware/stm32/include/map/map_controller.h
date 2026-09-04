@@ -169,6 +169,7 @@ class MapController {
   uint32_t replaySegmentGeneration_ = 0U;
   MapSlot replayContextSlot_ = MapSlot::MAP_1;
   bool replayOriginValid_ = false;
+  bool replayRealignPending_ = false;
   Pose replayOrigin_{};
   Pose replayTarget_{};
   Pose replayHoldPose_{};
