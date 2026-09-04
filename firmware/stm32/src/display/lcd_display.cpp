@@ -239,12 +239,12 @@ void LcdDisplay::buildMapLines() {
   const unsigned long tenthM = static_cast<unsigned long>(lengthTenthsM % 10U);
 
   if (status.mode == 9U) {
-    snprintf(desired_[0], 21, "MAP%u CLOSE?", mapSlot_);
-    snprintf(desired_[1], 21, "D:%lumm H:%ddeg",
-             static_cast<unsigned long>(status.closeCandidateDistanceMm),
-             static_cast<int>(status.closeCandidateHeadingDeg));
-    snprintf(desired_[2], 21, "O=CLOSED");
-    snprintf(desired_[3], 21, "X=OPEN");
+    snprintf(desired_[0], 21, "MAP%u FINISH", mapSlot_);
+    snprintf(desired_[1], 21, "PTS:%03u C:%lumm",
+             static_cast<unsigned>(status.points),
+             static_cast<unsigned long>(status.closeCandidateDistanceMm));
+    snprintf(desired_[2], 21, "X=OPEN");
+    snprintf(desired_[3], 21, "O=CLOSED");
     return;
   }
   if (status.mode == 4U) {

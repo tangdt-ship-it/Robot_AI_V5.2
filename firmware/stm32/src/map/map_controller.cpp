@@ -276,6 +276,9 @@ void MapController::handleCircle() {
   }
   if (mode_ == MapControllerMode::CLOSED_CONFIRM) {
     debug_.println("MAP,CIRCLE,ACTION=CONFIRM_CLOSED");
+    const uint32_t closeDistance = closeCandidateDistanceMm_;
+    debug_.print("MAP,TYPE_SELECT,TYPE=CLOSED,CLOSE_DIST=");
+    debug_.println(closeDistance);
     if (queueTeachSave(MapRouteType::CLOSED,
                        MapControllerMode::CLOSED_CONFIRM)) {
       debug_.println("MAP,CLOSE_CONFIRM,RESULT=CLOSED");
@@ -340,6 +343,7 @@ void MapController::handleCross() {
   if (mode_ == MapControllerMode::TEACHING) {
     cancelTeach();
   } else if (mode_ == MapControllerMode::CLOSED_CONFIRM) {
+    debug_.println("MAP,TYPE_SELECT,TYPE=OPEN");
     if (queueTeachSave(MapRouteType::OPEN,
                        MapControllerMode::CLOSED_CONFIRM)) {
       debug_.println("MAP,CLOSE_CONFIRM,RESULT=OPEN");
@@ -358,6 +362,7 @@ void MapController::handleCross() {
 
 void MapController::handleCrossLong() {
   if (mode_ == MapControllerMode::CLOSED_CONFIRM) {
+    debug_.println("MAP,TYPE_SELECT,TYPE=OPEN");
     if (queueTeachSave(MapRouteType::OPEN,
                        MapControllerMode::CLOSED_CONFIRM)) {
       debug_.println("MAP,CLOSE_CONFIRM,RESULT=OPEN");
@@ -674,31 +679,13 @@ bool MapController::finalizeTeach() {
   debug_.print(",H=");
   debug_.print(closeHeading, 1);
 
-  const bool enoughPoints = count >= 3U;
-  const bool autoClosed = enoughPoints &&
-                          closeDistance <= kClosedAutoDistanceMm &&
-                          closeHeading <= kClosedAutoHeadingDeg;
-  const bool closedCandidate = enoughPoints && !autoClosed &&
-                               closeDistance <= kClosedCandidateDistanceMm &&
-                               closeHeading <= kClosedCandidateHeadingDeg;
-  if (autoClosed) {
-    debug_.println(",CLASS=AUTO_CLOSED");
-  } else if (closedCandidate) {
-    debug_.println(",CLASS=CANDIDATE");
-  } else {
-    debug_.println(",CLASS=OPEN");
-  }
-  const MapRouteType detectedType = (autoClosed || closedCandidate)
-                                        ? MapRouteType::CLOSED
-                                        : MapRouteType::OPEN;
-  route_.header.routeType = static_cast<uint8_t>(detectedType);
-  route_.header.replayMode = static_cast<uint8_t>(routeMode_);
   if (teachMode_ == MapTeachMode::MANUAL_KEYFRAME) {
-    // Manual keyframes are authoritative. Keep the cleaner and semantic
-    // optimizer available for a future AUTO_SEMANTIC mode, but never let
-    // either module move, remove or reconstruct a user-marked point here.
+    // Manual keyframes are authoritative. Do not infer OPEN/CLOSED from the
+    // endpoint pose: the operator explicitly chooses the route type after
+    // Teach, including routes whose final point is far from P0.
     optimizedRoute_ = route_;
     semanticRoute_ = route_;
+    debug_.println();
     debug_.println("MAP,TEACH_MODE=MANUAL_KEYFRAME");
     debug_.println("MAP,SEMANTIC=BYPASS_MANUAL_KEYFRAME");
     uint16_t manualCount = 0U;
@@ -713,9 +700,47 @@ bool MapController::finalizeTeach() {
     debug_.print(static_cast<unsigned>(manualCount));
     debug_.print(",LENGTH=");
     debug_.print(routeLengthMm(route_));
-    debug_.print(",TYPE=");
-    debug_.println(detectedType == MapRouteType::CLOSED ? "CLOSED" : "OPEN");
+    debug_.println(",TYPE=USER_CONFIRM");
+    closeCandidateDistanceMm_ = static_cast<uint32_t>(lroundf(closeDistance));
+    closeCandidateHeadingDeg_ = static_cast<int16_t>(lroundf(closeHeading));
+    routeType_ = MapRouteType::OPEN;
+    routeMode_ = MapReplayMode::ONCE;
+    route_.header.routeType = static_cast<uint8_t>(routeType_);
+    route_.header.replayMode = static_cast<uint8_t>(routeMode_);
+    updateRouteHeaderForSave(route_);
+    storeState_ = MapStoreState::EMPTY;
+    loadedValid_ = false;
+    teachOriginValid_ = false;
+    teachFinishPending_ = false;
+    mode_ = MapControllerMode::CLOSED_CONFIRM;
+    debug_.print("MAP,TYPE_CONFIRM,POINTS=");
+    debug_.print(static_cast<unsigned>(count));
+    debug_.print(",CLOSE_DIST=");
+    debug_.print(closeDistance, 1);
+    debug_.print(",CLOSE_HEADING=");
+    debug_.println(closeHeading, 1);
+    statusDirty_ = true;
+    return true;
   } else {
+    const bool enoughPoints = count >= 3U;
+    const bool autoClosed = enoughPoints &&
+                            closeDistance <= kClosedAutoDistanceMm &&
+                            closeHeading <= kClosedAutoHeadingDeg;
+    const bool closedCandidate = enoughPoints && !autoClosed &&
+                                 closeDistance <= kClosedCandidateDistanceMm &&
+                                 closeHeading <= kClosedCandidateHeadingDeg;
+    if (autoClosed) {
+      debug_.println(",CLASS=AUTO_CLOSED");
+    } else if (closedCandidate) {
+      debug_.println(",CLASS=CANDIDATE");
+    } else {
+      debug_.println(",CLASS=OPEN");
+    }
+    const MapRouteType detectedType = (autoClosed || closedCandidate)
+                                          ? MapRouteType::CLOSED
+                                          : MapRouteType::OPEN;
+    route_.header.routeType = static_cast<uint8_t>(detectedType);
+    route_.header.replayMode = static_cast<uint8_t>(routeMode_);
     RouteCleanerMetrics optimizeMetrics;
     const bool cleanAccepted =
         cleanMapRoute(route_, optimizedRoute_, optimizeMetrics);
@@ -737,29 +762,28 @@ bool MapController::finalizeTeach() {
     }
     route_ = semanticRoute_;
     logSemanticSummary(semanticMetrics);
+    if (autoClosed) {
+      return queueTeachSave(MapRouteType::CLOSED,
+                            MapControllerMode::TEACHING);
+    }
+    if (closedCandidate) {
+      closeCandidateDistanceMm_ = static_cast<uint32_t>(lroundf(closeDistance));
+      closeCandidateHeadingDeg_ = static_cast<int16_t>(lroundf(closeHeading));
+      routeType_ = MapRouteType::CLOSED;
+      routeMode_ = MapReplayMode::ONCE;
+      route_.header.routeType = static_cast<uint8_t>(routeType_);
+      route_.header.replayMode = static_cast<uint8_t>(routeMode_);
+      updateRouteHeaderForSave(route_);
+      storeState_ = MapStoreState::EMPTY;
+      loadedValid_ = false;
+      teachOriginValid_ = false;
+      teachFinishPending_ = false;
+      mode_ = MapControllerMode::CLOSED_CONFIRM;
+      statusDirty_ = true;
+      return true;
+    }
+    return queueTeachSave(MapRouteType::OPEN, MapControllerMode::TEACHING);
   }
-  if (autoClosed) {
-    return queueTeachSave(MapRouteType::CLOSED,
-                          MapControllerMode::TEACHING);
-  }
-  if (closedCandidate) {
-    closeCandidateDistanceMm_ = static_cast<uint32_t>(lroundf(closeDistance));
-    closeCandidateHeadingDeg_ = static_cast<int16_t>(lroundf(closeHeading));
-    routeType_ = MapRouteType::CLOSED;
-    routeMode_ = MapReplayMode::ONCE;
-    route_.header.routeType = static_cast<uint8_t>(routeType_);
-    route_.header.replayMode = static_cast<uint8_t>(routeMode_);
-    updateRouteHeaderForSave(route_);
-    storeState_ = MapStoreState::EMPTY;
-    loadedValid_ = false;
-    teachOriginValid_ = false;
-    teachFinishPending_ = false;
-    mode_ = MapControllerMode::CLOSED_CONFIRM;
-    statusDirty_ = true;
-    return true;
-  }
-
-  return queueTeachSave(MapRouteType::OPEN, MapControllerMode::TEACHING);
 }
 
 bool MapController::queueTeachSave(MapRouteType type,
@@ -782,6 +806,10 @@ bool MapController::queueTeachSave(MapRouteType type,
     updateRouteHeaderForSave(route_);
     debug_.print("MAP,TEACH=REJECT,REASON=");
     debug_.println(reason != nullptr ? reason : "INVALID");
+    if (type == MapRouteType::CLOSED) {
+      debug_.print("MAP,CLOSE,REJECT,REASON=");
+      debug_.println(reason != nullptr ? reason : "INVALID");
+    }
     mode_ = failureMode;
     statusDirty_ = true;
     return false;
@@ -875,7 +903,8 @@ bool MapController::validateRoute(const MapRouteData& route,
     // subject to the normal minimum/maximum checks above.
     if (closure > kClosedClosureSkipDistanceMm &&
         (closure < kMinimumSegmentMm || closure > kMaximumSegmentMm)) {
-      reason = "CLOSURE";
+      reason = closure > kMaximumSegmentMm ? "CLOSURE_TOO_LONG"
+                                           : "CLOSURE_TOO_SHORT";
       return false;
     }
   }
@@ -1036,6 +1065,31 @@ bool MapController::startNextReplaySegment() {
     completeReplay();
     return true;
   }
+  const uint16_t count = route_.header.waypointCount;
+  const bool logicalClosingEdge =
+      routeType_ == MapRouteType::CLOSED && replayDirection_ > 0 &&
+      replayCurrentIndex_ == count - 1U && replayTargetIndex_ == 0U;
+  if (logicalClosingEdge) {
+    // A closure that is already effectively at P0 is a logical edge, not a
+    // zero-length Guided MOVE. Avoid atan2(0,0), a meaningless turn and any
+    // motor command; advancing here completes ONCE or the current LOOP lap.
+    const Pose closingStart = routePointWorld(count - 1U);
+    const Pose closingTarget = routePointWorld(0U);
+    const float closureDistance = distanceMm(
+        closingStart.xMm, closingStart.yMm, closingTarget.xMm,
+        closingTarget.yMm);
+    if (closureDistance <= kClosedClosureSkipDistanceMm) {
+      replayTarget_ = closingTarget;
+      replayTargetDistanceMm_ = static_cast<uint32_t>(lroundf(closureDistance));
+      replayTravelMm_ = 0U;
+      replayErrorMm_ = replayTargetDistanceMm_;
+      replayRealignReason_ = ReplayRealignReason::NONE;
+      debug_.print("MAP,CLOSE_EDGE,SKIP,DIST=");
+      debug_.println(closureDistance, 1);
+      advanceReplayAfterTarget();
+      return true;
+    }
+  }
   Pose current;
   if (!currentReplayPose(current)) {
     abortReplay("POSE");
@@ -1060,6 +1114,14 @@ bool MapController::startNextReplaySegment() {
   // heading or snapping to orthogonal directions.
   const float incomingBearing =
       replayIncomingBearing(replayCurrentIndex_, replayTargetIndex_);
+  if (logicalClosingEdge) {
+    debug_.print("MAP,CLOSE_EDGE,PLAN,FROM=");
+    debug_.print(static_cast<unsigned>(replayCurrentIndex_));
+    debug_.print(",TO=0,DIST=");
+    debug_.print(targetDistance, 1);
+    debug_.print(",BEARING=");
+    debug_.println(incomingBearing, 2);
+  }
   const float arrivalHeadingError =
       shortestDeltaDeg(incomingBearing, current.headingDeg);
   const bool inArrivalZone = targetDistance <= kWaypointToleranceMm;
@@ -1190,8 +1252,14 @@ bool MapController::startNextReplaySegment() {
 void MapController::advanceReplayAfterTarget() {
   const uint16_t fromIndex = replayCurrentIndex_;
   const uint16_t targetIndex = replayTargetIndex_;
-  replayCurrentIndex_ = targetIndex;
   const uint16_t count = route_.header.waypointCount;
+  const bool logicalClosingEdge =
+      routeType_ == MapRouteType::CLOSED && replayDirection_ > 0 &&
+      fromIndex == count - 1U && targetIndex == 0U;
+  replayCurrentIndex_ = targetIndex;
+  if (logicalClosingEdge) {
+    debug_.println("MAP,CLOSE_EDGE,DONE");
+  }
   if (replayDirection_ > 0) {
     if (routeType_ == MapRouteType::CLOSED &&
         fromIndex == count - 1U && targetIndex == 0U) {
@@ -1700,8 +1768,10 @@ void MapController::publishStatus() {
   MapSlotMetadata metadata = store_.metadata(selectedSlot_);
   if (storeState_ == MapStoreState::STORAGE_ERROR) {
     metadata.state = MapStoreState::STORAGE_ERROR;
-  } else if (loadedValid_ || mode_ == MapControllerMode::TEACHING) {
-    metadata.state = mode_ == MapControllerMode::TEACHING
+  } else if (loadedValid_ || mode_ == MapControllerMode::TEACHING ||
+             mode_ == MapControllerMode::CLOSED_CONFIRM) {
+    metadata.state = (mode_ == MapControllerMode::TEACHING ||
+                      mode_ == MapControllerMode::CLOSED_CONFIRM)
                          ? MapStoreState::EMPTY
                          : MapStoreState::SAVED;
     metadata.routeType = routeType_;
