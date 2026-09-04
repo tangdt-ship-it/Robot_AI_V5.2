@@ -151,23 +151,42 @@ def manual_select_route(points, route_type, max_segment=5000.0,
 class ClosedReplayModel:
     """Small iterative model for logical Pn -> P0 replay semantics."""
 
-    def __init__(self, count, mode="ONCE"):
+    def __init__(self, count, mode="ONCE", closure_distance_mm=None,
+                 closure_skip_mm=20.0):
         self.count = count
         self.mode = mode
+        self.closure_distance_mm = closure_distance_mm
+        self.closure_skip_mm = closure_skip_mm
         self.current = 0
         self.target = 1
         self.lap = 0
         self.complete = False
         self.held = False
         self.hold_reason = None
+        self.cancelled = False
+        self.generation = 0
+        self.motion_edges = []
 
     def edge(self):
         return self.current, self.target
 
-    def finish_segment(self):
-        if self.held:
-            return
+    def start_segment(self):
+        self.generation += 1
+        return self.edge(), self.generation
+
+    def finish_segment(self, generation=None):
+        if self.held or self.cancelled or self.complete:
+            return False
+        if generation is not None and generation != self.generation:
+            return False
         source, target = self.edge()
+        near_zero_closure = (
+            source == self.count - 1 and target == 0 and
+            self.closure_distance_mm is not None and
+            self.closure_distance_mm <= self.closure_skip_mm
+        )
+        if not near_zero_closure:
+            self.motion_edges.append((source, target))
         self.current = target
         if source == self.count - 1 and target == 0:
             if self.mode == "LOOP":
@@ -175,8 +194,9 @@ class ClosedReplayModel:
                 self.target = 1
             else:
                 self.complete = True
-            return
+            return True
         self.target = 0 if self.current == self.count - 1 else self.current + 1
+        return True
 
     def hold(self, reason="USER"):
         self.held = True
@@ -186,6 +206,10 @@ class ClosedReplayModel:
     def resume(self):
         self.held = False
         self.hold_reason = None
+
+    def cancel(self):
+        self.cancelled = True
+        self.held = False
 
 
 def closed_route_edges(count, laps=1):
@@ -617,6 +641,42 @@ class MapHostTests(unittest.TestCase):
         model.finish_segment()
         self.assertEqual(model.edge(), (0, 1))
         self.assertEqual(model.lap, 1)
+
+    def test_closed_replay_model_near_zero_closing_edge_has_no_motor_command(self):
+        model = ClosedReplayModel(3, "ONCE", closure_distance_mm=5.0)
+        model.finish_segment()
+        model.finish_segment()
+        edge, generation = model.start_segment()
+        self.assertEqual(edge, (2, 0))
+        self.assertTrue(model.finish_segment(generation))
+        self.assertTrue(model.complete)
+        self.assertNotIn((2, 0), model.motion_edges)
+
+    def test_closed_replay_model_stale_generation_is_dropped_across_lap(self):
+        model = ClosedReplayModel(3, "LOOP")
+        closing_generation = None
+        for _ in range(3):
+            edge, generation = model.start_segment()
+            if edge == (2, 0):
+                closing_generation = generation
+            self.assertTrue(model.finish_segment(generation))
+        self.assertEqual(model.lap, 1)
+        next_edge, current_generation = model.start_segment()
+        self.assertEqual(next_edge, (0, 1))
+        self.assertFalse(model.finish_segment(closing_generation))
+        self.assertEqual(model.edge(), next_edge)
+        self.assertEqual(model.lap, 1)
+        self.assertTrue(model.finish_segment(current_generation))
+
+    def test_closed_replay_model_cancel_on_closing_edge_preserves_lap(self):
+        model = ClosedReplayModel(3, "LOOP")
+        model.finish_segment()
+        model.finish_segment()
+        self.assertEqual(model.edge(), (2, 0))
+        model.cancel()
+        self.assertFalse(model.finish_segment())
+        self.assertEqual(model.edge(), (2, 0))
+        self.assertEqual(model.lap, 0)
 
     def test_closed_loop_index_and_counter_boundaries(self):
         edges = closed_route_edges(128, laps=3)
