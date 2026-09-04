@@ -178,6 +178,22 @@ static constexpr uint32_t TURN_PROGRESS_MS = 250;
 // command with one continuous 360-degree multiple.
 static constexpr int16_t TURN_MAX_RELATIVE_DEG = 720;
 
+// MAP replay intentionally uses a faster, moderate-accuracy pre-turn.  The
+// precise +/-0.5-degree contract above remains reserved for MCP/AI angle
+// commands and is not changed by the MAP guidance profile.
+static constexpr float MAP_REPLAY_PRETURN_TOLERANCE_DEG = 5.0f;
+static constexpr uint32_t MAP_REPLAY_PRETURN_SETTLE_MS = 100U;
+static constexpr float MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG = 6.0f;
+static constexpr uint32_t MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM = 60U;
+static constexpr float MAP_GUIDE_REALIGN_THRESHOLD_DEG = 15.0f;
+static constexpr uint32_t MAP_GUIDE_SLOW_DISTANCE_MM = 250U;
+static constexpr int16_t MAP_GUIDE_MAX_STEER_COMMAND = 6;
+static constexpr float MAP_GUIDE_HEADING_GAIN = 0.35f;
+static constexpr float MAP_GUIDE_CROSSTRACK_GAIN = 0.015f;
+static constexpr float MAP_GUIDE_MAX_CROSSTRACK_MM = 250.0f;
+static constexpr int16_t MAP_GUIDE_MIN_SPEED = 15;
+static constexpr uint32_t MAP_GUIDE_TELEMETRY_MS = 250U;
+
 static constexpr int16_t SPEED_DEFAULT = 30;
 static constexpr int16_t SPEED_MIN = 10;
 static constexpr int16_t SPEED_MAX = 255;

@@ -16,7 +16,8 @@ constexpr float kClosedAutoHeadingDeg = 5.0f;
 constexpr float kClosedCandidateDistanceMm = 200.0f;
 constexpr float kClosedCandidateHeadingDeg = 20.0f;
 constexpr float kClosedClosureSkipDistanceMm = kDuplicateDistanceMm;
-constexpr float kWaypointToleranceMm = 60.0f;
+constexpr float kWaypointToleranceMm =
+    static_cast<float>(MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM);
 constexpr float kReplayPoseHoldToleranceMm = 100.0f;
 constexpr float kReplayPoseHoldToleranceDeg = 15.0f;
 constexpr float kMinimumSegmentMm = 20.0f;
@@ -25,10 +26,10 @@ constexpr float kPi = 3.14159265358979323846f;
 constexpr float kRadToDeg = 57.29577951308232f;
 constexpr float kDegToRad = 0.017453292519943295f;
 constexpr int16_t kReplaySpeed = 20;
-// A small bearing error at the first recorded point is teach noise, not a
-// commanded corner. Avoid a turn-in-place correction before the first MOVE;
-// larger errors still use the normal replay TURN path.
-constexpr float kReplayStartupTurnDeadbandDeg = 4.0f;
+// Kept as a named compatibility alias for the first-segment policy. The MAP
+// pre-turn tolerance is now the single source of truth for replay guidance.
+constexpr float kReplayStartupTurnDeadbandDeg =
+    MAP_REPLAY_PRETURN_TOLERANCE_DEG;
 
 const char* ActionName(Ps2MapAction action) {
   switch (action) {
@@ -934,6 +935,7 @@ bool MapController::prepareReplay(const char*& rejectReason) {
   replayOriginRouteGeneration_ = route_.header.generation;
   replayTargetDistanceMm_ = 0U;
   replayTargetDeg_ = 0;
+  replayGuideBearingDeg_ = 0.0f;
   replayTravelMm_ = 0U;
   replayErrorMm_ = 0U;
   nextReplayGeneration();
@@ -1050,32 +1052,47 @@ bool MapController::startNextReplaySegment() {
   const float bearing = atan2f(replayTarget_.yMm - current.yMm,
                                replayTarget_.xMm - current.xMm) * kRadToDeg;
   const float turnDelta = shortestDeltaDeg(bearing, current.headingDeg);
+  replayGuideBearingDeg_ = bearing;
+  logGuidePlan(replayCurrentIndex_, replayTargetIndex_, targetDistance,
+               bearing, current.headingDeg, turnDelta);
   const uint32_t segmentGeneration = nextReplayGeneration();
   const bool startupNoiseTurn = replayCurrentIndex_ == 0U &&
                                 replayTargetIndex_ == 1U &&
                                 fabsf(turnDelta) <=
                                     kReplayStartupTurnDeadbandDeg;
-  if (fabsf(turnDelta) > TURN_TOLERANCE_DEG && !startupNoiseTurn) {
+  const bool coarsePreturn = fabsf(turnDelta) >
+                                  MAP_REPLAY_PRETURN_TOLERANCE_DEG &&
+                              !startupNoiseTurn;
+  const bool skipPreturn = !coarsePreturn;
+  if (!skipPreturn) {
     replayTargetDeg_ = static_cast<int16_t>(lroundf(fabsf(turnDelta)));
     replayOperation_ = MapReplayOperation::TURN;
-    if (!robot_.startReplayTurnRelative(turnDelta > 0.0f, fabsf(turnDelta),
-                                        kReplaySpeed, segmentGeneration)) {
+    logGuidePreturn(turnDelta, "TURN");
+    if (!robot_.startReplayTurnRelative(
+            turnDelta > 0.0f, fabsf(turnDelta), kReplaySpeed,
+            segmentGeneration, AiTurnProfile::MAP_COARSE)) {
       replayOperation_ = MapReplayOperation::NONE;
       abortReplay("TURN_START");
       return false;
     }
   } else {
     replayOperation_ = MapReplayOperation::MOVE;
-    if (!robot_.startReplayDistance(true, replayTargetDistanceMm_,
-                                    kReplaySpeed, segmentGeneration)) {
+    replayTargetDeg_ = static_cast<int16_t>(lroundf(bearing));
+    logGuidePreturn(turnDelta, "SKIP");
+    if (!robot_.startReplayGuidedWaypoint(
+            replayTarget_.xMm, replayTarget_.yMm, current.xMm, current.yMm,
+            kReplaySpeed, segmentGeneration)) {
       replayOperation_ = MapReplayOperation::NONE;
-      abortReplay("MOVE_START");
+      abortReplay("GUIDE_START");
       return false;
     }
   }
   replaySegmentGeneration_ = segmentGeneration;
   logSegmentStart(segmentGeneration, replayCurrentIndex_, replayTargetIndex_,
                   replayOperation_);
+  if (replayOperation_ == MapReplayOperation::MOVE) {
+    logGuideStart(replayTargetIndex_, targetDistance, bearing);
+  }
   statusDirty_ = true;
   return true;
 }
@@ -1231,6 +1248,7 @@ void MapController::clearReplayResumeContext() {
   replayOriginHeadingResetGeneration_ = 0U;
   replayTargetDistanceMm_ = 0U;
   replayTargetDeg_ = 0;
+  replayGuideBearingDeg_ = 0.0f;
   replayTravelMm_ = 0U;
   replayErrorMm_ = 0U;
   replayLapCounter_ = 0U;
@@ -1344,6 +1362,7 @@ bool MapController::consumeReplayTurnResult(const AiTurnResult& result) {
                  MapReplayOperation::TURN, 0.0f, 0.0f, targetDeg,
                  result.headingDeg);
   if (result.code == AiTurnResultCode::DONE) {
+    logGuidePreturn(result.errorDeg, "DONE");
     return true;
   }
   if (result.code == AiTurnResultCode::OBSTACLE) {
@@ -1382,10 +1401,29 @@ bool MapController::consumeReplayDistanceResult(const AiDistanceResult& result) 
   replayErrorMm_ = replayTargetDistanceMm_ > replayTravelMm_
                        ? replayTargetDistanceMm_ - replayTravelMm_
                        : replayTravelMm_ - replayTargetDistanceMm_;
-  logSegmentDone(generation, from, to, MapReplayOperation::MOVE,
-                 static_cast<float>(replayTargetDistanceMm_),
-                 static_cast<float>(replayTravelMm_), 0, 0.0f);
-  if (result.code == AiDistanceResultCode::DONE) {
+  if (result.code == AiDistanceResultCode::REALIGN_REQUIRED) {
+    Pose current;
+    float headingError = 0.0f;
+    if (currentReplayPose(current)) {
+      const float bearing = atan2f(replayTarget_.yMm - current.yMm,
+                                   replayTarget_.xMm - current.xMm) * kRadToDeg;
+      headingError = shortestDeltaDeg(bearing, current.headingDeg);
+    }
+    logGuideRealign(to, headingError);
+  } else if (result.code == AiDistanceResultCode::DONE) {
+    Pose current;
+    float positionError = 0.0f;
+    float headingError = 0.0f;
+    if (currentReplayPose(current)) {
+      positionError = distanceMm(current.xMm, current.yMm,
+                                 replayTarget_.xMm, replayTarget_.yMm);
+      headingError = shortestDeltaDeg(replayGuideBearingDeg_,
+                                      current.headingDeg);
+    }
+    logSegmentDone(generation, from, to, MapReplayOperation::MOVE,
+                   static_cast<float>(replayTargetDistanceMm_),
+                   static_cast<float>(replayTravelMm_), 0, 0.0f);
+    logGuideDone(to, positionError, headingError);
     advanceReplayAfterTarget();
   } else if (result.code == AiDistanceResultCode::OBSTACLE) {
     enterReplayHold(MapHoldReason::OBSTACLE, true);
@@ -1395,9 +1433,13 @@ bool MapController::consumeReplayDistanceResult(const AiDistanceResult& result) 
   } else if (result.code == AiDistanceResultCode::CANCELLED) {
     cancelReplay();
   } else {
-    abortReplay(result.code == AiDistanceResultCode::ENCODER_FAULT
-                    ? "ENCODER_FAULT"
-                    : "MOVE_ERROR");
+    if (result.code == AiDistanceResultCode::ENCODER_FAULT) {
+      abortReplay("ENCODER_FAULT");
+    } else if (result.code == AiDistanceResultCode::HEADING_LOST) {
+      abortReplay("HEADING_LOST");
+    } else {
+      abortReplay("MOVE_ERROR");
+    }
   }
   return true;
 }
@@ -1545,7 +1587,15 @@ void MapController::publishStatus() {
       static_cast<uint8_t>(metadata.replayMode),
       static_cast<uint8_t>(holdReason_), replayTargetDeg_, replayLapCounter_,
       closeCandidateDistanceMm_, closeCandidateHeadingDeg_);
-  lastStatusMs_ = millis();
+  const uint32_t now = millis();
+  if (replayActive_ && replayOperation_ == MapReplayOperation::MOVE &&
+      robot_.guidedWaypointActive() &&
+      (lastGuidanceLogMs_ == 0U ||
+       now - lastGuidanceLogMs_ >= MAP_GUIDE_TELEMETRY_MS)) {
+    logGuideUpdate();
+    lastGuidanceLogMs_ = now;
+  }
+  lastStatusMs_ = now;
   statusDirty_ = false;
 }
 
@@ -1724,4 +1774,90 @@ void MapController::logSegmentDone(uint32_t generation, uint16_t from,
   debug_.print(targetDeg);
   debug_.print(",HEADING=");
   debug_.println(headingDeg, 2);
+}
+
+void MapController::logGuidePlan(uint16_t from, uint16_t to, float distanceMm,
+                                  float bearingDeg, float headingDeg,
+                                  float headingErrorDeg) const {
+  debug_.print("MAP,GUIDE,PLAN,WP_FROM=");
+  debug_.print(static_cast<unsigned>(from));
+  debug_.print(",WP_TO=");
+  debug_.print(static_cast<unsigned>(to));
+  debug_.print(",DIST_MM=");
+  debug_.print(distanceMm, 1);
+  debug_.print(",BEARING=");
+  debug_.print(bearingDeg, 2);
+  debug_.print(",HDG=");
+  debug_.print(headingDeg, 2);
+  debug_.print(",HDG_ERR=");
+  debug_.print(headingErrorDeg, 2);
+  debug_.print(",PRETURN_TOL=");
+  debug_.print(MAP_REPLAY_PRETURN_TOLERANCE_DEG, 1);
+  debug_.print(",REALIGN_THR=");
+  debug_.println(MAP_GUIDE_REALIGN_THRESHOLD_DEG, 1);
+}
+
+void MapController::logGuidePreturn(float headingErrorDeg,
+                                     const char* action) const {
+  debug_.print("MAP,GUIDE,PRETURN,ERR=");
+  debug_.print(headingErrorDeg, 2);
+  debug_.print(",TOL=");
+  debug_.print(MAP_REPLAY_PRETURN_TOLERANCE_DEG, 1);
+  debug_.print(",SETTLE_MS=");
+  debug_.print(MAP_REPLAY_PRETURN_SETTLE_MS);
+  debug_.print(",ACTION=");
+  debug_.println(action != nullptr ? action : "UNKNOWN");
+}
+
+void MapController::logGuideStart(uint16_t waypoint, float distanceMm,
+                                  float bearingDeg) const {
+  debug_.print("MAP,GUIDE,START,WP=");
+  debug_.print(static_cast<unsigned>(waypoint));
+  debug_.print(",DIST_MM=");
+  debug_.print(distanceMm, 1);
+  debug_.print(",BEARING=");
+  debug_.print(bearingDeg, 2);
+  debug_.print(",MIN_SPEED=");
+  debug_.println(MAP_GUIDE_MIN_SPEED);
+}
+
+void MapController::logGuideUpdate() const {
+  debug_.print("MAP,GUIDE,UPDATE,REMAIN_MM=");
+  debug_.print(robot_.guidedRemainingMm(), 1);
+  debug_.print(",HDG_ERR=");
+  debug_.print(robot_.guidedHeadingErrorDeg(), 2);
+  debug_.print(",XTRACK_MM=");
+  debug_.print(robot_.guidedCrossTrackMm(), 1);
+  debug_.print(",BASE=");
+  debug_.print(robot_.guidedBaseSpeed());
+  debug_.print(",STEER=");
+  debug_.print(robot_.guidedSteering());
+  debug_.print(",L=");
+  debug_.print(robot_.targetLeftCommand());
+  debug_.print(",R=");
+  debug_.println(robot_.targetRightCommand());
+}
+
+void MapController::logGuideDone(uint16_t waypoint, float positionErrorMm,
+                                 float headingErrorDeg) const {
+  debug_.print("MAP,GUIDE,DONE,WP=");
+  debug_.print(static_cast<unsigned>(waypoint));
+  debug_.print(",POS_ERR_MM=");
+  debug_.print(positionErrorMm, 1);
+  debug_.print(",HDG_ERR=");
+  debug_.print(headingErrorDeg, 2);
+  debug_.print(",POS_TOL_MM=");
+  debug_.print(MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM);
+  debug_.print(",HDG_TOL=");
+  debug_.println(MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG, 1);
+}
+
+void MapController::logGuideRealign(uint16_t waypoint,
+                                    float headingErrorDeg) const {
+  debug_.print("MAP,GUIDE,REALIGN,WP=");
+  debug_.print(static_cast<unsigned>(waypoint));
+  debug_.print(",ERR=");
+  debug_.print(headingErrorDeg, 2);
+  debug_.print(",THRESHOLD=");
+  debug_.println(MAP_GUIDE_REALIGN_THRESHOLD_DEG, 1);
 }

@@ -305,7 +305,8 @@ void RobotController::applyMotorCommand() {
       if (limitedForward == 0 && abs(turn) < OBSTACLE_MIN_FORWARD_COMMAND) {
         const bool aiWasDriving = aiMotionMode_ == AiMotionMode::PULSE ||
                                   aiMotionMode_ == AiMotionMode::CONTINUOUS ||
-                                  aiMotionMode_ == AiMotionMode::DISTANCE;
+                                  aiMotionMode_ == AiMotionMode::DISTANCE ||
+                                  aiMotionMode_ == AiMotionMode::GUIDED_WAYPOINT;
         if (aiWasDriving) {
           aiMotionMode_ = AiMotionMode::NONE;
           aiMotionDeadlineMs_ = 0;
@@ -406,6 +407,15 @@ void RobotController::stopImmediately(bool requireFreshManualCommand) {
   aiMotionGeneration_ = 0U;
   aiTurnYawRateDegS_ = 0.0f;
   aiTurnStartBoostUntilMs_ = 0;
+  aiTurnProfile_ = AiTurnProfile::PRECISE;
+  aiTurnToleranceDeg_ = TURN_TOLERANCE_DEG;
+  aiTurnSettleMs_ = TURN_SETTLE_MS;
+  guidedTargetXMm_ = guidedTargetYMm_ = 0.0f;
+  guidedSegmentStartXMm_ = guidedSegmentStartYMm_ = 0.0f;
+  guidedRemainingMm_ = guidedBearingDeg_ = guidedHeadingErrorDeg_ = 0.0f;
+  guidedCrossTrackMm_ = 0.0f;
+  guidedBaseSpeed_ = guidedRequestedSpeed_ = 0;
+  guidedSteering_ = 0;
   const bool lockBrake = !freeStop_ &&
                          (brakeEnabled_ || obstacleBrakeActive_);
   stopPwmLatched_ = !lockBrake;
@@ -505,6 +515,56 @@ bool RobotController::startReplayDistance(bool forward, uint32_t distanceMm,
                        motionGeneration);
 }
 
+bool RobotController::startReplayGuidedWaypoint(
+    float targetXMm, float targetYMm, float segmentStartXMm,
+    float segmentStartYMm, int16_t speed, uint32_t motionGeneration) {
+  const uint32_t now = millis();
+  if (!canStartReplayMotion(now) || !odometry_.ready() ||
+      !odometry_.healthy() || !headingAvailable() ||
+      !isfinite(targetXMm) || !isfinite(targetYMm) ||
+      !isfinite(segmentStartXMm) || !isfinite(segmentStartYMm)) {
+    return false;
+  }
+  const float initialDistance = hypotf(targetXMm - segmentStartXMm,
+                                       targetYMm - segmentStartYMm);
+  if (initialDistance <= 0.0f ||
+      initialDistance > static_cast<float>(ROBOT_AI_DISTANCE_MAX_MM)) {
+    return false;
+  }
+  motionOwner_ = MotionOwner::REPLAY;
+  aiMotionMode_ = AiMotionMode::GUIDED_WAYPOINT;
+  aiMotionDeadlineMs_ = now + ROBOT_AI_DISTANCE_TIMEOUT_MS;
+  aiDistanceStartMm_ = odometry_.data().distanceMm;
+  aiDistanceStartLeftMm_ = odometry_.data().leftDistanceMm;
+  aiDistanceStartRightMm_ = odometry_.data().rightDistanceMm;
+  aiDistanceTargetMm_ = initialDistance;
+  aiDistanceForward_ = true;
+  aiMotionGeneration_ = motionGeneration;
+  aiDistanceResultPending_ = false;
+  guidedTargetXMm_ = targetXMm;
+  guidedTargetYMm_ = targetYMm;
+  guidedSegmentStartXMm_ = segmentStartXMm;
+  guidedSegmentStartYMm_ = segmentStartYMm;
+  guidedRemainingMm_ = initialDistance;
+  guidedBearingDeg_ = atan2f(targetYMm - segmentStartYMm,
+                             targetXMm - segmentStartXMm) *
+                      57.29577951308232f;
+  guidedHeadingErrorDeg_ = 0.0f;
+  guidedCrossTrackMm_ = 0.0f;
+  guidedRequestedSpeed_ = constrain(speed, MAP_GUIDE_MIN_SPEED, TURN_MAX_SPEED);
+  guidedBaseSpeed_ = guidedRequestedSpeed_;
+  guidedSteering_ = 0;
+  stopPwmLatched_ = false;
+  straightCommand_ = false;
+  reversing_ = false;
+  heading_.reset();
+  state_ = RobotState::AI_MODE;
+  targetLeft_ = guidedBaseSpeed_;
+  targetRight_ = guidedBaseSpeed_;
+  applyMotorCommand();
+  return true;
+}
+
 float RobotController::aiDistanceTravelledMm() const {
   const float delta = odometry_.data().distanceMm - aiDistanceStartMm_;
   return aiDistanceForward_ ? delta : -delta;
@@ -535,7 +595,8 @@ void RobotController::finishAiDistance(AiDistanceResultCode code) {
 }
 
 void RobotController::cancelAiMotionForManual() {
-  if (aiMotionMode_ == AiMotionMode::DISTANCE) {
+  if (aiMotionMode_ == AiMotionMode::DISTANCE ||
+      aiMotionMode_ == AiMotionMode::GUIDED_WAYPOINT) {
     finishAiDistance(AiDistanceResultCode::CANCELLED);
   } else if (aiMotionMode_ == AiMotionMode::TURN) {
     finishAiTurn(AiTurnResultCode::CANCELLED);
@@ -555,7 +616,8 @@ bool RobotController::takeAiDistanceResult(AiDistanceResult& result) {
 bool RobotController::startTurnSession(MotionOwner owner, float targetHeading,
                                         float targetUnwrappedHeading,
                                         bool multiTurn, int16_t maxSpeed,
-                                        uint32_t motionGeneration) {
+                                        uint32_t motionGeneration,
+                                        AiTurnProfile profile) {
   const uint32_t now = millis();
   const bool canStart = owner == MotionOwner::REPLAY
                             ? canStartReplayMotion(now)
@@ -569,6 +631,13 @@ bool RobotController::startTurnSession(MotionOwner owner, float targetHeading,
   aiTurnTargetUnwrappedDeg_ = targetUnwrappedHeading;
   aiTurnUnwrappedHeadingDeg_ = startHeading;
   aiTurnMultiTurn_ = multiTurn;
+  aiTurnProfile_ = profile;
+  aiTurnToleranceDeg_ = profile == AiTurnProfile::MAP_COARSE
+                            ? MAP_REPLAY_PRETURN_TOLERANCE_DEG
+                            : TURN_TOLERANCE_DEG;
+  aiTurnSettleMs_ = profile == AiTurnProfile::MAP_COARSE
+                        ? MAP_REPLAY_PRETURN_SETTLE_MS
+                        : TURN_SETTLE_MS;
   aiTurnErrorDeg_ = aiTurnMultiTurn_
       ? aiTurnTargetUnwrappedDeg_ - aiTurnUnwrappedHeadingDeg_
       : HeadingFusion::shortestDelta(aiTurnTargetDeg_, startHeading);
@@ -626,7 +695,8 @@ bool RobotController::startAiTurnAbsolute(float targetHeading,
 
 bool RobotController::startReplayTurnRelative(bool left, float degrees,
                                                int16_t maxSpeed,
-                                               uint32_t motionGeneration) {
+                                               uint32_t motionGeneration,
+                                               AiTurnProfile profile) {
   if (!headingAvailable() || degrees <= 0.0f ||
       degrees > static_cast<float>(TURN_MAX_RELATIVE_DEG)) {
     return false;
@@ -636,7 +706,7 @@ bool RobotController::startReplayTurnRelative(bool left, float degrees,
   return startTurnSession(MotionOwner::REPLAY,
                           HeadingFusion::normalize(startHeading + delta),
                           startHeading + delta, fabsf(degrees) > 180.0f,
-                          maxSpeed, motionGeneration);
+                          maxSpeed, motionGeneration, profile);
 }
 
 void RobotController::finishAiTurn(AiTurnResultCode code) {
@@ -682,6 +752,140 @@ void RobotController::updateAiDistance(uint32_t nowMs) {
   }
 }
 
+int16_t RobotController::guidedSteeringCommand(
+    float headingErrorDeg, float crossTrackErrorMm) const {
+  // Positive steering is a left correction on this chassis: the left wheel
+  // slows and the right wheel speeds up.  Positive cross-track means the
+  // robot is left of the start->target line, so its correction is subtracted.
+  const float steering = MAP_GUIDE_HEADING_GAIN * headingErrorDeg -
+                         MAP_GUIDE_CROSSTRACK_GAIN * crossTrackErrorMm;
+  return static_cast<int16_t>(lroundf(constrain(
+      steering, -static_cast<float>(MAP_GUIDE_MAX_STEER_COMMAND),
+      static_cast<float>(MAP_GUIDE_MAX_STEER_COMMAND))));
+}
+
+void RobotController::updateAiGuidedWaypoint(uint32_t nowMs) {
+  if (aiMotionMode_ != AiMotionMode::GUIDED_WAYPOINT) return;
+  if (static_cast<int32_t>(nowMs - aiMotionDeadlineMs_) >= 0) {
+    finishAiDistance(AiDistanceResultCode::TIMEOUT);
+    return;
+  }
+  if (!odometry_.ready() || !odometry_.healthy()) {
+    finishAiDistance(AiDistanceResultCode::ENCODER_FAULT);
+    return;
+  }
+  if (!headingAvailable()) {
+    finishAiDistance(AiDistanceResultCode::HEADING_LOST);
+    return;
+  }
+
+  const WheelOdometryData& pose = odometry_.data();
+  if (!isfinite(pose.xMm) || !isfinite(pose.yMm) ||
+      !isfinite(currentHeadingDeg())) {
+    finishAiDistance(AiDistanceResultCode::ENCODER_FAULT);
+    return;
+  }
+  const float dx = guidedTargetXMm_ - pose.xMm;
+  const float dy = guidedTargetYMm_ - pose.yMm;
+  const float remaining = hypotf(dx, dy);
+  guidedRemainingMm_ = remaining;
+
+  const float segmentDx = guidedTargetXMm_ - guidedSegmentStartXMm_;
+  const float segmentDy = guidedTargetYMm_ - guidedSegmentStartYMm_;
+  const float segmentLength = hypotf(segmentDx, segmentDy);
+  const float targetBearing = atan2f(dy, dx) * 57.29577951308232f;
+  guidedBearingDeg_ = targetBearing;
+  guidedHeadingErrorDeg_ = HeadingFusion::shortestDelta(
+      targetBearing, currentHeadingDeg());
+  guidedCrossTrackMm_ = segmentLength > 1.0f
+      ? constrain((segmentDx * (pose.yMm - guidedSegmentStartYMm_) -
+                   segmentDy * (pose.xMm - guidedSegmentStartXMm_)) /
+                      segmentLength,
+                  -MAP_GUIDE_MAX_CROSSTRACK_MM, MAP_GUIDE_MAX_CROSSTRACK_MM)
+      : 0.0f;
+
+  const float incomingBearing = segmentLength > 1.0f
+      ? atan2f(segmentDy, segmentDx) * 57.29577951308232f
+      : targetBearing;
+  const float arrivalHeadingError = HeadingFusion::shortestDelta(
+      incomingBearing, currentHeadingDeg());
+  if (remaining <= MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM &&
+      fabsf(arrivalHeadingError) <= MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG) {
+#if ROBOT_DEBUG
+    debug_.print("MAP,GUIDE,ARRIVAL,POS_ERR=");
+    debug_.print(remaining, 1);
+    debug_.print(",HDG_ERR=");
+    debug_.print(arrivalHeadingError, 2);
+    debug_.print(",TOL=");
+    debug_.print(MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG, 1);
+    debug_.println(",ACTION=ACCEPT");
+#endif
+    targetLeft_ = targetRight_ = currentLeft_ = currentRight_ = 0;
+    guidedSteering_ = 0;
+    motors_.stop();
+    finishAiDistance(AiDistanceResultCode::DONE);
+    return;
+  }
+
+  // Position is the primary arrival gate. If the chassis is close but the
+  // incoming heading is only moderately outside tolerance, keep the bounded
+  // differential guidance alive for a short correction; do not start the
+  // precise MCP turn controller at an intermediate waypoint. A larger error
+  // uses the same coarse realign path as any other live guidance error.
+  if (remaining <= MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM &&
+      fabsf(arrivalHeadingError) >= MAP_GUIDE_REALIGN_THRESHOLD_DEG) {
+#if ROBOT_DEBUG
+    debug_.print("MAP,GUIDE,ARRIVAL,POS_ERR=");
+    debug_.print(remaining, 1);
+    debug_.print(",HDG_ERR=");
+    debug_.print(arrivalHeadingError, 2);
+    debug_.println(",ACTION=REALIGN");
+#endif
+    targetLeft_ = targetRight_ = currentLeft_ = currentRight_ = 0;
+    guidedSteering_ = 0;
+    finishAiDistance(AiDistanceResultCode::REALIGN_REQUIRED);
+    return;
+  }
+
+  // A large live bearing error means the robot is no longer converging by a
+  // gentle differential correction. Stop forward motion and let MapController
+  // re-enter the shared coarse-turn primitive for this same waypoint.
+  if (fabsf(guidedHeadingErrorDeg_) >= MAP_GUIDE_REALIGN_THRESHOLD_DEG) {
+#if ROBOT_DEBUG
+    debug_.print("MAP,GUIDE,REALIGN,ERR=");
+    debug_.println(guidedHeadingErrorDeg_, 2);
+#endif
+    targetLeft_ = targetRight_ = currentLeft_ = currentRight_ = 0;
+    guidedSteering_ = 0;
+    finishAiDistance(AiDistanceResultCode::REALIGN_REQUIRED);
+    return;
+  }
+
+  const float slowRatio = constrain(
+      remaining / static_cast<float>(MAP_GUIDE_SLOW_DISTANCE_MM), 0.0f, 1.0f);
+  guidedBaseSpeed_ = static_cast<int16_t>(lroundf(
+      static_cast<float>(MAP_GUIDE_MIN_SPEED) +
+      static_cast<float>(guidedRequestedSpeed_ - MAP_GUIDE_MIN_SPEED) *
+          slowRatio));
+  int16_t steering = guidedSteeringCommand(guidedHeadingErrorDeg_,
+                                           guidedCrossTrackMm_);
+  const int16_t maximumSafeSteer = max(
+      static_cast<int16_t>(0),
+      static_cast<int16_t>(guidedBaseSpeed_ - OBSTACLE_MIN_FORWARD_COMMAND));
+  steering = constrain(steering, -maximumSafeSteer, maximumSafeSteer);
+  guidedSteering_ = steering;
+  targetLeft_ = constrain(guidedBaseSpeed_ - steering, 0, 255);
+  targetRight_ = constrain(guidedBaseSpeed_ + steering, 0, 255);
+  state_ = RobotState::AI_MODE;
+  straightCommand_ = false;
+  reversing_ = false;
+  heading_.reset();
+  applyMotorCommand();
+  if (aiMotionMode_ == AiMotionMode::NONE) {
+    finishAiDistance(AiDistanceResultCode::OBSTACLE);
+  }
+}
+
 void RobotController::updateAiTurn(uint32_t nowMs) {
   if (aiMotionMode_ != AiMotionMode::TURN) return;
   if (!headingAvailable()) {
@@ -704,18 +908,18 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   // missing ultrasonic echo must not turn this safe completion into an
   // obstacle failure.  Every turn that still needs wheel motion continues
   // through the fail-closed ultrasonic gate below.
-  if (fabsf(aiTurnErrorDeg_) <= TURN_TOLERANCE_DEG &&
+  if (fabsf(aiTurnErrorDeg_) <= aiTurnToleranceDeg_ &&
       fabsf(aiTurnYawRateDegS_) <= TURN_SETTLE_RATE_DEG_S) {
     targetLeft_ = targetRight_ = currentLeft_ = currentRight_ = 0;
     aiTurnCommandSpeed_ = 0;
     aiTurnPulseDriving_ = false;
     motors_.stop();
     if (aiTurnSettleStartMs_ == 0U) aiTurnSettleStartMs_ = nowMs;
-    if ((nowMs - aiTurnSettleStartMs_) >= TURN_SETTLE_MS) {
+    if ((nowMs - aiTurnSettleStartMs_) >= aiTurnSettleMs_) {
       const float settleError = aiTurnMultiTurn_
           ? aiTurnTargetUnwrappedDeg_ - aiTurnUnwrappedHeadingDeg_
           : HeadingFusion::shortestDelta(aiTurnTargetDeg_, currentHeadingDeg());
-      if (fabsf(settleError) <= TURN_TOLERANCE_DEG &&
+      if (fabsf(settleError) <= aiTurnToleranceDeg_ &&
           fabsf(aiTurnYawRateDegS_) <= TURN_SETTLE_RATE_DEG_S) {
         finishAiTurn(AiTurnResultCode::DONE);
       } else {
@@ -792,7 +996,7 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
         ? aiTurnTargetUnwrappedDeg_ - aiTurnUnwrappedHeadingDeg_
         : HeadingFusion::shortestDelta(aiTurnTargetDeg_, headingNow);
     const int8_t errorSign = aiTurnErrorDeg_ < 0.0f ? -1 : 1;
-    if (fabsf(aiTurnErrorDeg_) > TURN_TOLERANCE_DEG &&
+    if (fabsf(aiTurnErrorDeg_) > aiTurnToleranceDeg_ &&
         aiTurnLastErrorSign_ != 0 && errorSign != aiTurnLastErrorSign_) {
       overshot = true;
       aiTurnCoastUntilMs_ = nowMs + TURN_OVERSHOOT_COAST_MS;
@@ -826,18 +1030,18 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
 
   // DONE requires both position and angular velocity to be settled. Merely
   // crossing the target is not success because the chassis may still coast.
-  if (absError <= TURN_TOLERANCE_DEG &&
+  if (absError <= aiTurnToleranceDeg_ &&
       turnRateSettled) {
     targetLeft_ = targetRight_ = currentLeft_ = currentRight_ = 0;
     aiTurnCommandSpeed_ = 0;
     aiTurnPulseDriving_ = false;
     motors_.stop();
     if (aiTurnSettleStartMs_ == 0U) aiTurnSettleStartMs_ = nowMs;
-    if ((nowMs - aiTurnSettleStartMs_) >= TURN_SETTLE_MS) {
+    if ((nowMs - aiTurnSettleStartMs_) >= aiTurnSettleMs_) {
       const float settleError = aiTurnMultiTurn_
           ? aiTurnTargetUnwrappedDeg_ - aiTurnUnwrappedHeadingDeg_
           : HeadingFusion::shortestDelta(aiTurnTargetDeg_, currentHeadingDeg());
-      if (fabsf(settleError) <= TURN_TOLERANCE_DEG &&
+      if (fabsf(settleError) <= aiTurnToleranceDeg_ &&
           turnRateSettled) {
         finishAiTurn(AiTurnResultCode::DONE);
       } else {
@@ -862,11 +1066,11 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
       aiTurnErrorDeg_ * aiTurnYawRateDegS_ > 0.0f;
   const bool projectedToTarget =
       movingTowardTarget &&
-      (fabsf(projectedError) <= TURN_TOLERANCE_DEG ||
+      (fabsf(projectedError) <= aiTurnToleranceDeg_ ||
        projectedError * aiTurnErrorDeg_ <= 0.0f);
 
   if (overshot || projectedToTarget ||
-      (absError <= TURN_TOLERANCE_DEG &&
+    (absError <= aiTurnToleranceDeg_ &&
        absYawRate > TURN_SETTLE_RATE_DEG_S)) {
     aiTurnPulseDriving_ = false;
     if (static_cast<int32_t>(nowMs - aiTurnCoastUntilMs_) >= 0) {
@@ -1032,7 +1236,8 @@ void RobotController::updateFast() {
   }
   if (aiMotionMode_ == AiMotionMode::CONTINUOUS ||
       aiMotionMode_ == AiMotionMode::TURN ||
-      aiMotionMode_ == AiMotionMode::DISTANCE) {
+      aiMotionMode_ == AiMotionMode::DISTANCE ||
+      aiMotionMode_ == AiMotionMode::GUIDED_WAYPOINT) {
     return;
   }
   // Release/timeout bypasses ramp, heading sensor, LCD and the normal control period.
@@ -1207,6 +1412,8 @@ void RobotController::updateControl() {
       finishAiDistance(AiDistanceResultCode::ENCODER_FAULT);
     } else if (aiMotionMode_ == AiMotionMode::TURN) {
       finishAiTurn(AiTurnResultCode::MOTION_FAULT);
+    } else if (aiMotionMode_ == AiMotionMode::GUIDED_WAYPOINT) {
+      finishAiDistance(AiDistanceResultCode::ENCODER_FAULT);
     } else {
       stopImmediately();
     }
@@ -1218,6 +1425,10 @@ void RobotController::updateControl() {
   }
   if (aiMotionMode_ == AiMotionMode::DISTANCE) {
     updateAiDistance(now);
+    return;
+  }
+  if (aiMotionMode_ == AiMotionMode::GUIDED_WAYPOINT) {
+    updateAiGuidedWaypoint(now);
     return;
   }
   if (aiMotionMode_ == AiMotionMode::PULSE) {

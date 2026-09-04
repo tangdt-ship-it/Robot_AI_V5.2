@@ -23,8 +23,12 @@ enum class RobotState : uint8_t {
   AUTONOMOUS_MODE
 };
 
-enum class AiMotionMode : uint8_t { NONE, PULSE, CONTINUOUS, TURN, DISTANCE };
+enum class AiMotionMode : uint8_t {
+  NONE, PULSE, CONTINUOUS, TURN, DISTANCE, GUIDED_WAYPOINT
+};
 enum class MotionOwner : uint8_t { NONE, MCP, MISSION, REPLAY, DIAGNOSTIC, PS2 };
+
+enum class AiTurnProfile : uint8_t { PRECISE, MAP_COARSE };
 
 enum class AiTurnResultCode : uint8_t {
   NONE, DONE, TIMEOUT, HEADING_LOST, MOTION_FAULT, OBSTACLE, CANCELLED
@@ -42,7 +46,8 @@ struct AiTurnResult {
 };
 
 enum class AiDistanceResultCode : uint8_t {
-  NONE, DONE, TIMEOUT, OBSTACLE, ENCODER_FAULT, CANCELLED
+  NONE, DONE, TIMEOUT, OBSTACLE, ENCODER_FAULT, CANCELLED,
+  HEADING_LOST, REALIGN_REQUIRED
 };
 
 struct AiDistanceResult {
@@ -89,7 +94,12 @@ class RobotController {
   bool startReplayDistance(bool forward, uint32_t distanceMm, int16_t speed,
                            uint32_t motionGeneration = 0U);
   bool startReplayTurnRelative(bool left, float degrees, int16_t maxSpeed,
-                               uint32_t motionGeneration = 0U);
+                               uint32_t motionGeneration = 0U,
+                               AiTurnProfile profile = AiTurnProfile::PRECISE);
+  bool startReplayGuidedWaypoint(float targetXMm, float targetYMm,
+                                 float segmentStartXMm,
+                                 float segmentStartYMm, int16_t speed,
+                                 uint32_t motionGeneration = 0U);
   bool takeAiTurnResult(AiTurnResult& result);
   bool takeAiDistanceResult(AiDistanceResult& result);
 
@@ -102,7 +112,12 @@ class RobotController {
   void setBrakeEnabled(bool enabled);
   bool aiMotionActive() const { return aiMotionMode_ != AiMotionMode::NONE; }
   bool aiTurnActive() const { return aiMotionMode_ == AiMotionMode::TURN; }
-  bool aiDistanceActive() const { return aiMotionMode_ == AiMotionMode::DISTANCE; }
+  bool aiDistanceActive() const {
+    return aiMotionMode_ == AiMotionMode::DISTANCE;
+  }
+  bool guidedWaypointActive() const {
+    return aiMotionMode_ == AiMotionMode::GUIDED_WAYPOINT;
+  }
   bool motorsStopped() const { return motors_.leftSpeed() == 0 && motors_.rightSpeed() == 0; }
   uint32_t headingResetGeneration() const { return headingResetGeneration_; }
   float aiDistanceTargetMm() const { return aiDistanceTargetMm_; }
@@ -110,6 +125,12 @@ class RobotController {
   float aiTurnTarget() const { return aiTurnTargetDeg_; }
   float aiTurnError() const { return aiTurnErrorDeg_; }
   int16_t aiTurnSpeed() const { return aiTurnCommandSpeed_; }
+  float guidedRemainingMm() const { return guidedRemainingMm_; }
+  float guidedBearingDeg() const { return guidedBearingDeg_; }
+  float guidedHeadingErrorDeg() const { return guidedHeadingErrorDeg_; }
+  float guidedCrossTrackMm() const { return guidedCrossTrackMm_; }
+  int16_t guidedBaseSpeed() const { return guidedBaseSpeed_; }
+  int16_t guidedSteering() const { return guidedSteering_; }
   int16_t targetLeftCommand() const { return targetLeft_; }
   int16_t targetRightCommand() const { return targetRight_; }
   int16_t currentLeftCommand() const { return currentLeft_; }
@@ -142,9 +163,13 @@ class RobotController {
                      int16_t speed, uint32_t motionGeneration = 0U);
   bool startTurnSession(MotionOwner owner, float targetHeading,
                         float targetUnwrappedHeading, bool multiTurn,
-                        int16_t maxSpeed, uint32_t motionGeneration = 0U);
+                        int16_t maxSpeed, uint32_t motionGeneration = 0U,
+                        AiTurnProfile profile = AiTurnProfile::PRECISE);
   void finishAiTurn(AiTurnResultCode code);
   void finishAiDistance(AiDistanceResultCode code);
+  void updateAiGuidedWaypoint(uint32_t nowMs);
+  int16_t guidedSteeringCommand(float headingErrorDeg,
+                                float crossTrackErrorMm) const;
   static int16_t rampToward(int16_t current, int16_t target);
 
   MotorController& motors_;
@@ -193,6 +218,9 @@ class RobotController {
   float aiTurnUnwrappedHeadingDeg_ = 0.0f;
   bool aiTurnMultiTurn_ = false;
   float aiTurnErrorDeg_ = 0.0f;
+  AiTurnProfile aiTurnProfile_ = AiTurnProfile::PRECISE;
+  float aiTurnToleranceDeg_ = TURN_TOLERANCE_DEG;
+  uint32_t aiTurnSettleMs_ = TURN_SETTLE_MS;
   int16_t aiTurnMaxSpeed_ = TURN_MIN_SPEED;
   int16_t aiTurnCommandSpeed_ = 0;
   uint32_t aiTurnSettleStartMs_ = 0;
@@ -215,6 +243,17 @@ class RobotController {
   bool aiDistanceForward_ = true;
   bool aiDistanceResultPending_ = false;
   AiDistanceResult aiDistanceResult_;
+  float guidedTargetXMm_ = 0.0f;
+  float guidedTargetYMm_ = 0.0f;
+  float guidedSegmentStartXMm_ = 0.0f;
+  float guidedSegmentStartYMm_ = 0.0f;
+  float guidedRemainingMm_ = 0.0f;
+  float guidedBearingDeg_ = 0.0f;
+  float guidedHeadingErrorDeg_ = 0.0f;
+  float guidedCrossTrackMm_ = 0.0f;
+  int16_t guidedBaseSpeed_ = 0;
+  int16_t guidedRequestedSpeed_ = 0;
+  int16_t guidedSteering_ = 0;
   MotionOwner motionOwner_ = MotionOwner::NONE;
   bool manualResumeRequired_ = false;
   uint32_t headingResetGeneration_ = 0;

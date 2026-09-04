@@ -103,6 +103,16 @@ class MapController {
                       MapReplayOperation operation, float targetMm,
                       float travelledMm, int16_t targetDeg,
                       float headingDeg) const;
+  void logGuidePlan(uint16_t from, uint16_t to, float distanceMm,
+                    float bearingDeg, float headingDeg,
+                    float headingErrorDeg) const;
+  void logGuidePreturn(float headingErrorDeg, const char* action) const;
+  void logGuideStart(uint16_t waypoint, float distanceMm,
+                     float bearingDeg) const;
+  void logGuideUpdate() const;
+  void logGuideDone(uint16_t waypoint, float positionErrorMm,
+                    float headingErrorDeg) const;
+  void logGuideRealign(uint16_t waypoint, float headingErrorDeg) const;
 
   void serviceStorage();
   void publishStatus();
@@ -165,6 +175,7 @@ class MapController {
   bool replayHoldPoseValid_ = false;
   uint32_t replayTargetDistanceMm_ = 0U;
   int16_t replayTargetDeg_ = 0;
+  float replayGuideBearingDeg_ = 0.0f;
   uint32_t replayTravelMm_ = 0U;
   uint32_t replayErrorMm_ = 0U;
   uint32_t replayLapCounter_ = 0U;
@@ -178,6 +189,7 @@ class MapController {
   uint8_t cancelTraceLines_ = 0U;
   bool statusDirty_ = true;
   uint32_t lastStatusMs_ = 0U;
+  uint32_t lastGuidanceLogMs_ = 0U;
 };
 
 #endif  // STM32_LOCAL_MAP_CONTROLLER_H
