@@ -102,6 +102,12 @@ void RobotController::updateSpeedRepeat(uint32_t nowMs) {
 }
 
 void RobotController::handleFunctionButtons() {
+  if (ps2_.mapUiCaptureActive()) {
+    // MAP Settings/Help/Delete own every non-safety button. In particular,
+    // L1/R1 must not change manual speed and L2/R2 must not reset references.
+    freeStop_ = ps2_.state().r3;
+    return;
+  }
   const uint32_t now = millis();
   if (ps2_.buttonPressed(Ps2Button::R1)) {
     changeSpeed(1); speedHolding_ = true; speedDirection_ = 1;
@@ -206,6 +212,13 @@ void RobotController::setMotionCommand(int16_t left, int16_t right,
 }
 
 void RobotController::calculateMotionCommand() {
+  if (ps2_.mapUiCaptureActive()) {
+    targetLeft_ = targetRight_ = 0;
+    state_ = RobotState::STOP;
+    straightCommand_ = false;
+    reversing_ = false;
+    return;
+  }
   const Ps2State& state = ps2_.state();
   if (state.up) {
     setMotionCommand(speedSetting_, speedSetting_, RobotState::FORWARD, true, false);
@@ -276,6 +289,12 @@ void RobotController::updateRamp() {
 }
 
 void RobotController::applyMotorCommand() {
+  if (ps2_.mapUiCaptureActive()) {
+    // This is a second, owner-independent fail-safe in case a caller reaches
+    // the actuator boundary while Settings has just claimed the UI.
+    stopImmediately(true);
+    return;
+  }
   updateRamp();
   int16_t left = currentLeft_;
   int16_t right = currentRight_;
@@ -416,6 +435,7 @@ void RobotController::stopImmediately(bool requireFreshManualCommand) {
   guidedRemainingMm_ = guidedBearingDeg_ = guidedHeadingErrorDeg_ = 0.0f;
   guidedCrossTrackMm_ = 0.0f;
   guidedBaseSpeed_ = guidedRequestedSpeed_ = 0;
+  guidedStartMs_ = 0U;
   guidedSteering_ = 0;
   const bool lockBrake = !freeStop_ &&
                          (brakeEnabled_ || obstacleBrakeActive_);
@@ -435,7 +455,7 @@ bool RobotController::canStartAiMotion(uint32_t nowMs) const {
 
 bool RobotController::canStartMotion(uint32_t nowMs, MotionOwner owner) const {
   if (brakeEnabled_ || aiMotionMode_ != AiMotionMode::NONE ||
-      ps2_.frameTimedOut(nowMs)) {
+      ps2_.frameTimedOut(nowMs) || ps2_.mapUiCaptureActive()) {
     return false;
   }
   if (owner == MotionOwner::REPLAY) {
@@ -555,16 +575,18 @@ bool RobotController::startReplayGuidedWaypoint(
                       57.29577951308232f;
   guidedHeadingErrorDeg_ = 0.0f;
   guidedCrossTrackMm_ = 0.0f;
-  guidedRequestedSpeed_ = constrain(speed, MAP_GUIDE_MIN_SPEED, TURN_MAX_SPEED);
-  guidedBaseSpeed_ = guidedRequestedSpeed_;
+  guidedRequestedSpeed_ = constrain(speed, MAP_REPLAY_SPEED_MIN,
+                                    MAP_REPLAY_SPEED_MAX);
+  guidedBaseSpeed_ = MAP_GUIDE_MIN_SPEED;
+  guidedStartMs_ = now;
   guidedSteering_ = 0;
   stopPwmLatched_ = false;
   straightCommand_ = false;
   reversing_ = false;
   heading_.reset();
   state_ = RobotState::AI_MODE;
-  targetLeft_ = guidedBaseSpeed_;
-  targetRight_ = guidedBaseSpeed_;
+  targetLeft_ = MAP_GUIDE_MIN_SPEED;
+  targetRight_ = MAP_GUIDE_MIN_SPEED;
   applyMotorCommand();
   return true;
 }
@@ -869,10 +891,25 @@ void RobotController::updateAiGuidedWaypoint(uint32_t nowMs) {
 
   const float slowRatio = constrain(
       remaining / static_cast<float>(MAP_GUIDE_SLOW_DISTANCE_MM), 0.0f, 1.0f);
-  guidedBaseSpeed_ = static_cast<int16_t>(lroundf(
+  const int16_t normalDecelSpeed = static_cast<int16_t>(lroundf(
       static_cast<float>(MAP_GUIDE_MIN_SPEED) +
       static_cast<float>(guidedRequestedSpeed_ - MAP_GUIDE_MIN_SPEED) *
           slowRatio));
+  const uint32_t rampElapsedMs = nowMs - guidedStartMs_;
+  const float rampRatio = MAP_GUIDE_ACCEL_RAMP_MS == 0U
+                              ? 1.0f
+                              : constrain(
+                                    static_cast<float>(rampElapsedMs) /
+                                        static_cast<float>(MAP_GUIDE_ACCEL_RAMP_MS),
+                                    0.0f, 1.0f);
+  const int16_t rampSpeed = static_cast<int16_t>(lroundf(
+      static_cast<float>(MAP_GUIDE_MIN_SPEED) +
+      static_cast<float>(guidedRequestedSpeed_ - MAP_GUIDE_MIN_SPEED) *
+          rampRatio));
+  // The start ramp and near-target deceleration share one bounded base speed:
+  // no 0->configured-speed jump at segment start and no configured-speed->0
+  // coast at a normal waypoint arrival.
+  guidedBaseSpeed_ = min(rampSpeed, normalDecelSpeed);
   int16_t steering = guidedSteeringCommand(guidedHeadingErrorDeg_,
                                            guidedCrossTrackMm_);
   const int16_t maximumSafeSteer = max(
@@ -1173,6 +1210,15 @@ void RobotController::updateFast() {
   const bool ps2Active = ps2_.controlActive(now);
   const bool ps2SafetyStop = ps2FrameFresh && ps2Usable &&
                              ps2_.state().r3;
+  if (ps2_.mapUiCaptureActive()) {
+    if (aiMotionMode_ != AiMotionMode::NONE ||
+        motionOwner_ != MotionOwner::NONE || targetLeft_ != 0 ||
+        targetRight_ != 0 || currentLeft_ != 0 || currentRight_ != 0 ||
+        !motorsStopped()) {
+      stopImmediately(true);
+    }
+    return;
+  }
   // A fresh neutral frame explicitly arms Manual after an external STOP,
   // even when the receiver is only in RX (outside the short ACT hold).
   if (ps2FrameFresh && ps2Usable && !ps2_.motionCommandActive()) {
@@ -1376,6 +1422,15 @@ void RobotController::updateControl() {
   if ((now - lastControlMs_) < CONTROL_PERIOD_MS) return;
   lastControlMs_ += CONTROL_PERIOD_MS;
   if ((now - lastControlMs_) > CONTROL_PERIOD_MS * 4U) lastControlMs_ = now;
+  if (ps2_.mapUiCaptureActive()) {
+    if (aiMotionMode_ != AiMotionMode::NONE ||
+        motionOwner_ != MotionOwner::NONE || targetLeft_ != 0 ||
+        targetRight_ != 0 || currentLeft_ != 0 || currentRight_ != 0 ||
+        !motorsStopped()) {
+      stopImmediately(true);
+    }
+    return;
+  }
   const bool ps2Usable = !ps2_.frameTimedOut(now);
   const bool ps2FrameFresh = ps2_.state().frameFresh;
   const bool ps2MotionFresh = ps2FrameFresh && ps2Usable &&

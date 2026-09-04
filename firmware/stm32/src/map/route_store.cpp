@@ -165,6 +165,8 @@ MapSlotMetadata MapRouteStore::metadata(MapSlot slot) const {
     result.waypointCount = header.waypointCount;
     result.routeLengthMm = header.routeLengthMm;
     result.generation = header.generation;
+    result.replaySpeed = mapReplaySpeedFromReserved(header.reserved);
+    result.loopTarget = mapLoopTargetFromReserved(header.reserved);
     return result;
   }
 

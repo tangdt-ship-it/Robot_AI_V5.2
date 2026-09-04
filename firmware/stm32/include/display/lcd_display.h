@@ -70,6 +70,10 @@ struct LcdMapStatus {
   uint32_t replayLapCounter = 0;
   uint32_t closeCandidateDistanceMm = 0;
   int16_t closeCandidateHeadingDeg = 0;
+  uint8_t settingsItem = 0;  // MODE/SPEED/LAP/DELETE MAP.
+  int16_t settingsSpeed = 20;
+  uint8_t settingsLoopTarget = 0;  // 0 = INF.
+  uint8_t helpPage = 0;
 };
 
 class LcdDisplay {
@@ -109,7 +113,11 @@ class LcdDisplay {
                     int16_t replayTargetDeg = 0,
                     uint32_t replayLapCounter = 0,
                     uint32_t closeCandidateDistanceMm = 0,
-                    int16_t closeCandidateHeadingDeg = 0);
+                    int16_t closeCandidateHeadingDeg = 0,
+                    uint8_t settingsItem = 0,
+                    int16_t settingsSpeed = 20,
+                    uint8_t settingsLoopTarget = 0,
+                    uint8_t helpPage = 0);
 
  private:
   class SoftI2C {

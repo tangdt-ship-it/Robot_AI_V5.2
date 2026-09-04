@@ -25,7 +25,6 @@ constexpr float kMaximumSegmentMm = 5000.0f;
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kRadToDeg = 57.29577951308232f;
 constexpr float kDegToRad = 0.017453292519943295f;
-constexpr int16_t kReplaySpeed = 20;
 // Kept as a named compatibility alias for the first-segment policy. The MAP
 // pre-turn tolerance is now the single source of truth for replay guidance.
 constexpr float kReplayStartupTurnDeadbandDeg =
@@ -35,6 +34,10 @@ const char* ActionName(Ps2MapAction action) {
   switch (action) {
     case Ps2MapAction::SLOT: return "SLOT";
     case Ps2MapAction::START: return "START";
+    case Ps2MapAction::UP: return "UP";
+    case Ps2MapAction::DOWN: return "DOWN";
+    case Ps2MapAction::LEFT: return "LEFT";
+    case Ps2MapAction::RIGHT: return "RIGHT";
     case Ps2MapAction::TRIANGLE: return "TRIANGLE";
     case Ps2MapAction::SQUARE: return "SQUARE";
     case Ps2MapAction::SQUARE_LONG: return "SQUARE_LONG";
@@ -74,6 +77,7 @@ MapController::MapController(RobotController& robot, Ps2Controller& ps2,
       fusion_(fusion), ultrasonic_(ultrasonic), debug_(debugStream) {}
 
 void MapController::begin() {
+  ps2_.setMapUiCapture(false);
   if (!store_.begin()) {
     storeState_ = MapStoreState::STORAGE_ERROR;
     log("OWNER=STM32,STORE=ERROR");
@@ -86,6 +90,8 @@ void MapController::begin() {
   routeMode_ = IsReplayModeAllowed(routeType_, metadata.replayMode)
                    ? metadata.replayMode
                    : MapReplayMode::ONCE;
+  replaySpeed_ = metadata.replaySpeed;
+  loopTarget_ = metadata.loopTarget;
   mode_ = metadata.state == MapStoreState::SAVED
               ? MapControllerMode::SAVED
               : MapControllerMode::READY;
@@ -100,6 +106,16 @@ void MapController::processInput() {
 
 void MapController::update() {
   processInput();
+
+  // A PS2 reconnect resets its transient parser state. Reassert the explicit
+  // UI capture while Settings/Help/Delete is still active so a reconnect can
+  // never reopen the manual motor path behind the menu.
+  if ((mode_ == MapControllerMode::SETTINGS ||
+       mode_ == MapControllerMode::HELP ||
+       mode_ == MapControllerMode::DELETE_CONFIRM) &&
+      !ps2_.mapUiCaptureActive()) {
+    ps2_.setMapUiCapture(true);
+  }
 
   if (teachFinishPending_) {
     if (robot_.motorsStopped() && !robot_.aiMotionActive() &&
@@ -151,6 +167,12 @@ void MapController::handleEvent(const Ps2MapEvent& event) {
   switch (event.action) {
     case Ps2MapAction::SLOT: handleSlot(event.slot); break;
     case Ps2MapAction::START: handleStart(); break;
+    case Ps2MapAction::UP:
+    case Ps2MapAction::DOWN:
+    case Ps2MapAction::LEFT:
+    case Ps2MapAction::RIGHT:
+      handleSettingsInput(event.action);
+      break;
     case Ps2MapAction::TRIANGLE: handleTriangle(); break;
     case Ps2MapAction::CIRCLE: handleCircle(); break;
     case Ps2MapAction::SQUARE: handleSquare(false); break;
@@ -158,8 +180,13 @@ void MapController::handleEvent(const Ps2MapEvent& event) {
     case Ps2MapAction::CROSS: handleCross(); break;
     case Ps2MapAction::CROSS_LONG: handleCrossLong(); break;
     case Ps2MapAction::SELECT_LONG:
-      // Kept as a compatibility event but no longer aliases delete/cancel;
-      // CROSS is the unambiguous local cancel/STOP action.
+      {
+        const char* reason = nullptr;
+        if (!enterSettings(reason)) {
+          debug_.print("MAP,SETTINGS,REJECT,REASON=");
+          debug_.println(reason != nullptr ? reason : "NOT_ALLOWED");
+        }
+      }
       break;
   }
   statusDirty_ = true;
@@ -169,7 +196,9 @@ void MapController::handleSlot(uint8_t slot) {
   if (mode_ == MapControllerMode::TEACHING || replayActive_ ||
       mode_ == MapControllerMode::DELETE_CONFIRM ||
       mode_ == MapControllerMode::REPLAY_HOLD ||
-      mode_ == MapControllerMode::CLOSED_CONFIRM) {
+      mode_ == MapControllerMode::CLOSED_CONFIRM ||
+      mode_ == MapControllerMode::SETTINGS ||
+      mode_ == MapControllerMode::HELP) {
     return;
   }
   selectedSlot_ = slot == 2U ? MapSlot::MAP_2 : MapSlot::MAP_1;
@@ -180,12 +209,255 @@ void MapController::handleSlot(uint8_t slot) {
   routeMode_ = IsReplayModeAllowed(routeType_, metadata.replayMode)
                    ? metadata.replayMode
                    : MapReplayMode::ONCE;
+  replaySpeed_ = metadata.replaySpeed;
+  loopTarget_ = metadata.loopTarget;
   mode_ = metadata.state == MapStoreState::SAVED
               ? MapControllerMode::SAVED
               : MapControllerMode::READY;
 }
 
+bool MapController::enterSettings(const char*& reason) {
+  reason = nullptr;
+  if (!display_.isMapPage()) {
+    reason = "NOT_MAP_PAGE";
+    return false;
+  }
+  if (mode_ == MapControllerMode::TEACHING) {
+    reason = "TEACHING";
+    return false;
+  }
+  if (replayActive_ || mode_ == MapControllerMode::REPLAY_HOLD ||
+      mode_ == MapControllerMode::CLOSED_CONFIRM ||
+      mode_ == MapControllerMode::DELETE_CONFIRM ||
+      mode_ == MapControllerMode::SETTINGS ||
+      mode_ == MapControllerMode::HELP) {
+    reason = "BUSY";
+    return false;
+  }
+  if (storeState_ != MapStoreState::SAVED &&
+      mode_ != MapControllerMode::REPLAY_COMPLETE) {
+    reason = "NOT_SAVED";
+    return false;
+  }
+  if (!robot_.motorsStopped() || robot_.aiMotionActive() ||
+      robot_.motionOwner() != MotionOwner::NONE) {
+    reason = "MOTION";
+    return false;
+  }
+  if (ps2_.motionCommandActive()) {
+    reason = "PS2_MOTION";
+    return false;
+  }
+  if (!loadedValid_ && !loadSelected()) {
+    reason = "LOAD";
+    return false;
+  }
+  settingsItem_ = MapSettingsItem::MODE;
+  settingsMode_ = routeMode_;
+  settingsSpeed_ = replaySpeed_;
+  settingsLoopTarget_ = loopTarget_;
+  helpPage_ = 0U;
+  mode_ = MapControllerMode::SETTINGS;
+  // Entering Settings is itself a safety boundary. It is currently allowed
+  // only while stopped, but still clear any stale manual command and require
+  // a fresh neutral frame before Manual can ever reacquire the chassis.
+  robot_.stopImmediately(true);
+  ps2_.setMapUiCapture(true);
+  debug_.print("MAP,SETTINGS,ENTER,SLOT=");
+  debug_.println(static_cast<unsigned>(selectedSlot_));
+  statusDirty_ = true;
+  return true;
+}
+
+void MapController::leaveMapUiCapture() {
+  ps2_.setMapUiCapture(false);
+  ps2_.disarmMapInput();
+}
+
+void MapController::saveSettingsAndExit() {
+  if (mode_ != MapControllerMode::SETTINGS) return;
+  if (!IsReplayModeAllowed(routeType_, settingsMode_)) {
+    debug_.println("MAP,SETTINGS,SAVE,REJECT=MODE");
+    return;
+  }
+  MapRouteData candidate = route_;
+  candidate.header.replayMode = static_cast<uint8_t>(settingsMode_);
+  const int16_t oldSpeed = replaySpeed_;
+  const uint8_t oldLoopTarget = loopTarget_;
+  replaySpeed_ = settingsSpeed_;
+  loopTarget_ = settingsLoopTarget_;
+  updateRouteHeaderForSave(candidate);
+  if (!store_.save(selectedSlot_, candidate)) {
+    replaySpeed_ = oldSpeed;
+    loopTarget_ = oldLoopTarget;
+    storeState_ = MapStoreState::STORAGE_ERROR;
+    debug_.println("MAP,SETTINGS,SAVE=FAIL,OLD_ROUTE_RETAINED=1");
+    mode_ = MapControllerMode::SAVED;
+    leaveMapUiCapture();
+    statusDirty_ = true;
+    return;
+  }
+  route_ = candidate;
+  routeMode_ = settingsMode_;
+  replaySpeed_ = settingsSpeed_;
+  loopTarget_ = settingsLoopTarget_;
+  loadedValid_ = true;
+  storeState_ = MapStoreState::SAVED;
+  mode_ = MapControllerMode::SAVED;
+  debug_.print("MAP,SETTINGS,SAVE=OK,MODE=");
+  debug_.print(MapRouteStore::replayModeName(routeMode_));
+  debug_.print(",SPEED=");
+  debug_.print(replaySpeed_);
+  debug_.print(",LAP=");
+  if (loopTarget_ == MAP_LOOP_TARGET_INF) {
+    debug_.println("INF");
+  } else {
+    debug_.println(static_cast<unsigned>(loopTarget_));
+  }
+  leaveMapUiCapture();
+  statusDirty_ = true;
+}
+
+void MapController::cancelSettings() {
+  if (mode_ != MapControllerMode::SETTINGS &&
+      mode_ != MapControllerMode::HELP &&
+      mode_ != MapControllerMode::DELETE_CONFIRM) {
+    return;
+  }
+  mode_ = storeState_ == MapStoreState::SAVED ? MapControllerMode::SAVED
+                                               : MapControllerMode::READY;
+  debug_.println("MAP,SETTINGS,CANCEL");
+  leaveMapUiCapture();
+  statusDirty_ = true;
+}
+
+void MapController::leaveHelp() {
+  if (mode_ != MapControllerMode::HELP) return;
+  mode_ = MapControllerMode::SETTINGS;
+  ps2_.setMapUiCapture(true);
+  statusDirty_ = true;
+}
+
+void MapController::enterHelp() {
+  if (mode_ != MapControllerMode::SETTINGS &&
+      mode_ != MapControllerMode::HELP) {
+    return;
+  }
+  if (mode_ == MapControllerMode::SETTINGS) helpPage_ = 0U;
+  mode_ = MapControllerMode::HELP;
+  ps2_.setMapUiCapture(true);
+  statusDirty_ = true;
+}
+
+void MapController::cycleSettingsMode(int8_t direction) {
+  if (direction == 0) return;
+  if (routeType_ == MapRouteType::CLOSED) {
+    settingsMode_ = settingsMode_ == MapReplayMode::LOOP
+                        ? MapReplayMode::ONCE
+                        : MapReplayMode::LOOP;
+    return;
+  }
+  if (direction > 0) {
+    settingsMode_ = settingsMode_ == MapReplayMode::ONCE
+                        ? MapReplayMode::RETURN
+                        : settingsMode_ == MapReplayMode::RETURN
+                            ? MapReplayMode::PING_PONG
+                            : MapReplayMode::ONCE;
+  } else {
+    settingsMode_ = settingsMode_ == MapReplayMode::ONCE
+                        ? MapReplayMode::PING_PONG
+                        : settingsMode_ == MapReplayMode::PING_PONG
+                            ? MapReplayMode::RETURN
+                            : MapReplayMode::ONCE;
+  }
+  if (!IsReplayModeAllowed(routeType_, settingsMode_)) {
+    settingsMode_ = MapReplayMode::ONCE;
+  }
+}
+
+void MapController::cycleSettingsSpeed(int8_t direction) {
+  const int16_t next = static_cast<int16_t>(
+      settingsSpeed_ + direction * MAP_REPLAY_SPEED_STEP);
+  settingsSpeed_ = constrain(next, MAP_REPLAY_SPEED_MIN,
+                             MAP_REPLAY_SPEED_MAX);
+}
+
+void MapController::cycleSettingsLap(int8_t direction) {
+  if (settingsMode_ != MapReplayMode::LOOP || direction == 0) return;
+  if (direction > 0) {
+    settingsLoopTarget_ = settingsLoopTarget_ == MAP_LOOP_TARGET_MAX
+                              ? MAP_LOOP_TARGET_INF
+                              : settingsLoopTarget_ + 1U;
+  } else {
+    settingsLoopTarget_ = settingsLoopTarget_ == MAP_LOOP_TARGET_INF
+                              ? MAP_LOOP_TARGET_MAX
+                              : settingsLoopTarget_ <= MAP_LOOP_TARGET_MIN
+                                  ? MAP_LOOP_TARGET_INF
+                                  : settingsLoopTarget_ - 1U;
+  }
+}
+
+bool MapController::settingsCanDelete() const {
+  return mode_ == MapControllerMode::SETTINGS &&
+         settingsItem_ == MapSettingsItem::DELETE_MAP &&
+         loadedValid_ && storeState_ == MapStoreState::SAVED &&
+         !replayActive_ && !robot_.aiMotionActive() &&
+         robot_.motorsStopped() && robot_.motionOwner() == MotionOwner::NONE;
+}
+
+void MapController::handleSettingsInput(Ps2MapAction action) {
+  if (mode_ == MapControllerMode::HELP ||
+      mode_ == MapControllerMode::DELETE_CONFIRM) {
+    return;
+  }
+  if (mode_ != MapControllerMode::SETTINGS) return;
+  switch (action) {
+    case Ps2MapAction::UP:
+      settingsItem_ = static_cast<MapSettingsItem>(
+          settingsItem_ == MapSettingsItem::MODE
+              ? static_cast<uint8_t>(MapSettingsItem::DELETE_MAP)
+              : static_cast<uint8_t>(settingsItem_) - 1U);
+      break;
+    case Ps2MapAction::DOWN:
+      settingsItem_ = static_cast<MapSettingsItem>(
+          (static_cast<uint8_t>(settingsItem_) + 1U) % 4U);
+      break;
+    case Ps2MapAction::LEFT:
+      if (settingsItem_ == MapSettingsItem::MODE) {
+        cycleSettingsMode(-1);
+      } else if (settingsItem_ == MapSettingsItem::SPEED) {
+        cycleSettingsSpeed(-1);
+      } else if (settingsItem_ == MapSettingsItem::LAP) {
+        cycleSettingsLap(-1);
+      }
+      break;
+    case Ps2MapAction::RIGHT:
+      if (settingsItem_ == MapSettingsItem::MODE) {
+        cycleSettingsMode(1);
+      } else if (settingsItem_ == MapSettingsItem::SPEED) {
+        cycleSettingsSpeed(1);
+      } else if (settingsItem_ == MapSettingsItem::LAP) {
+        cycleSettingsLap(1);
+      } else if (settingsCanDelete()) {
+        mode_ = MapControllerMode::DELETE_CONFIRM;
+        debug_.println("MAP,SETTINGS,DELETE_CONFIRM");
+      }
+      break;
+    default:
+      break;
+  }
+  statusDirty_ = true;
+}
+
 void MapController::handleStart() {
+  if (mode_ == MapControllerMode::SETTINGS) {
+    saveSettingsAndExit();
+    return;
+  }
+  if (mode_ == MapControllerMode::HELP ||
+      mode_ == MapControllerMode::DELETE_CONFIRM) {
+    return;
+  }
   if (mode_ == MapControllerMode::TEACHING ||
       mode_ == MapControllerMode::DELETE_CONFIRM ||
       mode_ == MapControllerMode::CLOSED_CONFIRM) {
@@ -254,6 +526,14 @@ void MapController::handleStart() {
 }
 
 void MapController::handleTriangle() {
+  if (mode_ == MapControllerMode::SETTINGS ||
+      mode_ == MapControllerMode::HELP) {
+    if (mode_ == MapControllerMode::HELP) {
+      helpPage_ = helpPage_ == 0U ? 1U : 0U;
+    }
+    enterHelp();
+    return;
+  }
   if (replayActive_ || mode_ == MapControllerMode::REPLAY_HOLD ||
       mode_ == MapControllerMode::DELETE_CONFIRM ||
       mode_ == MapControllerMode::CLOSED_CONFIRM) {
@@ -269,6 +549,15 @@ void MapController::handleTriangle() {
 void MapController::handleCircle() {
   debug_.print("MAP,CIRCLE,HANDLE,MODE=");
   debug_.println(static_cast<unsigned>(mode_));
+  if (mode_ == MapControllerMode::SETTINGS) {
+    if (settingsCanDelete()) {
+      mode_ = MapControllerMode::DELETE_CONFIRM;
+      debug_.println("MAP,SETTINGS,DELETE_CONFIRM");
+      statusDirty_ = true;
+    }
+    return;
+  }
+  if (mode_ == MapControllerMode::HELP) return;
   if (mode_ == MapControllerMode::TEACHING) {
     debug_.println("MAP,CIRCLE,ACTION=FINISH_TEACH");
     requestTeachFinish();
@@ -286,9 +575,16 @@ void MapController::handleCircle() {
     return;
   }
   if (mode_ == MapControllerMode::DELETE_CONFIRM) {
+    if (!loadedValid_ || replayActive_ || teachFinishPending_ ||
+        robot_.aiMotionActive() || !robot_.motorsStopped() ||
+        robot_.motionOwner() != MotionOwner::NONE) {
+      debug_.println("MAP,CIRCLE,REJECT,REASON=DELETE_SAFETY");
+      return;
+    }
     debug_.println("MAP,CIRCLE,ACTION=DELETE_CONFIRM");
     deletePending_ = true;
     mode_ = MapControllerMode::READY;
+    leaveMapUiCapture();
     return;
   }
   if (replayActive_) return;
@@ -296,32 +592,15 @@ void MapController::handleCircle() {
     if (!loadSelected()) return;
   }
   if (storeState_ != MapStoreState::SAVED || !loadedValid_) return;
-  const MapReplayMode previous = routeMode_;
-  if (routeType_ == MapRouteType::CLOSED) {
-    routeMode_ = previous == MapReplayMode::LOOP ? MapReplayMode::ONCE
-                                                 : MapReplayMode::LOOP;
-  } else {
-    routeMode_ = previous == MapReplayMode::ONCE
-                     ? MapReplayMode::RETURN
-                     : previous == MapReplayMode::RETURN
-                         ? MapReplayMode::PING_PONG
-                         : MapReplayMode::ONCE;
-  }
-  debug_.println("MAP,CIRCLE,ACTION=CYCLE_MODE");
-  modeBeforeSave_ = previous;
-  modeSavePending_ = true;
-  statusDirty_ = true;
+  // MODE is now a transactional Settings item. Keeping the main page free of
+  // an undocumented mode toggle prevents an accidental route rewrite.
+  debug_.println("MAP,CIRCLE,REJECT,REASON=SETTINGS_REQUIRED");
 }
 
 void MapController::handleSquare(bool longPress) {
   if (longPress) {
-    if (replayActive_ || mode_ == MapControllerMode::TEACHING ||
-        mode_ == MapControllerMode::DELETE_CONFIRM ||
-        mode_ == MapControllerMode::CLOSED_CONFIRM ||
-        !robot_.motorsStopped() || robot_.aiMotionActive()) {
-      return;
-    }
-    mode_ = MapControllerMode::DELETE_CONFIRM;
+    // Destructive deletion is available only from the explicit Settings
+    // DELETE MAP item. A long SQUARE on the main MAP page is inert.
     return;
   }
   if (mode_ == MapControllerMode::TEACHING) {
@@ -342,6 +621,11 @@ void MapController::handleSquare(bool longPress) {
 void MapController::handleCross() {
   if (mode_ == MapControllerMode::TEACHING) {
     cancelTeach();
+  } else if (mode_ == MapControllerMode::HELP) {
+    leaveHelp();
+  } else if (mode_ == MapControllerMode::SETTINGS ||
+             mode_ == MapControllerMode::DELETE_CONFIRM) {
+    cancelSettings();
   } else if (mode_ == MapControllerMode::CLOSED_CONFIRM) {
     debug_.println("MAP,TYPE_SELECT,TYPE=OPEN");
     if (queueTeachSave(MapRouteType::OPEN,
@@ -361,6 +645,15 @@ void MapController::handleCross() {
 }
 
 void MapController::handleCrossLong() {
+  if (mode_ == MapControllerMode::HELP) {
+    leaveHelp();
+    return;
+  }
+  if (mode_ == MapControllerMode::SETTINGS ||
+      mode_ == MapControllerMode::DELETE_CONFIRM) {
+    cancelSettings();
+    return;
+  }
   if (mode_ == MapControllerMode::CLOSED_CONFIRM) {
     debug_.println("MAP,TYPE_SELECT,TYPE=OPEN");
     if (queueTeachSave(MapRouteType::OPEN,
@@ -397,6 +690,8 @@ bool MapController::loadSelected() {
   storeState_ = MapStoreState::SAVED;
   routeType_ = static_cast<MapRouteType>(route_.header.routeType);
   routeMode_ = static_cast<MapReplayMode>(route_.header.replayMode);
+  replaySpeed_ = mapReplaySpeedFromReserved(route_.header.reserved);
+  loopTarget_ = mapLoopTargetFromReserved(route_.header.reserved);
   mode_ = MapControllerMode::SAVED;
   return true;
 }
@@ -415,6 +710,8 @@ bool MapController::beginTeach() {
   route_.header.waypointCount = 0U;
   routeType_ = MapRouteType::OPEN;
   routeMode_ = MapReplayMode::ONCE;
+  replaySpeed_ = MAP_REPLAY_SPEED_DEFAULT;
+  loopTarget_ = MAP_LOOP_TARGET_INF;
   closeCandidateDistanceMm_ = 0U;
   closeCandidateHeadingDeg_ = 0;
   const Pose localOrigin{};
@@ -852,6 +1149,10 @@ void MapController::updateRouteHeaderForSave(MapRouteData& route) const {
   route.header.payloadBytes = static_cast<uint16_t>(
       route.header.waypointCount * sizeof(MapWaypoint));
   route.header.routeLengthMm = routeLengthMm(route);
+  route.header.reserved = mapReplaySpeedToReserved(
+      route.header.reserved, replaySpeed_);
+  route.header.reserved = mapLoopTargetToReserved(
+      route.header.reserved, loopTarget_);
 }
 
 bool MapController::validateRoute(const MapRouteData& route,
@@ -1220,9 +1521,10 @@ bool MapController::startNextReplaySegment() {
     replayTargetDeg_ = static_cast<int16_t>(lroundf(fabsf(desiredHeadingError)));
     replayOperation_ = MapReplayOperation::TURN;
     logGuidePreturn(desiredHeadingError, realignAction ? "REALIGN" : "TURN");
+    const int16_t mapTurnSpeed = min(replaySpeed_, TURN_MAX_SPEED);
     if (!robot_.startReplayTurnRelative(
             desiredHeadingError > 0.0f, fabsf(desiredHeadingError),
-            kReplaySpeed, segmentGeneration, AiTurnProfile::MAP_COARSE)) {
+            mapTurnSpeed, segmentGeneration, AiTurnProfile::MAP_COARSE)) {
       replayOperation_ = MapReplayOperation::NONE;
       abortReplay("TURN_START");
       return false;
@@ -1233,7 +1535,7 @@ bool MapController::startNextReplaySegment() {
     logGuidePreturn(desiredHeadingError, "SKIP");
     if (!robot_.startReplayGuidedWaypoint(
             replayTarget_.xMm, replayTarget_.yMm, current.xMm, current.yMm,
-            kReplaySpeed, incomingBearing, segmentGeneration)) {
+            replaySpeed_, incomingBearing, segmentGeneration)) {
       replayOperation_ = MapReplayOperation::NONE;
       abortReplay("GUIDE_START");
       return false;
@@ -1270,6 +1572,13 @@ void MapController::advanceReplayAfterTarget() {
         if (replayLapCounter_ != 0xFFFFFFFFUL) ++replayLapCounter_;
         debug_.print("MAP,LOOP,LAP_COMPLETE,LAP=");
         debug_.println(replayLapCounter_);
+        if (loopTarget_ != MAP_LOOP_TARGET_INF &&
+            replayLapCounter_ >= loopTarget_) {
+          debug_.print("MAP,LOOP,TARGET_REACHED,LAP=");
+          debug_.println(replayLapCounter_);
+          completeReplay();
+          return;
+        }
         replayTargetIndex_ = count > 1U ? 1U : 0U;
         return;
       }
@@ -1356,8 +1665,10 @@ void MapController::abortReplay(const char* reason) {
 }
 
 void MapController::completeReplay() {
+  const uint32_t completedLap = replayLapCounter_;
   nextReplayGeneration();
   clearReplayResumeContext();
+  replayLapCounter_ = completedLap;
   replayActive_ = false;
   replayReason_ = "DONE";
   mode_ = MapControllerMode::REPLAY_COMPLETE;
@@ -1785,6 +2096,12 @@ void MapController::publishStatus() {
   }
   const uint16_t points = metadata.waypointCount;
   const uint16_t replayWp = replayTargetIndex_ + 1U;
+  const bool settingsUi = mode_ == MapControllerMode::SETTINGS ||
+                          mode_ == MapControllerMode::HELP;
+  const MapReplayMode displayMode = settingsUi ? settingsMode_ : routeMode_;
+  const int16_t displaySpeed = settingsUi ? settingsSpeed_ : replaySpeed_;
+  const uint8_t displayLoopTarget = settingsUi ? settingsLoopTarget_
+                                                : loopTarget_;
   display_.setMapStatus(
       static_cast<uint8_t>(selectedSlot_), static_cast<uint8_t>(metadata.state),
       static_cast<uint8_t>(mode_), points, STM32_MAP_MAX_WAYPOINTS,
@@ -1793,9 +2110,11 @@ void MapController::publishStatus() {
       replayTargetDistanceMm_, replayTravelMm_, replayErrorMm_,
       static_cast<uint8_t>(replayOperation_),
       static_cast<uint8_t>(metadata.routeType),
-      static_cast<uint8_t>(metadata.replayMode),
+      static_cast<uint8_t>(displayMode),
       static_cast<uint8_t>(holdReason_), replayTargetDeg_, replayLapCounter_,
-      closeCandidateDistanceMm_, closeCandidateHeadingDeg_);
+      closeCandidateDistanceMm_, closeCandidateHeadingDeg_,
+      static_cast<uint8_t>(settingsItem_), displaySpeed, displayLoopTarget,
+      helpPage_);
   const uint32_t now = millis();
   if (replayActive_ && replayOperation_ == MapReplayOperation::MOVE &&
       robot_.guidedWaypointActive() &&

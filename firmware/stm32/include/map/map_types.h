@@ -10,6 +10,57 @@ constexpr uint32_t STM32_MAP_MAGIC = 0x4D415032UL;  // MAP2
 // of scope for this rollout.
 constexpr uint16_t STM32_MAP_FORMAT_VERSION = 2U;
 
+// MAP-local replay settings. They are packed into MapRouteHeader::reserved so
+// the existing Flash record size, CRC coverage and A/B layout remain stable.
+constexpr int16_t MAP_REPLAY_SPEED_DEFAULT = 20;
+constexpr int16_t MAP_REPLAY_SPEED_MIN = 15;
+constexpr int16_t MAP_REPLAY_SPEED_MAX = 50;
+constexpr int16_t MAP_REPLAY_SPEED_STEP = 5;
+constexpr uint8_t MAP_LOOP_TARGET_INF = 0U;
+constexpr uint8_t MAP_LOOP_TARGET_MIN = 1U;
+constexpr uint8_t MAP_LOOP_TARGET_MAX = 20U;
+
+constexpr uint32_t MAP_SETTINGS_SPEED_MASK = 0x000000FFUL;
+constexpr uint32_t MAP_SETTINGS_LOOP_MASK = 0x0000FF00UL;
+constexpr uint8_t MAP_SETTINGS_LOOP_SHIFT = 8U;
+
+constexpr bool mapReplaySpeedValid(uint8_t speed) {
+  return speed >= MAP_REPLAY_SPEED_MIN &&
+         speed <= MAP_REPLAY_SPEED_MAX &&
+         ((speed - MAP_REPLAY_SPEED_MIN) % MAP_REPLAY_SPEED_STEP) == 0U;
+}
+
+constexpr int16_t mapReplaySpeedFromReserved(uint32_t reserved) {
+  const uint8_t encoded = static_cast<uint8_t>(
+      reserved & MAP_SETTINGS_SPEED_MASK);
+  return encoded == 0U || !mapReplaySpeedValid(encoded)
+             ? MAP_REPLAY_SPEED_DEFAULT
+             : static_cast<int16_t>(encoded);
+}
+
+constexpr uint8_t mapLoopTargetFromReserved(uint32_t reserved) {
+  const uint8_t encoded = static_cast<uint8_t>(
+      (reserved & MAP_SETTINGS_LOOP_MASK) >> MAP_SETTINGS_LOOP_SHIFT);
+  return encoded <= MAP_LOOP_TARGET_MAX ? encoded : MAP_LOOP_TARGET_INF;
+}
+
+constexpr uint32_t mapReplaySpeedToReserved(uint32_t reserved,
+                                            int16_t speed) {
+  const uint8_t encoded = mapReplaySpeedValid(static_cast<uint8_t>(speed))
+                              ? static_cast<uint8_t>(speed)
+                              : static_cast<uint8_t>(MAP_REPLAY_SPEED_DEFAULT);
+  return (reserved & ~MAP_SETTINGS_SPEED_MASK) | encoded;
+}
+
+constexpr uint32_t mapLoopTargetToReserved(uint32_t reserved,
+                                            uint8_t loopTarget) {
+  const uint8_t encoded = loopTarget <= MAP_LOOP_TARGET_MAX
+                              ? loopTarget
+                              : MAP_LOOP_TARGET_INF;
+  return (reserved & ~MAP_SETTINGS_LOOP_MASK) |
+         (static_cast<uint32_t>(encoded) << MAP_SETTINGS_LOOP_SHIFT);
+}
+
 enum class MapSlot : uint8_t { MAP_1 = 1U, MAP_2 = 2U };
 enum class MapStoreState : uint8_t {
   EMPTY = 0U,
@@ -42,6 +93,8 @@ enum class MapControllerMode : uint8_t {
   REPLAY_HOLD = 7U,
   REPLAY_COMPLETE = 8U,
   CLOSED_CONFIRM = 9U,
+  SETTINGS = 10U,
+  HELP = 11U,
 };
 enum class MapReplayOperation : uint8_t {
   NONE = 0U,
@@ -103,6 +156,8 @@ struct MapSlotMetadata {
   uint16_t waypointCount = 0U;
   uint32_t routeLengthMm = 0U;
   uint32_t generation = 0U;
+  int16_t replaySpeed = MAP_REPLAY_SPEED_DEFAULT;
+  uint8_t loopTarget = MAP_LOOP_TARGET_INF;
 };
 
 static_assert(sizeof(MapWaypoint) == 12U, "MAP waypoint wire/storage size changed");

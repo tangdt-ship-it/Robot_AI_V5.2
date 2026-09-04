@@ -43,6 +43,8 @@ class MapController {
 
  private:
   enum class ReplayRealignReason : uint8_t { NONE, PATH, ARRIVAL };
+  enum class MapSettingsItem : uint8_t { MODE = 0U, SPEED = 1U, LAP = 2U,
+                                         DELETE_MAP = 3U };
 
   struct Pose {
     float xMm = 0.0f;
@@ -58,6 +60,17 @@ class MapController {
   void handleCross();
   void handleCrossLong();
   void handleSlot(uint8_t slot);
+  void handleSettingsInput(Ps2MapAction action);
+  bool enterSettings(const char*& reason);
+  void saveSettingsAndExit();
+  void cancelSettings();
+  void enterHelp();
+  void leaveHelp();
+  void leaveMapUiCapture();
+  void cycleSettingsMode(int8_t direction);
+  void cycleSettingsSpeed(int8_t direction);
+  void cycleSettingsLap(int8_t direction);
+  bool settingsCanDelete() const;
 
   bool loadSelected();
   bool beginTeach();
@@ -143,6 +156,8 @@ class MapController {
   MapControllerMode mode_ = MapControllerMode::READY;
   MapRouteType routeType_ = MapRouteType::OPEN;
   MapReplayMode routeMode_ = MapReplayMode::ONCE;
+  int16_t replaySpeed_ = MAP_REPLAY_SPEED_DEFAULT;
+  uint8_t loopTarget_ = MAP_LOOP_TARGET_INF;
   MapTeachMode teachMode_ = MapTeachMode::MANUAL_KEYFRAME;
   MapStoreState storeState_ = MapStoreState::EMPTY;
   // route_ is the active Replay buffer. optimizedRoute_ and semanticRoute_
@@ -164,6 +179,12 @@ class MapController {
   bool deletePending_ = false;
   bool modeSavePending_ = false;
   MapReplayMode modeBeforeSave_ = MapReplayMode::ONCE;
+
+  MapSettingsItem settingsItem_ = MapSettingsItem::MODE;
+  MapReplayMode settingsMode_ = MapReplayMode::ONCE;
+  int16_t settingsSpeed_ = MAP_REPLAY_SPEED_DEFAULT;
+  uint8_t settingsLoopTarget_ = MAP_LOOP_TARGET_INF;
+  uint8_t helpPage_ = 0U;
 
   bool replayActive_ = false;
   bool replayResumeAllowed_ = false;

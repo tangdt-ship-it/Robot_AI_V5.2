@@ -15,8 +15,8 @@ constexpr uint32_t kMapPageToggleGuardMs = 250U;
 constexpr uint8_t kMapNeutralFramesToArm = 2U;
 // X is the safety HOLD/CANCEL boundary. Give the operator more time to make
 // an intentional long press without changing SELECT/SQUARE semantics.
-constexpr uint32_t kMapCrossLongPressMs = 1200U;
-constexpr uint32_t kMapLongPressMs = 800U;
+constexpr uint32_t kMapCrossLongPressMs = MAP_LONG_PRESS_MS;
+constexpr uint32_t kMapLongPressMs = MAP_LONG_PRESS_MS;
 
 void emitLegacyMapEvent(const char* action, uint8_t slot) {
   const uint8_t normalizedSlot = slot == 2U ? 2U : 1U;
@@ -144,6 +144,19 @@ void Ps2Controller::holdMapInput() {
 #endif
 }
 
+void Ps2Controller::setMapUiCapture(bool enabled) {
+  if (mapUiCapture_ == enabled) return;
+  mapUiCapture_ = enabled;
+  mapEventPending_ = false;
+  mapActionsArmed_ = enabled;
+  mapNeutralReleaseFrames_ = enabled ? kMapNeutralFramesToArm : 0U;
+  resetMapPressTracking();
+#if ROBOT_DEBUG
+  robotDebug.print("MAP,INPUT,UI_CAPTURE=");
+  robotDebug.println(enabled ? 1 : 0);
+#endif
+}
+
 void Ps2Controller::begin() {
   const uint32_t now = millis();
   reconnect(now);
@@ -174,6 +187,10 @@ void Ps2Controller::reconnect(uint32_t nowMs) {
   mapEdgesInitialized_ = false;
   previousMapL3_ = false;
   previousMapStart_ = false;
+  previousMapUp_ = false;
+  previousMapDown_ = false;
+  previousMapLeft_ = false;
+  previousMapRight_ = false;
   previousMapSelect_ = false;
   previousMapTriangle_ = false;
   previousMapSquare_ = false;
@@ -242,6 +259,10 @@ void Ps2Controller::captureState(uint32_t nowMs) {
   if (!mapEdgesInitialized_) {
     previousMapL3_ = state_.l3;
     previousMapStart_ = state_.start;
+    previousMapUp_ = state_.up;
+    previousMapDown_ = state_.down;
+    previousMapLeft_ = state_.left;
+    previousMapRight_ = state_.right;
     previousMapSelect_ = state_.select;
     previousMapTriangle_ = state_.triangle;
     previousMapSquare_ = state_.square;
@@ -254,6 +275,10 @@ void Ps2Controller::captureState(uint32_t nowMs) {
   } else {
     const bool l3Pressed = state_.l3 && !previousMapL3_;
     const bool startPressed = state_.start && !previousMapStart_;
+    const bool upPressed = state_.up && !previousMapUp_;
+    const bool downPressed = state_.down && !previousMapDown_;
+    const bool leftPressed = state_.left && !previousMapLeft_;
+    const bool rightPressed = state_.right && !previousMapRight_;
     const bool selectPressed = state_.select && !previousMapSelect_;
     const bool selectReleased = !state_.select && previousMapSelect_;
     const bool trianglePressed = state_.triangle && !previousMapTriangle_;
@@ -308,8 +333,8 @@ void Ps2Controller::captureState(uint32_t nowMs) {
         robotDebug.println("MAP,CIRCLE,REJECT,REASON=PAGE_TRANSITION");
       }
 #endif
-      if (lastMapPageToggleMs_ == 0U ||
-          (nowMs - lastMapPageToggleMs_) >= kMapPageToggleGuardMs) {
+      if (!mapUiCapture_ && (lastMapPageToggleMs_ == 0U ||
+          (nowMs - lastMapPageToggleMs_) >= kMapPageToggleGuardMs)) {
         display.togglePage();
         lastMapPageToggleMs_ = nowMs;
       }
@@ -337,6 +362,16 @@ void Ps2Controller::captureState(uint32_t nowMs) {
         robotDebug.println("MAP,START,REJECT,REASON=NOT_MAP_PAGE");
       }
 #endif
+    } else if (mapUiCapture_) {
+      // Settings/Help/Delete own the complete PS2 UI. Generate only menu
+      // events; RobotController separately checks the same capture gate.
+      if (upPressed) queueMapEvent(Ps2MapAction::UP);
+      if (downPressed) queueMapEvent(Ps2MapAction::DOWN);
+      if (leftPressed) queueMapEvent(Ps2MapAction::LEFT);
+      if (rightPressed) queueMapEvent(Ps2MapAction::RIGHT);
+      if (startPressed) queueMapEvent(Ps2MapAction::START);
+      if (trianglePressed) queueMapEvent(Ps2MapAction::TRIANGLE);
+      if (circlePressed) queueMapEvent(Ps2MapAction::CIRCLE);
     } else if (!mapActionsArmed_) {
 #if ROBOT_DEBUG
       if (startPressed) {
@@ -407,6 +442,10 @@ void Ps2Controller::captureState(uint32_t nowMs) {
 
     previousMapL3_ = state_.l3;
     previousMapStart_ = state_.start;
+    previousMapUp_ = state_.up;
+    previousMapDown_ = state_.down;
+    previousMapLeft_ = state_.left;
+    previousMapRight_ = state_.right;
     previousMapSelect_ = state_.select;
     previousMapTriangle_ = state_.triangle;
     previousMapSquare_ = state_.square;

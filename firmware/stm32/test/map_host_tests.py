@@ -34,6 +34,7 @@ def _constant(text, name):
 
 FLASH_TEXT = _read(INCLUDE_ROOT / "map" / "flash_layout.h")
 TYPES_TEXT = _read(INCLUDE_ROOT / "map" / "map_types.h")
+CONFIG_TEXT = _read(INCLUDE_ROOT / "robot_config.h")
 MAP_TEXT = _read(SRC_ROOT / "map" / "map_controller.cpp")
 MAP_HEADER_TEXT = _read(INCLUDE_ROOT / "map" / "map_controller.h")
 CLEANER_HEADER_TEXT = _read(INCLUDE_ROOT / "map" / "route_cleaner.h")
@@ -941,8 +942,10 @@ class MapHostTests(unittest.TestCase):
         self.assertIn("finalizeTeach();", MAP_TEXT)
 
     def test_TEST_CIRCLE_SAVED_MODE(self):
-        self.assertIn("MAP,CIRCLE,ACTION=CYCLE_MODE", MAP_TEXT)
-        self.assertIn("modeSavePending_ = true", MAP_TEXT)
+        self.assertIn("MAP,CIRCLE,REJECT,REASON=SETTINGS_REQUIRED", MAP_TEXT)
+        self.assertIn("bool MapController::enterSettings(const char*& reason)", MAP_TEXT)
+        self.assertIn("MapControllerMode::SETTINGS", MAP_TEXT)
+        self.assertIn("saveSettingsAndExit()", MAP_TEXT)
 
     def test_TEST_CIRCLE_CLOSED_CONFIRM(self):
         self.assertIn("MAP,CIRCLE,ACTION=CONFIRM_CLOSED", MAP_TEXT)
@@ -1080,7 +1083,8 @@ class MapHostTests(unittest.TestCase):
 
     def test_TEST_X_LONG_CANCEL(self):
         self.assertIn("CROSS_LONG", PS2_TEXT)
-        self.assertIn("kMapCrossLongPressMs = 1200U", PS2_TEXT)
+        self.assertIn("MAP_LONG_PRESS_MS", PS2_TEXT)
+        self.assertIn("MAP_LONG_PRESS_MS = 1300U", CONFIG_TEXT)
         self.assertIn("void MapController::handleCrossLong()", MAP_TEXT)
         self.assertIn('cancelReplay("X_LONG")', MAP_TEXT)
         self.assertIn("MAP,CANCEL,REASON=", MAP_TEXT)
@@ -1157,9 +1161,96 @@ class MapHostTests(unittest.TestCase):
 
     def test_hold_lcd_semantics(self):
         self.assertIn("uint8_t holdReason", _read(INCLUDE_ROOT / "display" / "lcd_display.h"))
-        self.assertIn('snprintf(desired_[1], 21, "USER HOLD")', LCD_TEXT)
-        self.assertIn('snprintf(desired_[1], 21, "OBS BLOCKED")', LCD_TEXT)
-        self.assertIn('snprintf(desired_[3], 21, "X HOLD X-LONG CANCEL")', LCD_TEXT)
+        self.assertIn('"TGT:%lu TRV:%lu"', LCD_TEXT)
+        self.assertIn('"MODE:%s", replayMode', LCD_TEXT)
+        self.assertIn('snprintf(desired_[3], 21, "X HOLD XL CANCEL")', LCD_TEXT)
+
+    def test_map_settings_and_motion_capture(self):
+        for token in (
+            "MapControllerMode::SETTINGS",
+            "MapControllerMode::HELP",
+            "MapControllerMode::DELETE_CONFIRM",
+            "setMapUiCapture(true)",
+            "mapUiCaptureActive()",
+            "saveSettingsAndExit()",
+            "leaveHelp()",
+        ):
+            self.assertIn(token, MAP_TEXT + CTRL_TEXT + PS2_TEXT)
+        self.assertIn("SELECT_LONG", PS2_TEXT)
+        self.assertIn("if (ps2_.mapUiCaptureActive())", CTRL_TEXT)
+        self.assertIn("targetLeft_ = targetRight_ = 0", CTRL_TEXT)
+        self.assertIn("state_ = RobotState::STOP", CTRL_TEXT)
+
+    def test_map_settings_storage_is_backward_compatible(self):
+        self.assertIn("MapRouteHeader::reserved", TYPES_TEXT)
+        for token in (
+            "MAP_SETTINGS_SPEED_MASK",
+            "MAP_SETTINGS_LOOP_MASK",
+            "mapReplaySpeedFromReserved",
+            "mapLoopTargetFromReserved",
+            "mapReplaySpeedToReserved",
+            "mapLoopTargetToReserved",
+        ):
+            self.assertIn(token, TYPES_TEXT)
+        self.assertEqual(_constant(TYPES_TEXT, "MAP_REPLAY_SPEED_DEFAULT"), 20)
+        self.assertEqual(_constant(TYPES_TEXT, "MAP_REPLAY_SPEED_MIN"), 15)
+        self.assertEqual(_constant(TYPES_TEXT, "MAP_REPLAY_SPEED_MAX"), 50)
+        self.assertEqual(_constant(TYPES_TEXT, "MAP_REPLAY_SPEED_STEP"), 5)
+        self.assertEqual(_constant(TYPES_TEXT, "MAP_LOOP_TARGET_MAX"), 20)
+        self.assertIn("result.replaySpeed", STORE_TEXT)
+        self.assertIn("result.loopTarget", STORE_TEXT)
+
+    def test_map_settings_speed_and_lap_bounds(self):
+        self.assertIn("MAP_REPLAY_SPEED_MIN", MAP_TEXT)
+        self.assertIn("MAP_REPLAY_SPEED_MAX", MAP_TEXT)
+        self.assertIn("MAP_REPLAY_SPEED_STEP", MAP_TEXT)
+        self.assertIn("MAP_LOOP_TARGET_INF", MAP_TEXT)
+        self.assertIn("settingsMode_ != MapReplayMode::LOOP", MAP_TEXT)
+        self.assertIn("settingsLoopTarget_ = settingsLoopTarget_ == MAP_LOOP_TARGET_MAX", MAP_TEXT)
+
+    def test_finite_loop_completes_only_after_closing_edge(self):
+        edges = closed_route_edges(3, laps=2)
+        self.assertEqual(edges, [(0, 1), (1, 2), (2, 0),
+                                 (0, 1), (1, 2), (2, 0)])
+        self.assertIn("logicalClosingEdge", MAP_TEXT)
+        self.assertIn("replayLapCounter_ >= loopTarget_", MAP_TEXT)
+        target_block = MAP_TEXT[MAP_TEXT.index("replayLapCounter_ >= loopTarget_") :]
+        self.assertIn("completeReplay();", target_block)
+        self.assertIn("replayTargetIndex_ = count > 1U ? 1U : 0U", MAP_TEXT)
+
+    def test_map_speed_profile_and_turn_cap(self):
+        self.assertIn("MAP_GUIDE_ACCEL_RAMP_MS", CONFIG_TEXT)
+        self.assertIn("guidedStartMs_", CTRL_TEXT)
+        self.assertIn("guidedBaseSpeed_ = MAP_GUIDE_MIN_SPEED", CTRL_TEXT)
+        self.assertIn("guidedRequestedSpeed_ = constrain(speed, MAP_REPLAY_SPEED_MIN", CTRL_TEXT)
+        self.assertIn("const int16_t mapTurnSpeed = min(replaySpeed_, TURN_MAX_SPEED)", MAP_TEXT)
+        self.assertIn("replaySpeed_, incomingBearing", MAP_TEXT)
+
+    def test_lcd_map_lines_match_settings_loop_and_delete_ux(self):
+        for token in (
+            '"TGT:%lu TRV:%lu"',
+            '"MODE:LOOP LAP:0/INF"',
+            '"MODE:LOOP LAP:%lu/%u"',
+            '"START RES XL CANCEL"',
+            '"DELETE MAP%u ?"',
+            '"ALL ROUTE DATA"',
+            '"O YES"',
+            '"X NO"',
+            '"MAP%u HELP %u/2"',
+        ):
+            self.assertIn(token, LCD_TEXT)
+        self.assertNotIn('"SEL MAP SQH DEL L3"', LCD_TEXT)
+        self.assertNotIn("modeSavePending_ = true", MAP_TEXT)
+
+    def test_long_press_and_destructive_delete_policy(self):
+        self.assertIn("MAP_LONG_PRESS_MS = 1300U", CONFIG_TEXT)
+        self.assertIn("kMapCrossLongPressMs = MAP_LONG_PRESS_MS", PS2_TEXT)
+        self.assertIn("kMapLongPressMs = MAP_LONG_PRESS_MS", PS2_TEXT)
+        square_handler = PS2_TEXT[PS2_TEXT.index("mapSquarePressActive_") :]
+        self.assertIn("kMapLongPressMs", square_handler)
+        self.assertIn("A long SQUARE on the main MAP page is inert", MAP_TEXT)
+        self.assertIn("settingsCanDelete()", MAP_TEXT)
+        self.assertIn('MAP,CIRCLE,REJECT,REASON=DELETE_SAFETY', MAP_TEXT)
 
     # Route cleaner acceptance tests. The Python geometry oracle covers the
     # safety invariants; source assertions ensure the production path uses the

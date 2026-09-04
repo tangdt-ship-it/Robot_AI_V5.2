@@ -7,6 +7,7 @@
 #include <encoders/wheel_odometry.h>
 #include <imu/mpu6050.h>
 #include <localization/heading_fusion.h>
+#include <map/map_types.h>
 #include <motor/motor_controller.h>
 #include <ps2/ps2_controller.h>
 #include <robot_config.h>
@@ -255,6 +256,7 @@ class RobotController {
   float guidedCrossTrackMm_ = 0.0f;
   int16_t guidedBaseSpeed_ = 0;
   int16_t guidedRequestedSpeed_ = 0;
+  uint32_t guidedStartMs_ = 0U;
   int16_t guidedSteering_ = 0;
   MotionOwner motionOwner_ = MotionOwner::NONE;
   bool manualResumeRequired_ = false;

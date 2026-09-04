@@ -192,7 +192,14 @@ static constexpr float MAP_GUIDE_HEADING_GAIN = 0.35f;
 static constexpr float MAP_GUIDE_CROSSTRACK_GAIN = 0.015f;
 static constexpr float MAP_GUIDE_MAX_CROSSTRACK_MM = 250.0f;
 static constexpr int16_t MAP_GUIDE_MIN_SPEED = 15;
+// MAP guided translation has its own bounded start profile. Safety STOP,
+// HOLD, CANCEL and obstacle braking always bypass this ramp.
+static constexpr uint32_t MAP_GUIDE_ACCEL_RAMP_MS = 400U;
 static constexpr uint32_t MAP_GUIDE_TELEMETRY_MS = 250U;
+
+// All MAP long-press gestures share one deliberate threshold. X still enters
+// HOLD on its down edge; this value only controls escalation to CANCEL.
+static constexpr uint32_t MAP_LONG_PRESS_MS = 1300U;
 
 static constexpr int16_t SPEED_DEFAULT = 30;
 static constexpr int16_t SPEED_MIN = 10;

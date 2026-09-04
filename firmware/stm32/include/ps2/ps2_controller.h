@@ -40,6 +40,10 @@ enum class Ps2ReceiverStatus : uint8_t { WAIT, ACT, RX, LOST };
 enum class Ps2MapAction : uint8_t {
   SLOT,
   START,
+  UP,
+  DOWN,
+  LEFT,
+  RIGHT,
   TRIANGLE,
   SQUARE,
   SQUARE_LONG,
@@ -67,6 +71,10 @@ class Ps2Controller {
   // Same re-arm boundary for USER HOLD, but preserve the currently-held X so
   // the long-press timer can still escalate HOLD to CANCEL.
   void holdMapInput();
+  // While a MAP Settings/Help/Delete screen owns the UI, the RobotController
+  // must fail closed and D-pad/joystick input must stay inside the menu.
+  void setMapUiCapture(bool enabled);
+  bool mapUiCaptureActive() const { return mapUiCapture_; }
 
   const Ps2State& state() const { return state_; }
   bool buttonPressed(Ps2Button button) const;
@@ -123,6 +131,10 @@ class Ps2Controller {
   bool mapEdgesInitialized_ = false;
   bool previousMapL3_ = false;
   bool previousMapStart_ = false;
+  bool previousMapUp_ = false;
+  bool previousMapDown_ = false;
+  bool previousMapLeft_ = false;
+  bool previousMapRight_ = false;
   bool previousMapSelect_ = false;
   bool previousMapTriangle_ = false;
   bool previousMapSquare_ = false;
@@ -137,6 +149,7 @@ class Ps2Controller {
   // reconnect. They are armed only after two consecutive fresh frames show
   // every Map-related button released while the LCD is on MAP.
   bool mapActionsArmed_ = false;
+  bool mapUiCapture_ = false;
   uint8_t mapNeutralReleaseFrames_ = 0;
   uint32_t lastMapPageToggleMs_ = 0;
 
