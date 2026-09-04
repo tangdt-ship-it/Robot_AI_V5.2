@@ -14,6 +14,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = (ROOT / "include" / "robot_config.h").read_text(encoding="utf-8")
+MAP_TYPES = (ROOT / "include" / "map" / "map_types.h").read_text(
+    encoding="utf-8"
+)
 CTRL = (ROOT / "src" / "control" / "robot_controller.cpp").read_text(
     encoding="utf-8"
 )
@@ -172,8 +175,8 @@ class GuidedReplayHostTests(unittest.TestCase):
     def test_heading_correction_signs(self):
         self.assertGreater(steering(10.0, 0.0), 0.0)
         self.assertLess(steering(-10.0, 0.0), 0.0)
-        self.assertIn("targetLeft_ = constrain(guidedBaseSpeed_ - steering", CTRL)
-        self.assertIn("targetRight_ = constrain(guidedBaseSpeed_ + steering", CTRL)
+        self.assertIn("const int16_t rawLeft = guidedBaseSpeed_ - steering", CTRL)
+        self.assertIn("const int16_t rawRight = guidedBaseSpeed_ + steering", CTRL)
 
     def test_steering_is_bounded_and_forward(self):
         limit = config_number("MAP_GUIDE_MAX_STEER_COMMAND")
@@ -181,8 +184,43 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertLessEqual(abs(steering(-14.9, -1000.0)), limit)
         self.assertIn("maximumSafeSteer", CTRL)
         self.assertIn("OBSTACLE_MIN_FORWARD_COMMAND", CTRL)
-        self.assertIn("constrain(guidedBaseSpeed_ - steering, 0, 255)", CTRL)
-        self.assertIn("constrain(guidedBaseSpeed_ + steering, 0, 255)", CTRL)
+        self.assertIn("const int16_t rawLeft = guidedBaseSpeed_ - steering", CTRL)
+        self.assertIn("const int16_t rawRight = guidedBaseSpeed_ + steering", CTRL)
+
+    def test_map_wheel_absolute_cap_50(self):
+        self.assertIn("MAP_REPLAY_SPEED_MAX = 50", MAP_TYPES)
+        self.assertIn("const int16_t rawMaximum = max(rawLeft, rawRight)", CTRL)
+        self.assertIn("const float wheelScale", CTRL)
+        self.assertIn("MAP_REPLAY_SPEED_MAX", CTRL)
+        for left, right in ((44.0, 56.0), (56.0, 44.0), (20.0, 26.0)):
+            scale = min(1.0, 50.0 / max(left, right))
+            self.assertLessEqual(left * scale, 50.0)
+            self.assertLessEqual(right * scale, 50.0)
+
+    def test_map_global_ramp_off(self):
+        apply_start = CTRL.index("void RobotController::applyMotorCommand")
+        apply_end = CTRL.index("void RobotController::stopImmediately", apply_start)
+        apply = CTRL[apply_start:apply_end]
+        self.assertIn("const bool replayGuided = motionOwner_ == MotionOwner::REPLAY", apply)
+        self.assertIn("if (!replayGuided) updateRamp();", apply)
+        self.assertIn("if (replayGuided) {", apply)
+        self.assertIn("left = constrain(targetLeft_, 0, MAP_REPLAY_SPEED_MAX)", apply)
+
+    def test_map_global_ramp_on_same_profile(self):
+        self.assertIn("bool rampEnabled_ = false", CTRL_HEADER)
+        self.assertIn("if (!rampEnabled_)", CTRL)
+        self.assertIn("currentLeft_ = rampToward(currentLeft_, targetLeft_)", CTRL)
+        self.assertIn("currentRight_ = rampToward(currentRight_, targetRight_)", CTRL)
+        self.assertIn("if (!replayGuided) updateRamp();", CTRL)
+
+    def test_robot_global_ramp_unchanged(self):
+        ramp_start = CTRL.index("void RobotController::updateRamp()")
+        ramp_end = CTRL.index("void RobotController::applyMotorCommand", ramp_start)
+        ramp = CTRL[ramp_start:ramp_end]
+        self.assertIn("if (targetLeft_ == 0 && targetRight_ == 0)", ramp)
+        self.assertIn("if (!rampEnabled_)", ramp)
+        self.assertIn("currentLeft_ = rampToward(currentLeft_, targetLeft_)", ramp)
+        self.assertIn("currentRight_ = rampToward(currentRight_, targetRight_)", ramp)
 
     def test_near_target_slowdown_keeps_commissioned_minimum(self):
         slow = config_number("MAP_GUIDE_SLOW_DISTANCE_MM")

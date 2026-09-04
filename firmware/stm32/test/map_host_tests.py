@@ -1231,6 +1231,9 @@ class MapHostTests(unittest.TestCase):
             '"TGT:%lu TRV:%lu"',
             '"MODE:LOOP LAP:0/INF"',
             '"MODE:LOOP LAP:%lu/%u"',
+            '"MAP%u RUN WP:%02u/%02u"',
+            '"UD/LR EDIT TRI HELP"',
+            '"RUN:X HOLD XL CANCEL"',
             '"START RES XL CANCEL"',
             '"DELETE MAP%u ?"',
             '"ALL ROUTE DATA"',
@@ -1241,6 +1244,50 @@ class MapHostTests(unittest.TestCase):
             self.assertIn(token, LCD_TEXT)
         self.assertNotIn('"SEL MAP SQH DEL L3"', LCD_TEXT)
         self.assertNotIn("modeSavePending_ = true", MAP_TEXT)
+
+    def test_loop_move_lcd_lap(self):
+        self.assertIn("status.replayOperation == 1U", LCD_TEXT)
+        move_block = LCD_TEXT[LCD_TEXT.index("status.replayOperation == 1U"):]
+        self.assertIn('"MAP%u RUN WP:%02u/%02u"', move_block)
+        self.assertIn('"MODE:LOOP LAP:%lu/%u"', move_block)
+
+    def test_loop_turn_lcd_lap(self):
+        self.assertIn("status.replayOperation == 2U", LCD_TEXT)
+        turn_start = LCD_TEXT.index("status.replayOperation == 2U")
+        turn_end = LCD_TEXT.index("if (status.mode == 7U)", turn_start)
+        turn_block = LCD_TEXT[turn_start:turn_end]
+        self.assertIn('"MAP%u RUN WP:%02u/%02u"', turn_block)
+        self.assertIn('"TURN %+ddeg"', turn_block)
+        self.assertIn('"MODE:LOOP LAP:%lu/%u"', turn_block)
+        self.assertNotIn('"MAP%u TURN WP:%02u/%02u"', turn_block)
+
+    def test_loop_realign_lcd_lap(self):
+        self.assertIn('"MODE:LOOP LAP:%lu/%u"', LCD_TEXT)
+        self.assertIn('"MODE:LOOP LAP:%lu/INF"', LCD_TEXT)
+        self.assertIn('"MAP%u RUN WP:%02u/%02u"', LCD_TEXT)
+        self.assertNotIn('"MAP%u TURN WP:%02u/%02u"', LCD_TEXT)
+
+    def test_once_turn_no_lap(self):
+        turn_start = LCD_TEXT.index("status.replayOperation == 2U")
+        turn_end = LCD_TEXT.index("if (status.mode == 7U)", turn_start)
+        turn_block = LCD_TEXT[turn_start:turn_end]
+        self.assertIn('"MODE:%s", replayMode', turn_block)
+        self.assertNotIn('"MODE:ONCE LAP:', turn_block)
+
+    def test_settings_tri_help_visible(self):
+        self.assertIn('"UD/LR EDIT TRI HELP"', LCD_TEXT)
+        self.assertIn('"TRI NEXT"', LCD_TEXT)
+        self.assertIn('"TRI PREV X BACK"', LCD_TEXT)
+
+    def test_help_lines_20_char(self):
+        for line in (
+            "UD/LR EDIT TRI HELP",
+            "RUN:X HOLD XL CANCEL",
+            "SEL-L SETTINGS",
+            "TRI PREV X BACK",
+        ):
+            self.assertLessEqual(len(line), 20)
+        self.assertIn('"MAP%u HELP %u/2"', LCD_TEXT)
 
     def test_long_press_and_destructive_delete_policy(self):
         self.assertIn("MAP_LONG_PRESS_MS = 1300U", CONFIG_TEXT)

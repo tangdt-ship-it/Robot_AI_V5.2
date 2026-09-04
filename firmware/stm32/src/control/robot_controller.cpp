@@ -295,9 +295,20 @@ void RobotController::applyMotorCommand() {
     stopImmediately(true);
     return;
   }
-  updateRamp();
+  const bool replayGuided = motionOwner_ == MotionOwner::REPLAY &&
+                            aiMotionMode_ == AiMotionMode::GUIDED_WAYPOINT;
+  // Guided MAP owns its own time-based ramp. Applying the global ramp here
+  // would ramp the already-ramped target a second time. All other owners
+  // retain the existing global ramp behavior.
+  if (!replayGuided) updateRamp();
   int16_t left = currentLeft_;
   int16_t right = currentRight_;
+  if (replayGuided) {
+    left = constrain(targetLeft_, 0, MAP_REPLAY_SPEED_MAX);
+    right = constrain(targetRight_, 0, MAP_REPLAY_SPEED_MAX);
+    currentLeft_ = left;
+    currentRight_ = right;
+  }
   const bool manualPs2 = motionOwner_ == MotionOwner::PS2;
   if (brakeEnabled_) {
     targetLeft_ = targetRight_ = currentLeft_ = currentRight_ = 0;
@@ -391,6 +402,15 @@ void RobotController::applyMotorCommand() {
     const int16_t direction = reversing_ ? -1 : 1;
     left = constrain(left - direction * balance, -255, 255);
     right = constrain(right + direction * balance, -255, 255);
+  }
+  if (replayGuided) {
+    // Keep the actuator boundary defensive even after obstacle handling or
+    // any future steering adjustment in this function. This branch is scoped
+    // exclusively to STM32 MAP replay and cannot cap MCP/PS2/Mission output.
+    left = constrain(left, 0, MAP_REPLAY_SPEED_MAX);
+    right = constrain(right, 0, MAP_REPLAY_SPEED_MAX);
+    currentLeft_ = left;
+    currentRight_ = right;
   }
   if (left == 0 && right == 0) {
     if (stopPwmLatched_) {
@@ -917,8 +937,21 @@ void RobotController::updateAiGuidedWaypoint(uint32_t nowMs) {
       static_cast<int16_t>(guidedBaseSpeed_ - OBSTACLE_MIN_FORWARD_COMMAND));
   steering = constrain(steering, -maximumSafeSteer, maximumSafeSteer);
   guidedSteering_ = steering;
-  targetLeft_ = constrain(guidedBaseSpeed_ - steering, 0, 255);
-  targetRight_ = constrain(guidedBaseSpeed_ + steering, 0, 255);
+  const int16_t rawLeft = guidedBaseSpeed_ - steering;
+  const int16_t rawRight = guidedBaseSpeed_ + steering;
+  const int16_t rawMaximum = max(rawLeft, rawRight);
+  const float wheelScale = rawMaximum > MAP_REPLAY_SPEED_MAX
+                               ? static_cast<float>(MAP_REPLAY_SPEED_MAX) /
+                                     static_cast<float>(rawMaximum)
+                               : 1.0f;
+  // Scale the post-steering pair together so the requested differential
+  // steering is preserved as closely as possible while both wheels stay
+  // within the absolute MAP replay cap.
+  targetLeft_ = constrain(static_cast<int16_t>(lroundf(rawLeft * wheelScale)),
+                          0, MAP_REPLAY_SPEED_MAX);
+  targetRight_ = constrain(
+      static_cast<int16_t>(lroundf(rawRight * wheelScale)), 0,
+      MAP_REPLAY_SPEED_MAX);
   state_ = RobotState::AI_MODE;
   straightCommand_ = false;
   reversing_ = false;

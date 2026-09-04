@@ -301,7 +301,7 @@ void LcdDisplay::buildMapLines() {
     } else {
       snprintf(desired_[1], 21, ">DELETE MAP");
     }
-    snprintf(desired_[2], 21, "UD ITEM LR VALUE");
+    snprintf(desired_[2], 21, "UD/LR EDIT TRI HELP");
     snprintf(desired_[3], 21, "START SAVE X BACK");
     return;
   }
@@ -314,7 +314,7 @@ void LcdDisplay::buildMapLines() {
       snprintf(desired_[3], 21, "TRI NEXT");
     } else {
       snprintf(desired_[1], 21, "SEL-L SETTINGS");
-      snprintf(desired_[2], 21, "X HOLD XL CANCEL");
+      snprintf(desired_[2], 21, "RUN:X HOLD XL CANCEL");
       snprintf(desired_[3], 21, "TRI PREV X BACK");
     }
     return;
@@ -343,19 +343,41 @@ void LcdDisplay::buildMapLines() {
       return;
     }
     if (status.replayOperation == 2U) {
-      snprintf(desired_[0], 21, "MAP%u TURN WP:%02u/%02u", mapSlot_,
+      snprintf(desired_[0], 21, "MAP%u RUN WP:%02u/%02u", mapSlot_,
                static_cast<unsigned>(status.replayWp),
                static_cast<unsigned>(status.replayTotal));
       snprintf(desired_[1], 21, "TURN %+ddeg", status.replayTargetDeg);
-      snprintf(desired_[2], 21, "MODE:%s", replayMode);
+      if (status.replayMode == 1U) {
+        if (status.settingsLoopTarget == 0U) {
+          snprintf(desired_[2], 21, "MODE:LOOP LAP:%lu/INF",
+                   static_cast<unsigned long>(activeLapDisplay));
+        } else {
+          snprintf(desired_[2], 21, "MODE:LOOP LAP:%lu/%u",
+                   static_cast<unsigned long>(activeLapDisplay),
+                   static_cast<unsigned>(status.settingsLoopTarget));
+        }
+      } else {
+        snprintf(desired_[2], 21, "MODE:%s", replayMode);
+      }
       snprintf(desired_[3], 21, "X HOLD XL CANCEL");
       return;
     }
-    snprintf(desired_[0], 21, "MAP%u RUN %02u/%02u", mapSlot_,
+    snprintf(desired_[0], 21, "MAP%u RUN WP:%02u/%02u", mapSlot_,
              static_cast<unsigned>(status.replayWp),
              static_cast<unsigned>(status.replayTotal));
     snprintf(desired_[1], 21, "TURN %+ddeg", status.replayTargetDeg);
-    snprintf(desired_[2], 21, "MODE:%s", replayMode);
+    if (status.replayMode == 1U) {
+      if (status.settingsLoopTarget == 0U) {
+        snprintf(desired_[2], 21, "MODE:LOOP LAP:%lu/INF",
+                 static_cast<unsigned long>(activeLapDisplay));
+      } else {
+        snprintf(desired_[2], 21, "MODE:LOOP LAP:%lu/%u",
+                 static_cast<unsigned long>(activeLapDisplay),
+                 static_cast<unsigned>(status.settingsLoopTarget));
+      }
+    } else {
+      snprintf(desired_[2], 21, "MODE:%s", replayMode);
+    }
     snprintf(desired_[3], 21, "X HOLD XL CANCEL");
     return;
   }
