@@ -83,6 +83,9 @@ bool Ps2Controller::queueMapEvent(Ps2MapAction action) {
       robotDebug.println("MAP,INPUT,START_ACTION,DROPPED=QUEUE_FULL");
       robotDebug.println("MAP,START,REJECT,REASON=QUEUE_FULL");
     }
+    if (action == Ps2MapAction::CIRCLE) {
+      robotDebug.println("MAP,INPUT,CIRCLE_ACTION,DROPPED=QUEUE_FULL");
+    }
 #endif
     return false;
   }
@@ -92,6 +95,9 @@ bool Ps2Controller::queueMapEvent(Ps2MapAction action) {
 #if ROBOT_DEBUG
   if (action == Ps2MapAction::START) {
     robotDebug.println("MAP,INPUT,START_ACTION");
+  }
+  if (action == Ps2MapAction::CIRCLE) {
+    robotDebug.println("MAP,INPUT,CIRCLE_ACTION");
   }
 #endif
 #if !STM32_LOCAL_MAP_ENABLE
@@ -256,6 +262,7 @@ void Ps2Controller::captureState(uint32_t nowMs) {
     const bool circlePressed = state_.circle && !previousMapCircle_;
     const bool crossPressed = state_.cross && !previousMapCross_;
     const bool crossReleased = !state_.cross && previousMapCross_;
+    const bool mapPageAtEdge = display.isMapPage();
     const bool allMapButtonsReleased =
         !state_.l3 && !state_.start && !state_.select && !state_.triangle &&
         !state_.square && !state_.circle && !state_.cross;
@@ -264,6 +271,17 @@ void Ps2Controller::captureState(uint32_t nowMs) {
     if (startPressed) {
       robotDebug.println("MAP,INPUT,START_RAW_DOWN");
       robotDebug.println("MAP,INPUT,START_EDGE");
+    }
+    if (circlePressed) {
+      robotDebug.println("MAP,INPUT,CIRCLE_RAW_DOWN");
+      robotDebug.print("MAP,INPUT,CIRCLE_EDGE,PAGE=");
+      robotDebug.print(mapPageAtEdge ? 1 : 0);
+      robotDebug.print(",ARMED=");
+      robotDebug.print(mapActionsArmed_ ? 1 : 0);
+      robotDebug.print(",PENDING=");
+      robotDebug.print(mapEventPending_ ? 1 : 0);
+      robotDebug.print(",MODE_PAGE=");
+      robotDebug.println(mapPageAtEdge ? "MAP" : "ROBOT");
     }
 #endif
 
@@ -285,6 +303,11 @@ void Ps2Controller::captureState(uint32_t nowMs) {
     if (crossReleased) resetMapCrossTracking();
 
     if (l3Pressed) {
+#if ROBOT_DEBUG
+      if (circlePressed) {
+        robotDebug.println("MAP,CIRCLE,REJECT,REASON=PAGE_TRANSITION");
+      }
+#endif
       if (lastMapPageToggleMs_ == 0U ||
           (nowMs - lastMapPageToggleMs_) >= kMapPageToggleGuardMs) {
         display.togglePage();
@@ -300,6 +323,11 @@ void Ps2Controller::captureState(uint32_t nowMs) {
       }
 #endif
     } else if (!display.isMapPage()) {
+#if ROBOT_DEBUG
+      if (circlePressed) {
+        robotDebug.println("MAP,CIRCLE,REJECT,REASON=NOT_MAP_PAGE");
+      }
+#endif
       mapActionsArmed_ = false;
       mapNeutralReleaseFrames_ = 0U;
       resetMapPressTracking();
@@ -313,6 +341,9 @@ void Ps2Controller::captureState(uint32_t nowMs) {
 #if ROBOT_DEBUG
       if (startPressed) {
         robotDebug.println("MAP,START,REJECT,REASON=NOT_ARMED");
+      }
+      if (circlePressed) {
+        robotDebug.println("MAP,CIRCLE,REJECT,REASON=NOT_ARMED");
       }
 #endif
       if (allMapButtonsReleased) {

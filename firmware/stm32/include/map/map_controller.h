@@ -7,7 +7,9 @@
 #include <display/lcd_display.h>
 #include <encoders/wheel_odometry.h>
 #include <localization/heading_fusion.h>
+#include <map/route_cleaner.h>
 #include <map/map_types.h>
+#include <map/semantic_route_optimizer.h>
 #include <map/route_store.h>
 #include <ps2/ps2_controller.h>
 #include <sensors/ultrasonic_sensor.h>
@@ -71,6 +73,7 @@ class MapController {
   void resetTeachTracking();
   void requestTeachFinish();
   bool finalizeTeach();
+  bool queueTeachSave(MapRouteType type, MapControllerMode failureMode);
   bool validateRoute(const MapRouteData& route, const char*& reason) const;
   uint32_t routeLengthMm(const MapRouteData& route) const;
   void updateRouteHeaderForSave(MapRouteData& route) const;
@@ -103,6 +106,8 @@ class MapController {
 
   void serviceStorage();
   void publishStatus();
+  void logOptimizeSummary(const RouteCleanerMetrics& metrics) const;
+  void logSemanticSummary(const SemanticRouteMetrics& metrics) const;
   void log(const char* message) const;
 
   RobotController& robot_;
@@ -118,11 +123,14 @@ class MapController {
   MapControllerMode mode_ = MapControllerMode::READY;
   MapRouteType routeType_ = MapRouteType::OPEN;
   MapReplayMode routeMode_ = MapReplayMode::ONCE;
+  MapTeachMode teachMode_ = MapTeachMode::MANUAL_KEYFRAME;
   MapStoreState storeState_ = MapStoreState::EMPTY;
-  // One fixed route buffer is reused between Teach and active Replay. The
-  // previous A/B record remains in Flash if a Teach save fails, so a second
-  // full-size RAM copy is unnecessary.
+  // route_ is the active Replay buffer. optimizedRoute_ and semanticRoute_
+  // are fixed-size working buffers used only after Teach stops; the previous
+  // A/B record remains in Flash if an optimization or save step fails.
   MapRouteData route_{};
+  MapRouteData optimizedRoute_{};
+  MapRouteData semanticRoute_{};
   bool loadedValid_ = false;
 
   Pose teachOrigin_{};
@@ -159,8 +167,11 @@ class MapController {
   int16_t replayTargetDeg_ = 0;
   uint32_t replayTravelMm_ = 0U;
   uint32_t replayErrorMm_ = 0U;
+  uint32_t replayLapCounter_ = 0U;
   const char* replayReason_ = "NONE";
   MapHoldReason holdReason_ = MapHoldReason::NONE;
+  uint32_t closeCandidateDistanceMm_ = 0U;
+  int16_t closeCandidateHeadingDeg_ = 0;
   bool cancelTraceActive_ = false;
   uint32_t cancelTraceStartMs_ = 0U;
   uint32_t nextCancelTraceMs_ = 0U;

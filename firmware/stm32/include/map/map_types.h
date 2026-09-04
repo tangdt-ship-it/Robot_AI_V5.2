@@ -24,6 +24,13 @@ enum class MapReplayMode : uint8_t {
   RETURN = 2U,
   PING_PONG = 3U,
 };
+// Teach acquisition is intentionally explicit by default. AUTO_SEMANTIC is
+// retained as a future extension point, but must never be selected by the
+// current PS2 workflow.
+enum class MapTeachMode : uint8_t {
+  MANUAL_KEYFRAME = 0U,
+  AUTO_SEMANTIC = 1U,
+};
 enum class MapControllerMode : uint8_t {
   READY = 0U,
   TEACHING = 1U,
@@ -34,6 +41,7 @@ enum class MapControllerMode : uint8_t {
   REPLAY_RUNNING = 6U,
   REPLAY_HOLD = 7U,
   REPLAY_COMPLETE = 8U,
+  CLOSED_CONFIRM = 9U,
 };
 enum class MapReplayOperation : uint8_t {
   NONE = 0U,

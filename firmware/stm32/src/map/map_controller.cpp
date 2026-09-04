@@ -11,8 +11,11 @@ constexpr float kCornerReleaseDeg = 15.0f;
 constexpr uint8_t kCornerStableSamples = 3U;
 constexpr float kDuplicateDistanceMm = 20.0f;
 constexpr float kDuplicateHeadingDeg = 2.0f;
-constexpr float kEndpointDistanceMm = 50.0f;
-constexpr float kEndpointHeadingDeg = 5.0f;
+constexpr float kClosedAutoDistanceMm = 50.0f;
+constexpr float kClosedAutoHeadingDeg = 5.0f;
+constexpr float kClosedCandidateDistanceMm = 200.0f;
+constexpr float kClosedCandidateHeadingDeg = 20.0f;
+constexpr float kClosedClosureSkipDistanceMm = kDuplicateDistanceMm;
 constexpr float kWaypointToleranceMm = 60.0f;
 constexpr float kReplayPoseHoldToleranceMm = 100.0f;
 constexpr float kReplayPoseHoldToleranceDeg = 15.0f;
@@ -22,6 +25,10 @@ constexpr float kPi = 3.14159265358979323846f;
 constexpr float kRadToDeg = 57.29577951308232f;
 constexpr float kDegToRad = 0.017453292519943295f;
 constexpr int16_t kReplaySpeed = 20;
+// A small bearing error at the first recorded point is teach noise, not a
+// commanded corner. Avoid a turn-in-place correction before the first MOVE;
+// larger errors still use the normal replay TURN path.
+constexpr float kReplayStartupTurnDeadbandDeg = 4.0f;
 
 const char* ActionName(Ps2MapAction action) {
   switch (action) {
@@ -160,7 +167,8 @@ void MapController::handleEvent(const Ps2MapEvent& event) {
 void MapController::handleSlot(uint8_t slot) {
   if (mode_ == MapControllerMode::TEACHING || replayActive_ ||
       mode_ == MapControllerMode::DELETE_CONFIRM ||
-      mode_ == MapControllerMode::REPLAY_HOLD) {
+      mode_ == MapControllerMode::REPLAY_HOLD ||
+      mode_ == MapControllerMode::CLOSED_CONFIRM) {
     return;
   }
   selectedSlot_ = slot == 2U ? MapSlot::MAP_2 : MapSlot::MAP_1;
@@ -178,9 +186,13 @@ void MapController::handleSlot(uint8_t slot) {
 
 void MapController::handleStart() {
   if (mode_ == MapControllerMode::TEACHING ||
-      mode_ == MapControllerMode::DELETE_CONFIRM) {
-    logStartReject(mode_ == MapControllerMode::TEACHING ? "TEACHING"
-                                                        : "DELETE_CONFIRM");
+      mode_ == MapControllerMode::DELETE_CONFIRM ||
+      mode_ == MapControllerMode::CLOSED_CONFIRM) {
+    logStartReject(mode_ == MapControllerMode::TEACHING
+                       ? "TEACHING"
+                       : mode_ == MapControllerMode::DELETE_CONFIRM
+                           ? "DELETE_CONFIRM"
+                           : "CLOSED_CONFIRM");
     return;
   }
   if (replayActive_) {
@@ -210,6 +222,13 @@ void MapController::handleStart() {
       debug_.print(static_cast<unsigned>(replayTargetIndex_));
       debug_.print(",GEN=");
       debug_.println(replayGeneration_);
+      if (routeType_ == MapRouteType::CLOSED &&
+          routeMode_ == MapReplayMode::LOOP) {
+        debug_.print("MAP,LOOP,RESUME,LAP=");
+        debug_.print(replayLapCounter_);
+        debug_.print(",WP=");
+        debug_.println(static_cast<unsigned>(replayTargetIndex_));
+      }
     } else {
       const char* reason = rejectReason != nullptr ? rejectReason
                                                     : "HOLD_NOT_RESUMABLE";
@@ -224,6 +243,10 @@ void MapController::handleStart() {
   if (prepareReplay(reason)) {
     debug_.print("MAP,START,ACCEPT,GEN=");
     debug_.println(replayGeneration_);
+    if (routeType_ == MapRouteType::CLOSED &&
+        routeMode_ == MapReplayMode::LOOP) {
+      debug_.println("MAP,LOOP,START");
+    }
   } else {
     logStartReject(reason != nullptr ? reason : "PRECHECK");
   }
@@ -231,7 +254,8 @@ void MapController::handleStart() {
 
 void MapController::handleTriangle() {
   if (replayActive_ || mode_ == MapControllerMode::REPLAY_HOLD ||
-      mode_ == MapControllerMode::DELETE_CONFIRM) {
+      mode_ == MapControllerMode::DELETE_CONFIRM ||
+      mode_ == MapControllerMode::CLOSED_CONFIRM) {
     return;
   }
   if (mode_ == MapControllerMode::TEACHING) {
@@ -242,11 +266,23 @@ void MapController::handleTriangle() {
 }
 
 void MapController::handleCircle() {
+  debug_.print("MAP,CIRCLE,HANDLE,MODE=");
+  debug_.println(static_cast<unsigned>(mode_));
   if (mode_ == MapControllerMode::TEACHING) {
+    debug_.println("MAP,CIRCLE,ACTION=FINISH_TEACH");
     requestTeachFinish();
     return;
   }
+  if (mode_ == MapControllerMode::CLOSED_CONFIRM) {
+    debug_.println("MAP,CIRCLE,ACTION=CONFIRM_CLOSED");
+    if (queueTeachSave(MapRouteType::CLOSED,
+                       MapControllerMode::CLOSED_CONFIRM)) {
+      debug_.println("MAP,CLOSE_CONFIRM,RESULT=CLOSED");
+    }
+    return;
+  }
   if (mode_ == MapControllerMode::DELETE_CONFIRM) {
+    debug_.println("MAP,CIRCLE,ACTION=DELETE_CONFIRM");
     deletePending_ = true;
     mode_ = MapControllerMode::READY;
     return;
@@ -267,6 +303,7 @@ void MapController::handleCircle() {
                          ? MapReplayMode::PING_PONG
                          : MapReplayMode::ONCE;
   }
+  debug_.println("MAP,CIRCLE,ACTION=CYCLE_MODE");
   modeBeforeSave_ = previous;
   modeSavePending_ = true;
   statusDirty_ = true;
@@ -276,6 +313,7 @@ void MapController::handleSquare(bool longPress) {
   if (longPress) {
     if (replayActive_ || mode_ == MapControllerMode::TEACHING ||
         mode_ == MapControllerMode::DELETE_CONFIRM ||
+        mode_ == MapControllerMode::CLOSED_CONFIRM ||
         !robot_.motorsStopped() || robot_.aiMotionActive()) {
       return;
     }
@@ -283,10 +321,16 @@ void MapController::handleSquare(bool longPress) {
     return;
   }
   if (mode_ == MapControllerMode::TEACHING) {
-    if (route_.header.waypointCount > 1U) {
+    if (teachMode_ != MapTeachMode::MANUAL_KEYFRAME) return;
+    const uint16_t count = route_.header.waypointCount;
+    if (count > 1U) {
       --route_.header.waypointCount;
       route_.header.routeLengthMm = routeLengthMm(route_);
       resetTeachTracking();
+      debug_.print("MAP,KEYFRAME,UNDO,IDX=");
+      debug_.println(static_cast<unsigned>(count - 1U));
+    } else {
+      debug_.println("MAP,KEYFRAME,REJECT,REASON=START_PROTECTED");
     }
   }
 }
@@ -294,6 +338,11 @@ void MapController::handleSquare(bool longPress) {
 void MapController::handleCross() {
   if (mode_ == MapControllerMode::TEACHING) {
     cancelTeach();
+  } else if (mode_ == MapControllerMode::CLOSED_CONFIRM) {
+    if (queueTeachSave(MapRouteType::OPEN,
+                       MapControllerMode::CLOSED_CONFIRM)) {
+      debug_.println("MAP,CLOSE_CONFIRM,RESULT=OPEN");
+    }
   } else if (replayActive_) {
     // X-down is the immediate safety stop and enters a resumable USER HOLD.
     enterReplayHold(MapHoldReason::USER, true);
@@ -307,6 +356,13 @@ void MapController::handleCross() {
 }
 
 void MapController::handleCrossLong() {
+  if (mode_ == MapControllerMode::CLOSED_CONFIRM) {
+    if (queueTeachSave(MapRouteType::OPEN,
+                       MapControllerMode::CLOSED_CONFIRM)) {
+      debug_.println("MAP,CLOSE_CONFIRM,RESULT=OPEN");
+    }
+    return;
+  }
   if (replayActive_) {
     // Be robust if the short event was delayed behind another input: safety
     // still stops first, then the same physical press escalates to CANCEL.
@@ -348,12 +404,22 @@ bool MapController::beginTeach() {
   if (!readPose(origin)) return false;
   teachOrigin_ = origin;
   teachOriginValid_ = true;
+  teachMode_ = MapTeachMode::MANUAL_KEYFRAME;
   route_ = {};
   route_.header.waypointCount = 0U;
   routeType_ = MapRouteType::OPEN;
   routeMode_ = MapReplayMode::ONCE;
+  closeCandidateDistanceMm_ = 0U;
+  closeCandidateHeadingDeg_ = 0;
   const Pose localOrigin{};
   if (!appendWaypoint(localOrigin, MAP_WP_START)) return false;
+  debug_.println("MAP,TEACH_MODE=MANUAL_KEYFRAME");
+  debug_.print("MAP,KEYFRAME,START,IDX=0,X=");
+  debug_.print(localOrigin.xMm, 1);
+  debug_.print(",Y=");
+  debug_.print(localOrigin.yMm, 1);
+  debug_.print(",H=");
+  debug_.println(localOrigin.headingDeg, 1);
   mode_ = MapControllerMode::TEACHING;
   storeState_ = MapStoreState::EMPTY;
   nextTeachSampleMs_ = millis() + kTeachSampleMs;
@@ -373,13 +439,47 @@ void MapController::cancelTeach() {
 void MapController::markManualWaypoint() {
   Pose pose;
   if (!teachOriginValid_ || !readPose(pose)) return;
-  (void)appendWaypoint(toTeachLocal(pose), MAP_WP_MANUAL_MARK);
+  if (teachMode_ != MapTeachMode::MANUAL_KEYFRAME) return;
+  const Pose local = toTeachLocal(pose);
+  const uint16_t count = route_.header.waypointCount;
+  if (count == 0U) return;
+  const MapWaypoint& previous = route_.waypoints[count - 1U];
+  const float separation = distanceMm(
+      local.xMm, local.yMm, static_cast<float>(previous.xMm),
+      static_cast<float>(previous.yMm));
+  if (separation <= kMinimumSegmentMm) {
+    debug_.print("MAP,KEYFRAME,REJECT,REASON=TOO_CLOSE,IDX=");
+    debug_.println(static_cast<unsigned>(count));
+    return;
+  }
+  if (!appendWaypoint(local, MAP_WP_MANUAL_MARK)) {
+    debug_.print("MAP,KEYFRAME,REJECT,REASON=FULL,IDX=");
+    debug_.println(static_cast<unsigned>(count));
+    return;
+  }
+  const uint16_t index = route_.header.waypointCount - 1U;
+  debug_.print("MAP,KEYFRAME,MARK,IDX=");
+  debug_.print(static_cast<unsigned>(index));
+  debug_.print(",X=");
+  debug_.print(local.xMm, 1);
+  debug_.print(",Y=");
+  debug_.print(local.yMm, 1);
+  debug_.print(",H=");
+  debug_.println(local.headingDeg, 1);
 }
 
 void MapController::sampleTeach() {
   Pose pose;
   if (!teachOriginValid_ || !readPose(pose)) return;
   const Pose local = toTeachLocal(pose);
+  if (teachMode_ == MapTeachMode::MANUAL_KEYFRAME) {
+    // Manual Teach observes pose only for diagnostics. A timer sample must
+    // never become an AUTO_DISTANCE/AUTO_CORNER waypoint.
+    lastTeachSample_ = local;
+    lastTeachSampleValid_ = true;
+    cornerStableSamples_ = 0U;
+    return;
+  }
   if (!lastTeachSampleValid_) {
     lastTeachSample_ = local;
     lastTeachSampleValid_ = true;
@@ -422,6 +522,19 @@ bool MapController::appendWaypoint(const Pose& pose, uint8_t flags) {
     const float headingDelta = fabsf(shortestDeltaDeg(
         static_cast<float>(headingCdeg(pose.headingDeg)) / 100.0f,
         static_cast<float>(previous.headingCdeg) / 100.0f));
+    if (separation <= kMinimumSegmentMm) {
+      // A heading-only waypoint would become a zero-length MOVE during
+      // Replay. Endpoint flags are merged into the existing point; all
+      // other close points are rejected.
+      if ((flags & MAP_WP_ENDPOINT) != 0U) {
+        previous.flags |= flags;
+        route_.header.routeLengthMm = routeLengthMm(route_);
+        statusDirty_ = true;
+        return true;
+      }
+      if ((flags & MAP_WP_MANUAL_MARK) != 0U) return false;
+      if (headingDelta > kDuplicateHeadingDeg) return false;
+    }
     if (separation <= kDuplicateDistanceMm &&
         headingDelta <= kDuplicateHeadingDeg) {
       if ((flags & (MAP_WP_MANUAL_MARK | MAP_WP_ENDPOINT)) != 0U) {
@@ -512,37 +625,173 @@ void MapController::requestTeachFinish() {
 bool MapController::finalizeTeach() {
   Pose pose;
   if (!readPose(pose)) return false;
-  if (!appendWaypoint(toTeachLocal(pose), MAP_WP_ENDPOINT)) return false;
-  const char* reason = nullptr;
-  const uint16_t count = route_.header.waypointCount;
+  const Pose localEndpoint = toTeachLocal(pose);
+  uint16_t count = route_.header.waypointCount;
+  if (count == 0U) return false;
+  bool mergedEndpoint = false;
+  MapWaypoint& last = route_.waypoints[count - 1U];
+  const float endpointSeparation = distanceMm(
+      localEndpoint.xMm, localEndpoint.yMm, static_cast<float>(last.xMm),
+      static_cast<float>(last.yMm));
+  if (endpointSeparation <= kMinimumSegmentMm) {
+    // Do not manufacture a short/zero MOVE at the end. Keep a manual anchor
+    // authoritative and mark that same point as the route endpoint.
+    last.flags |= MAP_WP_ENDPOINT;
+    mergedEndpoint = true;
+    route_.header.routeLengthMm = routeLengthMm(route_);
+    statusDirty_ = true;
+  } else if (!appendWaypoint(localEndpoint, MAP_WP_ENDPOINT)) {
+    return false;
+  }
+  count = route_.header.waypointCount;
+  const MapWaypoint& endpoint = route_.waypoints[count - 1U];
+  debug_.print("MAP,KEYFRAME,ENDPOINT,IDX=");
+  debug_.print(static_cast<unsigned>(count - 1U));
+  debug_.print(",X=");
+  debug_.print(static_cast<float>(endpoint.xMm), 1);
+  debug_.print(",Y=");
+  debug_.print(static_cast<float>(endpoint.yMm), 1);
+  debug_.print(",H=");
+  debug_.print(static_cast<float>(endpoint.headingCdeg) / 100.0f, 1);
+  debug_.print(",ACTION=");
+  debug_.println(mergedEndpoint ? "MERGE" : "APPEND");
+  float closeDistance = 0.0f;
+  float closeHeading = 0.0f;
   if (count >= 2U) {
-    const float closeDistance = distanceMm(
+    closeDistance = distanceMm(
         static_cast<float>(route_.waypoints[0].xMm),
         static_cast<float>(route_.waypoints[0].yMm),
         static_cast<float>(route_.waypoints[count - 1U].xMm),
         static_cast<float>(route_.waypoints[count - 1U].yMm));
-    const float closeHeading = fabsf(shortestDeltaDeg(
+    closeHeading = fabsf(shortestDeltaDeg(
         static_cast<float>(route_.waypoints[count - 1U].headingCdeg) /
             100.0f,
         static_cast<float>(route_.waypoints[0].headingCdeg) / 100.0f));
-    routeType_ = closeDistance <= kEndpointDistanceMm &&
-                         closeHeading <= kEndpointHeadingDeg && count >= 3U
-                     ? MapRouteType::CLOSED
-                     : MapRouteType::OPEN;
   }
-  if (!IsReplayModeAllowed(routeType_, routeMode_)) routeMode_ = MapReplayMode::ONCE;
+  debug_.print("MAP,TEACH,CLOSE_CHECK,D=");
+  debug_.print(closeDistance, 1);
+  debug_.print(",H=");
+  debug_.print(closeHeading, 1);
+
+  const bool enoughPoints = count >= 3U;
+  const bool autoClosed = enoughPoints &&
+                          closeDistance <= kClosedAutoDistanceMm &&
+                          closeHeading <= kClosedAutoHeadingDeg;
+  const bool closedCandidate = enoughPoints && !autoClosed &&
+                               closeDistance <= kClosedCandidateDistanceMm &&
+                               closeHeading <= kClosedCandidateHeadingDeg;
+  if (autoClosed) {
+    debug_.println(",CLASS=AUTO_CLOSED");
+  } else if (closedCandidate) {
+    debug_.println(",CLASS=CANDIDATE");
+  } else {
+    debug_.println(",CLASS=OPEN");
+  }
+  const MapRouteType detectedType = (autoClosed || closedCandidate)
+                                        ? MapRouteType::CLOSED
+                                        : MapRouteType::OPEN;
+  route_.header.routeType = static_cast<uint8_t>(detectedType);
+  route_.header.replayMode = static_cast<uint8_t>(routeMode_);
+  if (teachMode_ == MapTeachMode::MANUAL_KEYFRAME) {
+    // Manual keyframes are authoritative. Keep the cleaner and semantic
+    // optimizer available for a future AUTO_SEMANTIC mode, but never let
+    // either module move, remove or reconstruct a user-marked point here.
+    optimizedRoute_ = route_;
+    semanticRoute_ = route_;
+    debug_.println("MAP,TEACH_MODE=MANUAL_KEYFRAME");
+    debug_.println("MAP,SEMANTIC=BYPASS_MANUAL_KEYFRAME");
+    uint16_t manualCount = 0U;
+    for (uint16_t index = 0U; index < count; ++index) {
+      if ((route_.waypoints[index].flags & MAP_WP_MANUAL_MARK) != 0U) {
+        ++manualCount;
+      }
+    }
+    debug_.print("MAP,TEACH,SUMMARY,POINTS=");
+    debug_.print(static_cast<unsigned>(count));
+    debug_.print(",MANUAL=");
+    debug_.print(static_cast<unsigned>(manualCount));
+    debug_.print(",LENGTH=");
+    debug_.print(routeLengthMm(route_));
+    debug_.print(",TYPE=");
+    debug_.println(detectedType == MapRouteType::CLOSED ? "CLOSED" : "OPEN");
+  } else {
+    RouteCleanerMetrics optimizeMetrics;
+    const bool cleanAccepted =
+        cleanMapRoute(route_, optimizedRoute_, optimizeMetrics);
+    route_ = optimizedRoute_;
+    logOptimizeSummary(optimizeMetrics);
+    SemanticRouteMetrics semanticMetrics;
+    semanticMetrics.rawPoints = optimizeMetrics.rawPoints;
+    if (cleanAccepted) {
+      (void)optimizeSemanticRoute(optimizedRoute_, semanticRoute_,
+                                  semanticMetrics);
+      semanticMetrics.rawPoints = optimizeMetrics.rawPoints;
+    } else {
+      semanticRoute_ = optimizedRoute_;
+      semanticMetrics.cleanPoints = optimizedRoute_.header.waypointCount;
+      semanticMetrics.semanticPoints = optimizedRoute_.header.waypointCount;
+      semanticMetrics.cleanLengthMm = optimizedRoute_.header.routeLengthMm;
+      semanticMetrics.semanticLengthMm = optimizedRoute_.header.routeLengthMm;
+      semanticMetrics.fallbackReason = "CLEAN_FALLBACK";
+    }
+    route_ = semanticRoute_;
+    logSemanticSummary(semanticMetrics);
+  }
+  if (autoClosed) {
+    return queueTeachSave(MapRouteType::CLOSED,
+                          MapControllerMode::TEACHING);
+  }
+  if (closedCandidate) {
+    closeCandidateDistanceMm_ = static_cast<uint32_t>(lroundf(closeDistance));
+    closeCandidateHeadingDeg_ = static_cast<int16_t>(lroundf(closeHeading));
+    routeType_ = MapRouteType::CLOSED;
+    routeMode_ = MapReplayMode::ONCE;
+    route_.header.routeType = static_cast<uint8_t>(routeType_);
+    route_.header.replayMode = static_cast<uint8_t>(routeMode_);
+    updateRouteHeaderForSave(route_);
+    storeState_ = MapStoreState::EMPTY;
+    loadedValid_ = false;
+    teachOriginValid_ = false;
+    teachFinishPending_ = false;
+    mode_ = MapControllerMode::CLOSED_CONFIRM;
+    statusDirty_ = true;
+    return true;
+  }
+
+  return queueTeachSave(MapRouteType::OPEN, MapControllerMode::TEACHING);
+}
+
+bool MapController::queueTeachSave(MapRouteType type,
+                                   MapControllerMode failureMode) {
+  const MapRouteType previousType = routeType_;
+  const MapReplayMode previousMode = routeMode_;
+  routeType_ = type;
+  if (!IsReplayModeAllowed(routeType_, routeMode_)) {
+    routeMode_ = MapReplayMode::ONCE;
+  }
   route_.header.routeType = static_cast<uint8_t>(routeType_);
   route_.header.replayMode = static_cast<uint8_t>(routeMode_);
   updateRouteHeaderForSave(route_);
+  const char* reason = nullptr;
   if (!validateRoute(route_, reason)) {
+    routeType_ = previousType;
+    routeMode_ = previousMode;
+    route_.header.routeType = static_cast<uint8_t>(routeType_);
+    route_.header.replayMode = static_cast<uint8_t>(routeMode_);
+    updateRouteHeaderForSave(route_);
     debug_.print("MAP,TEACH=REJECT,REASON=");
     debug_.println(reason != nullptr ? reason : "INVALID");
-    mode_ = MapControllerMode::TEACHING;
+    mode_ = failureMode;
+    statusDirty_ = true;
     return false;
   }
   savePending_ = true;
   mode_ = MapControllerMode::READY;
   teachOriginValid_ = false;
+  teachFinishPending_ = false;
+  closeCandidateDistanceMm_ = 0U;
+  closeCandidateHeadingDeg_ = 0;
+  statusDirty_ = true;
   return true;
 }
 
@@ -557,10 +806,12 @@ uint32_t MapController::routeLengthMm(const MapRouteData& route) const {
                         static_cast<float>(route.waypoints[i].yMm));
   }
   if (static_cast<MapRouteType>(route.header.routeType) == MapRouteType::CLOSED) {
-    total += distanceMm(static_cast<float>(route.waypoints[count - 1U].xMm),
-                        static_cast<float>(route.waypoints[count - 1U].yMm),
-                        static_cast<float>(route.waypoints[0].xMm),
-                        static_cast<float>(route.waypoints[0].yMm));
+    const float closure = distanceMm(
+        static_cast<float>(route.waypoints[count - 1U].xMm),
+        static_cast<float>(route.waypoints[count - 1U].yMm),
+        static_cast<float>(route.waypoints[0].xMm),
+        static_cast<float>(route.waypoints[0].yMm));
+    if (closure > kClosedClosureSkipDistanceMm) total += closure;
   }
   return total <= 0.0f ? 0U : static_cast<uint32_t>(lroundf(total));
 }
@@ -617,10 +868,12 @@ bool MapController::validateRoute(const MapRouteData& route,
         static_cast<float>(route.waypoints[count - 1U].yMm),
         static_cast<float>(route.waypoints[0].xMm),
         static_cast<float>(route.waypoints[0].yMm));
-    // The endpoint may intentionally coincide with START after duplicate
-    // suppression. It is a closure marker, not a travelled segment; adjacent
-    // zero-length segments above remain invalid.
-    if (closure > kMaximumSegmentMm) {
+    // A near-zero endpoint is a closure marker, not a travelled segment. Do
+    // not manufacture an invalid 0-20 mm closing MOVE for an endpoint that is
+    // already effectively at START. Adjacent non-closing segments remain
+    // subject to the normal minimum/maximum checks above.
+    if (closure > kClosedClosureSkipDistanceMm &&
+        (closure < kMinimumSegmentMm || closure > kMaximumSegmentMm)) {
       reason = "CLOSURE";
       return false;
     }
@@ -677,6 +930,7 @@ bool MapController::prepareReplay(const char*& rejectReason) {
   replayTargetIndex_ = 1U;
   replayDirection_ = 1;
   replayReturned_ = false;
+  replayLapCounter_ = 0U;
   replayOriginRouteGeneration_ = route_.header.generation;
   replayTargetDistanceMm_ = 0U;
   replayTargetDeg_ = 0;
@@ -797,7 +1051,11 @@ bool MapController::startNextReplaySegment() {
                                replayTarget_.xMm - current.xMm) * kRadToDeg;
   const float turnDelta = shortestDeltaDeg(bearing, current.headingDeg);
   const uint32_t segmentGeneration = nextReplayGeneration();
-  if (fabsf(turnDelta) > TURN_TOLERANCE_DEG) {
+  const bool startupNoiseTurn = replayCurrentIndex_ == 0U &&
+                                replayTargetIndex_ == 1U &&
+                                fabsf(turnDelta) <=
+                                    kReplayStartupTurnDeadbandDeg;
+  if (fabsf(turnDelta) > TURN_TOLERANCE_DEG && !startupNoiseTurn) {
     replayTargetDeg_ = static_cast<int16_t>(lroundf(fabsf(turnDelta)));
     replayOperation_ = MapReplayOperation::TURN;
     if (!robot_.startReplayTurnRelative(turnDelta > 0.0f, fabsf(turnDelta),
@@ -823,15 +1081,35 @@ bool MapController::startNextReplaySegment() {
 }
 
 void MapController::advanceReplayAfterTarget() {
-  replayCurrentIndex_ = replayTargetIndex_;
+  const uint16_t fromIndex = replayCurrentIndex_;
+  const uint16_t targetIndex = replayTargetIndex_;
+  replayCurrentIndex_ = targetIndex;
   const uint16_t count = route_.header.waypointCount;
   if (replayDirection_ > 0) {
+    if (routeType_ == MapRouteType::CLOSED &&
+        fromIndex == count - 1U && targetIndex == 0U) {
+      // The segment from the final waypoint back to P0 is a real closing
+      // edge for CLOSED ONCE and LOOP. A LOOP lap completes only after this
+      // edge reaches P0; P0 is never treated as a terminal completion.
+      if (routeMode_ == MapReplayMode::LOOP) {
+        if (replayLapCounter_ != 0xFFFFFFFFUL) ++replayLapCounter_;
+        debug_.print("MAP,LOOP,LAP_COMPLETE,LAP=");
+        debug_.println(replayLapCounter_);
+        replayTargetIndex_ = count > 1U ? 1U : 0U;
+        return;
+      }
+      if (routeMode_ == MapReplayMode::ONCE) {
+        completeReplay();
+        return;
+      }
+    }
     if (replayCurrentIndex_ < count - 1U) {
       replayTargetIndex_ = replayCurrentIndex_ + 1U;
       return;
     }
     if (routeType_ == MapRouteType::CLOSED &&
-        routeMode_ == MapReplayMode::LOOP &&
+        (routeMode_ == MapReplayMode::ONCE ||
+         routeMode_ == MapReplayMode::LOOP) &&
         replayCurrentIndex_ == count - 1U) {
       replayTargetIndex_ = 0U;
       return;
@@ -881,6 +1159,13 @@ void MapController::enterReplayHold(MapHoldReason reason, bool allowResume) {
   debug_.print(static_cast<unsigned>(replayTargetIndex_));
   debug_.print(",GEN=");
   debug_.println(replayGeneration_);
+  if (routeType_ == MapRouteType::CLOSED &&
+      routeMode_ == MapReplayMode::LOOP) {
+    debug_.print("MAP,LOOP,HOLD,LAP=");
+    debug_.print(replayLapCounter_);
+    debug_.print(",WP=");
+    debug_.println(static_cast<unsigned>(replayTargetIndex_));
+  }
 }
 
 void MapController::abortReplay(const char* reason) {
@@ -906,6 +1191,9 @@ void MapController::completeReplay() {
 }
 
 void MapController::cancelReplay(const char* reason) {
+  const bool wasClosedLoop = routeType_ == MapRouteType::CLOSED &&
+                             routeMode_ == MapReplayMode::LOOP;
+  const uint32_t cancelledLap = replayLapCounter_;
   robot_.stopImmediately(true);
   nextReplayGeneration();
   clearReplayResumeContext();
@@ -917,6 +1205,10 @@ void MapController::cancelReplay(const char* reason) {
   ps2_.disarmMapInput();
   debug_.print("MAP,CANCEL,REASON=");
   debug_.println(replayReason_);
+  if (wasClosedLoop) {
+    debug_.print("MAP,LOOP,CANCEL,LAP=");
+    debug_.println(cancelledLap);
+  }
   debug_.println("MAP,REPLAY_CANCEL");
   beginCancelTrace();
 }
@@ -941,6 +1233,7 @@ void MapController::clearReplayResumeContext() {
   replayTargetDeg_ = 0;
   replayTravelMm_ = 0U;
   replayErrorMm_ = 0U;
+  replayLapCounter_ = 0U;
 }
 
 bool MapController::canResumeReplay(const char*& rejectReason) const {
@@ -1250,9 +1543,140 @@ void MapController::publishStatus() {
       static_cast<uint8_t>(replayOperation_),
       static_cast<uint8_t>(metadata.routeType),
       static_cast<uint8_t>(metadata.replayMode),
-      static_cast<uint8_t>(holdReason_), replayTargetDeg_);
+      static_cast<uint8_t>(holdReason_), replayTargetDeg_, replayLapCounter_,
+      closeCandidateDistanceMm_, closeCandidateHeadingDeg_);
   lastStatusMs_ = millis();
   statusDirty_ = false;
+}
+
+void MapController::logOptimizeSummary(
+    const RouteCleanerMetrics& metrics) const {
+  debug_.print("MAP,OPTIMIZE,RAW_POINTS=");
+  debug_.print(static_cast<unsigned>(metrics.rawPoints));
+  debug_.print(",CLEAN_POINTS=");
+  debug_.print(static_cast<unsigned>(metrics.cleanPoints));
+  debug_.print(",REMOVED=");
+  debug_.print(static_cast<unsigned>(metrics.rawPoints - metrics.cleanPoints));
+  debug_.print(",RAW_LEN=");
+  debug_.print(metrics.rawLengthMm);
+  debug_.print(",CLEAN_LEN=");
+  debug_.print(metrics.cleanLengthMm);
+  debug_.print(",MAX_DEV=");
+  debug_.print(metrics.maxDeviationMm);
+  debug_.print(",MANUAL_KEPT=");
+  debug_.print(static_cast<unsigned>(metrics.manualKept));
+  debug_.print(",CORNER_KEPT=");
+  debug_.print(static_cast<unsigned>(metrics.cornerKept));
+  debug_.print(",REMOVED_DUPLICATE=");
+  debug_.print(static_cast<unsigned>(metrics.removedDuplicate));
+  debug_.print(",REMOVED_SHORT=");
+  debug_.print(static_cast<unsigned>(metrics.removedShort));
+  debug_.print(",REMOVED_COLLINEAR=");
+  debug_.print(static_cast<unsigned>(metrics.removedCollinear));
+  debug_.print(",REMOVED_CORNER_CLUSTER=");
+  debug_.print(static_cast<unsigned>(metrics.removedCornerCluster));
+  debug_.print(",FITTED_CORNER=");
+  debug_.print(static_cast<unsigned>(metrics.fittedCorner));
+  debug_.print(",RESULT=");
+  if (metrics.accepted) {
+    debug_.println("ACCEPT");
+  } else {
+    debug_.print("RAW_FALLBACK,REASON=");
+    debug_.println(metrics.fallbackReason != nullptr ? metrics.fallbackReason
+                                                      : "UNKNOWN");
+  }
+  // Keep each optimized point on its own short diagnostic line. This makes
+  // corner selection auditable over narrow serial terminals without changing
+  // the route format or replay behavior.
+  for (uint16_t index = 0U; index < route_.header.waypointCount; ++index) {
+    const MapWaypoint& point = route_.waypoints[index];
+    debug_.print("MAP,OPTIMIZE_WP,I=");
+    debug_.print(static_cast<unsigned>(index));
+    debug_.print(",X=");
+    debug_.print(point.xMm);
+    debug_.print(",Y=");
+    debug_.print(point.yMm);
+    debug_.print(",H=");
+    debug_.print(point.headingCdeg);
+    debug_.print(",F=");
+    debug_.println(static_cast<unsigned>(point.flags));
+  }
+}
+
+void MapController::logSemanticSummary(
+    const SemanticRouteMetrics& metrics) const {
+  debug_.print("MAP,SEMANTIC,RAW_POINTS=");
+  debug_.print(static_cast<unsigned>(metrics.rawPoints));
+  debug_.print(",CLEAN_POINTS=");
+  debug_.print(static_cast<unsigned>(metrics.cleanPoints));
+  debug_.print(",SEM_POINTS=");
+  debug_.print(static_cast<unsigned>(metrics.semanticPoints));
+  debug_.print(",STRAIGHTS=");
+  debug_.print(static_cast<unsigned>(metrics.straightRuns));
+  debug_.print(",TURN_REGIONS=");
+  debug_.print(static_cast<unsigned>(metrics.turnRegions));
+  debug_.print(",SYNTH_CORNERS=");
+  debug_.print(static_cast<unsigned>(metrics.syntheticCorners));
+  debug_.print(",RAW_CORNERS_USED=");
+  debug_.print(static_cast<unsigned>(metrics.rawCornersUsed));
+  debug_.print(",MANUAL_KEPT=");
+  debug_.print(static_cast<unsigned>(metrics.manualKept));
+  debug_.print(",MAX_DEV=");
+  debug_.print(metrics.maxDeviationMm);
+  debug_.print(",CLEAN_LEN=");
+  debug_.print(metrics.cleanLengthMm);
+  debug_.print(",SEM_LEN=");
+  debug_.print(metrics.semanticLengthMm);
+  debug_.print(",RESULT=");
+  if (metrics.accepted) {
+    debug_.println("ACCEPT");
+  } else {
+    debug_.print("FALLBACK_CLEAN,REASON=");
+    debug_.println(metrics.fallbackReason != nullptr ? metrics.fallbackReason
+                                                      : "UNKNOWN");
+    debug_.print("MAP,SEMANTIC=FALLBACK_CLEAN,REASON=");
+    debug_.println(metrics.fallbackReason != nullptr ? metrics.fallbackReason
+                                                      : "UNKNOWN");
+  }
+  if (metrics.diagnosticOverflow) debug_.println("MAP,CORNER,DIAGNOSTIC_OVERFLOW=1");
+  for (uint16_t index = 0U; index < metrics.cornerDiagnosticCount; ++index) {
+    const SemanticCornerDiagnostic& corner = metrics.corners[index];
+    debug_.print("MAP,CORNER,IDX=");
+    debug_.print(static_cast<unsigned>(corner.index));
+    debug_.print(",ANGLE=");
+    debug_.print(static_cast<float>(corner.angleCdeg) / 100.0f, 2);
+    debug_.print(",IN_DIR=");
+    debug_.print(static_cast<float>(corner.incomingDirectionCdeg) / 100.0f,
+                 2);
+    debug_.print(",OUT_DIR=");
+    debug_.print(static_cast<float>(corner.outgoingDirectionCdeg) / 100.0f,
+                 2);
+    debug_.print(",SHIFT=");
+    debug_.print(corner.shiftMm);
+    debug_.print(",DEV=");
+    debug_.print(corner.deviationMm);
+    debug_.print(",SOURCE=");
+    switch (corner.source) {
+      case SemanticCornerSource::SYNTHETIC: debug_.print("SYNTHETIC"); break;
+      case SemanticCornerSource::MANUAL: debug_.print("MANUAL"); break;
+      case SemanticCornerSource::RAW: debug_.print("RAW"); break;
+    }
+    debug_.print(",RESULT=");
+    debug_.println(corner.accepted ? "ACCEPT" : "REJECT");
+  }
+  for (uint16_t index = 0U; index < route_.header.waypointCount; ++index) {
+    const MapWaypoint& point = route_.waypoints[index];
+    debug_.print("MAP,SEMANTIC_WP,I=");
+    debug_.print(static_cast<unsigned>(index));
+    debug_.print(",X=");
+    debug_.print(point.xMm);
+    debug_.print(",Y=");
+    debug_.print(point.yMm);
+    debug_.print(",H=");
+    debug_.print(point.headingCdeg);
+    debug_.print(",F=");
+    debug_.println(static_cast<unsigned>(point.flags));
+  }
 }
 
 void MapController::log(const char* message) const {

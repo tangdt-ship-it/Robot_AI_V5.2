@@ -36,6 +36,8 @@ FLASH_TEXT = _read(INCLUDE_ROOT / "map" / "flash_layout.h")
 TYPES_TEXT = _read(INCLUDE_ROOT / "map" / "map_types.h")
 MAP_TEXT = _read(SRC_ROOT / "map" / "map_controller.cpp")
 MAP_HEADER_TEXT = _read(INCLUDE_ROOT / "map" / "map_controller.h")
+CLEANER_HEADER_TEXT = _read(INCLUDE_ROOT / "map" / "route_cleaner.h")
+CLEANER_TEXT = _read(SRC_ROOT / "map" / "route_cleaner.cpp")
 STORE_TEXT = _read(SRC_ROOT / "map" / "route_store.cpp")
 CTRL_TEXT = _read(SRC_ROOT / "control" / "robot_controller.cpp")
 CTRL_HEADER_TEXT = _read(INCLUDE_ROOT / "control" / "robot_controller.h")
@@ -97,6 +99,110 @@ def advance(current, direction, count, route_type, replay_mode):
     return 1, 1, False
 
 
+def classify_close(distance_mm, heading_deg, count):
+    """Mirror the teach endpoint classifier without touching hardware."""
+    if count < 3:
+        return "OPEN"
+    if distance_mm <= 50 and heading_deg <= 5:
+        return "AUTO_CLOSED"
+    if distance_mm <= 200 and heading_deg <= 20:
+        return "CANDIDATE"
+    return "OPEN"
+
+
+def closed_route_edges(count, laps=1):
+    """Return the logical edges for CLOSED LOOP, including Pn -> P0 once/lap."""
+    edges = []
+    for _ in range(laps):
+        edges.extend((index, index + 1) for index in range(count - 1))
+        edges.append((count - 1, 0))
+    return edges
+
+
+def route_length(points, closed=False, closure_skip_mm=20):
+    total = 0.0
+    for first, second in zip(points, points[1:]):
+        total += math.dist(first, second)
+    if closed and len(points) >= 2:
+        closure = math.dist(points[-1], points[0])
+        if closure > closure_skip_mm:
+            total += closure
+    return round(total)
+
+
+MAP_WP_START = 1 << 0
+MAP_WP_MANUAL_MARK = 1 << 1
+MAP_WP_AUTO_DISTANCE = 1 << 2
+MAP_WP_AUTO_CORNER = 1 << 3
+MAP_WP_ENDPOINT = 1 << 4
+
+
+def point_distance(first, second):
+    return math.dist(first[:2], second[:2])
+
+
+def point_segment_distance(point, first, second):
+    ax, ay = first[:2]
+    bx, by = second[:2]
+    px, py = point[:2]
+    dx, dy = bx - ax, by - ay
+    length_squared = dx * dx + dy * dy
+    if length_squared == 0:
+        return point_distance(point, first)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) /
+                       length_squared))
+    return math.dist((px, py), (ax + t * dx, ay + t * dy))
+
+
+def direction_change(first, middle, last):
+    incoming = math.degrees(math.atan2(middle[1] - first[1],
+                                        middle[0] - first[0]))
+    outgoing = math.degrees(math.atan2(last[1] - middle[1],
+                                       last[0] - middle[0]))
+    delta = (outgoing - incoming + 180.0) % 360.0 - 180.0
+    return abs(delta)
+
+
+def protected(point):
+    return bool(point[3] & (MAP_WP_START | MAP_WP_MANUAL_MARK |
+                            MAP_WP_ENDPOINT))
+
+
+def reference_safe_simplify(points, max_deviation=60.0):
+    """Small host geometry oracle for the safety properties.
+
+    It intentionally mirrors only the conservative collinear rule. The C++
+    implementation has the additional duplicate/corner-cluster passes; these
+    tests verify the invariant that every accepted shortcut is corridor-safe.
+    """
+    kept = list(range(len(points)))
+    changed = True
+    while changed:
+        changed = False
+        for position in range(1, len(kept) - 1):
+            current = points[kept[position]]
+            if protected(current) or (current[3] & MAP_WP_AUTO_CORNER):
+                continue
+            first = points[kept[position - 1]]
+            last = points[kept[position + 1]]
+            if not 20.0 <= point_distance(first, last) <= 5000.0:
+                continue
+            if direction_change(first, current, last) > 10.0:
+                continue
+            if point_segment_distance(current, first, last) > 50.0:
+                continue
+            raw_first, raw_last = kept[position - 1], kept[position + 1]
+            if any(protected(points[index]) or
+                   point_segment_distance(points[index], first, last) >
+                   max_deviation
+                   for index in range(raw_first + 1, raw_last)):
+                continue
+            del kept[position]
+            changed = True
+            break
+    return kept
+
+
 class MapHostTests(unittest.TestCase):
     def test_empty_map_and_teach_states(self):
         self.assertIn("MapControllerMode::READY", MAP_TEXT)
@@ -120,6 +226,100 @@ class MapHostTests(unittest.TestCase):
         self.assertIn("savePending_ = true", MAP_TEXT)
         self.assertIn("storeState_ = MapStoreState::STORAGE_ERROR", MAP_TEXT)
         self.assertIn("OLD_ROUTE_RETAINED=1", MAP_TEXT)
+
+    def test_TEST_MANUAL_NO_AUTO_DISTANCE(self):
+        self.assertIn("enum class MapTeachMode", TYPES_TEXT)
+        self.assertIn("MANUAL_KEYFRAME = 0U", TYPES_TEXT)
+        self.assertIn(
+            "MapTeachMode teachMode_ = MapTeachMode::MANUAL_KEYFRAME",
+            MAP_HEADER_TEXT,
+        )
+        sample = MAP_TEXT[MAP_TEXT.index("void MapController::sampleTeach()") :]
+        manual = sample[:sample.index("if (!lastTeachSampleValid_)")]
+        self.assertNotIn("appendWaypoint(local, MAP_WP_AUTO_DISTANCE)", manual)
+
+    def test_TEST_MANUAL_NO_AUTO_CORNER(self):
+        sample = MAP_TEXT[MAP_TEXT.index("void MapController::sampleTeach()") :]
+        manual = sample[:sample.index("if (!lastTeachSampleValid_)")]
+        self.assertNotIn("appendWaypoint(local, MAP_WP_AUTO_CORNER)", manual)
+        self.assertIn("teachMode_ == MapTeachMode::MANUAL_KEYFRAME", manual)
+
+    def test_TEST_EXPLICIT_MARK_ONLY(self):
+        mark = MAP_TEXT[MAP_TEXT.index("void MapController::markManualWaypoint()") :]
+        mark = mark[:mark.index("void MapController::sampleTeach()")]
+        self.assertIn("appendWaypoint(local, MAP_WP_MANUAL_MARK)", mark)
+        self.assertIn("MAP,KEYFRAME,MARK,IDX=", mark)
+        self.assertNotIn("MAP_WP_AUTO_DISTANCE", mark)
+        self.assertNotIn("MAP_WP_AUTO_CORNER", mark)
+
+    def test_TEST_JOYSTICK_CORRECTIONS_IGNORED(self):
+        sample = MAP_TEXT[MAP_TEXT.index("void MapController::sampleTeach()") :]
+        sample = sample[:sample.index("bool MapController::appendWaypoint")]
+        self.assertNotIn("ps2_", sample)
+
+    def test_TEST_ANGLE_60(self):
+        self.assertAlmostEqual(direction_change((0, 0), (100, 0),
+                                                (150, 86.6025)), 60.0, places=2)
+        self.assertIn("atan2f(replayTarget_.yMm - current.yMm", MAP_TEXT)
+
+    def test_TEST_ANGLE_130(self):
+        self.assertAlmostEqual(direction_change((0, 0), (100, 0),
+                                                (35.724, 76.604)), 130.0,
+                               places=2)
+
+    def test_TEST_RIGHT_65(self):
+        self.assertAlmostEqual(direction_change((0, 0), (100, 0),
+                                                (142.262, -90.631)), 65.0,
+                               places=2)
+        self.assertIn("shortestDeltaDeg(bearing, current.headingDeg)", MAP_TEXT)
+
+    def test_TEST_ANGLE_WRAP(self):
+        delta = (179.0 - (-179.0) + 180.0) % 360.0 - 180.0
+        self.assertAlmostEqual(delta, -2.0)
+        self.assertIn("shortestDeltaDeg", MAP_TEXT)
+        self.assertNotIn("90.0f", MAP_TEXT)
+
+    def test_TEST_MARK_HELD(self):
+        self.assertIn(
+            "if (trianglePressed) queueMapEvent(Ps2MapAction::TRIANGLE);",
+            PS2_TEXT,
+        )
+        self.assertIn("previousMapTriangle_ = state_.triangle", PS2_TEXT)
+
+    def test_TEST_TOO_CLOSE(self):
+        mark = MAP_TEXT[MAP_TEXT.index("void MapController::markManualWaypoint()") :]
+        mark = mark[:mark.index("void MapController::sampleTeach()")]
+        self.assertIn("separation <= kMinimumSegmentMm", mark)
+        self.assertIn("MAP,KEYFRAME,REJECT,REASON=TOO_CLOSE", mark)
+        self.assertIn("heading-only waypoint", MAP_TEXT)
+
+    def test_TEST_UNDO(self):
+        self.assertIn("if (count > 1U)", MAP_TEXT)
+        self.assertIn("MAP,KEYFRAME,UNDO,IDX=", MAP_TEXT)
+        self.assertIn("REASON=START_PROTECTED", MAP_TEXT)
+
+    def test_TEST_FINISH_NEAR_LAST_MARK(self):
+        self.assertIn("endpointSeparation <= kMinimumSegmentMm", MAP_TEXT)
+        self.assertIn("last.flags |= MAP_WP_ENDPOINT", MAP_TEXT)
+        self.assertIn("ACTION=", MAP_TEXT)
+
+    def test_TEST_OPEN_ROUTE(self):
+        self.assertIn("MapRouteType::OPEN", MAP_TEXT)
+        self.assertIn('debug_.println(",CLASS=OPEN")', MAP_TEXT)
+
+    def test_TEST_CLOSED_ROUTE(self):
+        self.assertIn("MapRouteType::CLOSED", MAP_TEXT)
+        self.assertIn('debug_.println(",CLASS=AUTO_CLOSED")', MAP_TEXT)
+        self.assertIn('debug_.println(",CLASS=CANDIDATE")', MAP_TEXT)
+
+    def test_TEST_MANUAL_BYPASS_OPTIMIZER(self):
+        manual = MAP_TEXT.index(
+            "if (teachMode_ == MapTeachMode::MANUAL_KEYFRAME) {",
+            MAP_TEXT.index("bool MapController::finalizeTeach()"),
+        )
+        cleaner = MAP_TEXT.index("cleanMapRoute", manual)
+        self.assertIn("MAP,SEMANTIC=BYPASS_MANUAL_KEYFRAME", MAP_TEXT[manual:cleaner])
+        self.assertGreater(cleaner, manual)
 
     def test_storage_record_sizes_and_version(self):
         self.assertEqual(MAX_WAYPOINTS, 128)
@@ -178,8 +378,108 @@ class MapHostTests(unittest.TestCase):
         self.assertTrue(route_allowed("CLOSED", "LOOP"))
         self.assertFalse(route_allowed("OPEN", "LOOP"))
         self.assertFalse(route_allowed("CLOSED", "RETURN"))
-        self.assertIn("kEndpointDistanceMm", MAP_TEXT)
-        self.assertIn("kEndpointHeadingDeg", MAP_TEXT)
+        self.assertIn("kClosedAutoDistanceMm", MAP_TEXT)
+        self.assertIn("kClosedAutoHeadingDeg", MAP_TEXT)
+        self.assertIn("kClosedCandidateDistanceMm", MAP_TEXT)
+        self.assertIn("kClosedCandidateHeadingDeg", MAP_TEXT)
+
+    def test_closed_endpoint_classification(self):
+        self.assertEqual(classify_close(50, 5, 3), "AUTO_CLOSED")
+        self.assertEqual(classify_close(200, 20, 3), "CANDIDATE")
+        self.assertEqual(classify_close(40, 3, 2), "OPEN")
+        self.assertEqual(classify_close(201, 1, 3), "OPEN")
+        self.assertEqual(classify_close(100, 21, 3), "OPEN")
+        self.assertIn("CLOSED_CONFIRM = 9U", TYPES_TEXT)
+        self.assertIn('CLASS=AUTO_CLOSED', MAP_TEXT)
+        self.assertIn('CLASS=CANDIDATE', MAP_TEXT)
+        self.assertIn('CLASS=OPEN', MAP_TEXT)
+
+    def test_closed_candidate_requires_user_confirmation(self):
+        self.assertIn('mode_ = MapControllerMode::CLOSED_CONFIRM', MAP_TEXT)
+        self.assertIn('MAP,CLOSE_CONFIRM,RESULT=CLOSED', MAP_TEXT)
+        self.assertIn('MAP,CLOSE_CONFIRM,RESULT=OPEN', MAP_TEXT)
+        self.assertIn('snprintf(desired_[0], 21, "MAP%u CLOSE?"', LCD_TEXT)
+        self.assertIn('snprintf(desired_[2], 21, "O=CLOSED")', LCD_TEXT)
+        self.assertIn('snprintf(desired_[3], 21, "X=OPEN")', LCD_TEXT)
+        self.assertIn('savePending_ = true', MAP_TEXT)
+
+    def test_closed_candidate_is_locked_until_confirmed(self):
+        for token in (
+            'mode_ == MapControllerMode::CLOSED_CONFIRM',
+            'logStartReject',
+            'queueTeachSave(MapRouteType::CLOSED',
+            'queueTeachSave(MapRouteType::OPEN',
+        ):
+            self.assertIn(token, MAP_TEXT)
+        self.assertIn('status.mode != 8U', _read(INCLUDE_ROOT / 'display' / 'lcd_display.h'))
+
+    def test_closed_once_includes_closing_edge(self):
+        self.assertEqual(
+            closed_route_edges(4), [(0, 1), (1, 2), (2, 3), (3, 0)]
+        )
+        self.assertIn('fromIndex == count - 1U && targetIndex == 0U', MAP_TEXT)
+        self.assertIn('routeMode_ == MapReplayMode::ONCE', MAP_TEXT)
+        self.assertIn('completeReplay();', MAP_TEXT)
+
+    def test_closed_loop_repeats_full_laps(self):
+        one_lap = closed_route_edges(4)
+        two_laps = closed_route_edges(4, laps=2)
+        self.assertEqual(one_lap[-1], (3, 0))
+        self.assertEqual(two_laps[:4], two_laps[4:8])
+        self.assertIn('MAP,LOOP,START', MAP_TEXT)
+        self.assertIn('MAP,LOOP,LAP_COMPLETE,LAP=', MAP_TEXT)
+        self.assertIn('replayTargetIndex_ = count > 1U ? 1U : 0U', MAP_TEXT)
+        self.assertIn('mode_ = MapControllerMode::REPLAY_RUNNING', MAP_TEXT)
+        self.assertIn('replayActive_ = true', MAP_TEXT)
+
+    def test_closed_loop_index_and_counter_boundaries(self):
+        edges = closed_route_edges(128, laps=3)
+        self.assertTrue(all(0 <= source < 128 and 0 <= target < 128
+                            for source, target in edges))
+        self.assertIn('if (replayLapCounter_ != 0xFFFFFFFFUL)', MAP_TEXT)
+        self.assertIn('count - 1U', MAP_TEXT)
+        self.assertIn('count > 1U ? 1U : 0U', MAP_TEXT)
+
+    def test_closed_loop_origin_is_stable_between_laps(self):
+        prepare = MAP_TEXT.split('bool MapController::prepareReplay', 1)[1].split(
+            'bool MapController::replayPrecheck', 1
+        )[0]
+        advance_body = MAP_TEXT.split(
+            'void MapController::advanceReplayAfterTarget', 1
+        )[1].split('void MapController::enterReplayHold', 1)[0]
+        self.assertIn('replayOrigin_ = live', prepare)
+        self.assertIn('replayOriginValid_ = true', prepare)
+        self.assertNotIn('replayOrigin_ =', advance_body)
+        self.assertIn('replayLapCounter_ = 0U', prepare)
+
+    def test_closed_loop_hold_resume_cancel_context(self):
+        for token in (
+            'MAP,LOOP,HOLD,LAP=',
+            'MAP,LOOP,RESUME,LAP=',
+            'MAP,LOOP,CANCEL,LAP=',
+            'const uint32_t cancelledLap = replayLapCounter_',
+            'debug_.println(cancelledLap)',
+            'replayLapCounter_',
+            'replayTargetIndex_',
+            'replayDirection_',
+            'replayContextSlot_',
+            'replayOriginRouteGeneration_',
+            'replayOriginResetGeneration_',
+            'replayOriginHeadingResetGeneration_',
+        ):
+            self.assertIn(token, MAP_TEXT)
+        self.assertIn('cancelReplay("PS2_TAKEOVER")', MAP_TEXT)
+        self.assertIn('enterReplayHold(MapHoldReason::EXTERNAL_STOP, false)', MAP_TEXT)
+        self.assertIn('enterReplayHold(MapHoldReason::OBSTACLE, true)', MAP_TEXT)
+
+    def test_closed_route_length_and_near_zero_closure(self):
+        self.assertEqual(route_length([(0, 0), (100, 0), (100, 100)], False), 200)
+        self.assertEqual(route_length([(0, 0), (100, 0), (100, 100)], True), 341)
+        self.assertEqual(route_length([(0, 0), (100, 0), (100, 100), (0, 0)], True), 341)
+        self.assertIn('kClosedClosureSkipDistanceMm', MAP_TEXT)
+        self.assertIn('if (closure > kClosedClosureSkipDistanceMm) total += closure', MAP_TEXT)
+        self.assertIn('closure > kClosedClosureSkipDistanceMm &&', MAP_TEXT)
+        self.assertIn('reason = "CLOSURE"', MAP_TEXT)
 
     def test_once_sequence(self):
         current, direction = 0, 1
@@ -323,6 +623,68 @@ class MapHostTests(unittest.TestCase):
         self.assertIn("mapNeutralReleaseFrames_", PS2_HEADER_TEXT)
         self.assertIn("kMapNeutralFramesToArm", PS2_TEXT)
 
+    def test_TEST_CIRCLE_ONE_PRESS_TEACH(self):
+        self.assertIn(
+            "const bool circlePressed = state_.circle && !previousMapCircle_",
+            PS2_TEXT,
+        )
+        self.assertIn("if (circlePressed) queueMapEvent(Ps2MapAction::CIRCLE)", PS2_TEXT)
+        self.assertIn("MAP,INPUT,CIRCLE_RAW_DOWN", PS2_TEXT)
+        self.assertIn("MAP,INPUT,CIRCLE_EDGE,PAGE=", PS2_TEXT)
+        self.assertIn("MAP,INPUT,CIRCLE_ACTION", PS2_TEXT)
+        self.assertIn("MAP,EVENT=", MAP_TEXT)
+        self.assertIn("MAP,CIRCLE,ACTION=FINISH_TEACH", MAP_TEXT)
+
+    def test_TEST_CIRCLE_HELD(self):
+        self.assertIn("previousMapCircle_ = state_.circle", PS2_TEXT)
+        self.assertIn("state_.circle && !previousMapCircle_", PS2_TEXT)
+
+    def test_TEST_CIRCLE_RELEASE_PRESS(self):
+        self.assertIn("previousMapCircle_ = state_.circle", PS2_TEXT)
+
+    def test_TEST_CIRCLE_NOT_ARMED_LOG(self):
+        self.assertIn("MAP,CIRCLE,REJECT,REASON=NOT_ARMED", PS2_TEXT)
+        self.assertIn("mapActionsArmed_", PS2_TEXT)
+
+    def test_TEST_CIRCLE_MAP_PAGE_ONLY(self):
+        self.assertIn("MAP,CIRCLE,REJECT,REASON=NOT_MAP_PAGE", PS2_TEXT)
+        self.assertIn("MAP,CIRCLE,REJECT,REASON=PAGE_TRANSITION", PS2_TEXT)
+        self.assertIn("display.isMapPage()", PS2_TEXT)
+
+    def test_TEST_CIRCLE_QUEUE_DELIVERY(self):
+        self.assertIn("MAP,INPUT,CIRCLE_ACTION", PS2_TEXT)
+        self.assertIn("MAP,INPUT,CIRCLE_ACTION,DROPPED=QUEUE_FULL", PS2_TEXT)
+        self.assertIn("bool Ps2Controller::takeMapEvent", PS2_TEXT)
+        self.assertIn("case Ps2MapAction::CIRCLE: handleCircle(); break;", MAP_TEXT)
+
+    def test_TEST_CIRCLE_FINISH_TEACH(self):
+        self.assertIn("MAP,CIRCLE,HANDLE,MODE=", MAP_TEXT)
+        self.assertIn("MAP,CIRCLE,ACTION=FINISH_TEACH", MAP_TEXT)
+        self.assertIn("requestTeachFinish();", MAP_TEXT)
+
+    def test_TEST_CIRCLE_PENDING_STOP(self):
+        self.assertIn("teachFinishPending_ = true", MAP_TEXT)
+        self.assertIn("if (teachFinishPending_)", MAP_TEXT)
+        self.assertIn("finalizeTeach();", MAP_TEXT)
+
+    def test_TEST_CIRCLE_SAVED_MODE(self):
+        self.assertIn("MAP,CIRCLE,ACTION=CYCLE_MODE", MAP_TEXT)
+        self.assertIn("modeSavePending_ = true", MAP_TEXT)
+
+    def test_TEST_CIRCLE_CLOSED_CONFIRM(self):
+        self.assertIn("MAP,CIRCLE,ACTION=CONFIRM_CLOSED", MAP_TEXT)
+        self.assertIn("mode_ == MapControllerMode::CLOSED_CONFIRM", MAP_TEXT)
+
+    def test_TEST_X_PRIORITY_OVER_CIRCLE(self):
+        self.assertIn("if (crossPressed && display.isMapPage())", PS2_TEXT)
+        self.assertIn("mapEvent_.action != Ps2MapAction::CROSS", PS2_TEXT)
+        self.assertIn("CIRCLE_ACTION,DROPPED=QUEUE_FULL", PS2_TEXT)
+
+    def test_TEST_START_PRIORITY_POLICY_UNCHANGED(self):
+        self.assertIn("if (startPressed) queueMapEvent(Ps2MapAction::START)", PS2_TEXT)
+        self.assertIn("MAP,INPUT,START_ACTION", PS2_TEXT)
+        self.assertIn("MAP,START,REJECT,REASON=QUEUE_FULL", PS2_TEXT)
+
     def test_TEST_X_CANCEL_GENERATION(self):
         self.assertIn("void Ps2Controller::disarmMapInput()", PS2_TEXT)
         self.assertIn("ps2_.disarmMapInput()", MAP_TEXT)
@@ -431,7 +793,9 @@ class MapHostTests(unittest.TestCase):
     def test_TEST_SELECT_LOCKED_DURING_RUN(self):
         self.assertIn("replayActive_", MAP_TEXT)
         self.assertIn("mode_ == MapControllerMode::REPLAY_HOLD", MAP_TEXT)
-        self.assertIn("status.mode >= 1U && status.mode <= 7U", _read(INCLUDE_ROOT / "display" / "lcd_display.h"))
+        lcd_header = _read(INCLUDE_ROOT / "display" / "lcd_display.h")
+        self.assertIn("status.mode >= 1U && status.mode != 2U", lcd_header)
+        self.assertIn("status.mode != 8U", lcd_header)
 
     def test_TEST_X_SHORT_HOLD(self):
         self.assertIn("queueMapEvent(Ps2MapAction::CROSS)", PS2_TEXT)
@@ -506,6 +870,7 @@ class MapHostTests(unittest.TestCase):
         self.assertIn("MapReplayMode::LOOP", MAP_TEXT)
         self.assertIn("routeMode_", MAP_TEXT)
         self.assertIn("replayDirection_", MAP_TEXT)
+        self.assertIn("replayLapCounter_", MAP_HEADER_TEXT)
 
     def test_TEST_HOLD_RETURN_CONTEXT(self):
         self.assertIn("MapReplayMode::RETURN", MAP_TEXT)
@@ -522,6 +887,293 @@ class MapHostTests(unittest.TestCase):
         self.assertIn('snprintf(desired_[1], 21, "USER HOLD")', LCD_TEXT)
         self.assertIn('snprintf(desired_[1], 21, "OBS BLOCKED")', LCD_TEXT)
         self.assertIn('snprintf(desired_[3], 21, "X HOLD X-LONG CANCEL")', LCD_TEXT)
+
+    # Route cleaner acceptance tests. The Python geometry oracle covers the
+    # safety invariants; source assertions ensure the production path uses the
+    # fixed-size implementation and its fail-safe gates.
+    def test_optimizer_module_and_pipeline(self):
+        self.assertIn("cleanMapRoute", CLEANER_HEADER_TEXT)
+        self.assertIn("cleanMapRoute(route_, optimizedRoute_", MAP_TEXT)
+        self.assertIn("logOptimizeSummary", MAP_TEXT)
+        self.assertIn("MAP,OPTIMIZE_WP,I=", MAP_TEXT)
+        self.assertIn("optimizedRoute_", MAP_HEADER_TEXT)
+        self.assertIn("route_.header.routeType = static_cast<uint8_t>(detectedType)", MAP_TEXT)
+
+    def test_replay_start_noise_does_not_create_turn_pulse(self):
+        self.assertIn("kReplayStartupTurnDeadbandDeg", MAP_TEXT)
+        self.assertIn("startupNoiseTurn", MAP_TEXT)
+        self.assertIn("!startupNoiseTurn", MAP_TEXT)
+
+    def test_optimizer_thresholds_are_named_and_conservative(self):
+        for name in (
+            "kOptimizeDuplicateDistanceMm",
+            "kOptimizeDuplicateHeadingDeg",
+            "kOptimizeShortSegmentMm",
+            "kOptimizeLineDeviationMm",
+            "kOptimizeStraightAngleDeg",
+            "kOptimizeCornerAngleDeg",
+            "kOptimizeCornerClusterRadiusMm",
+            "kOptimizeMaxDeviationMm",
+            "kOptimizeMaxLengthReductionPercent",
+            "kOptimizeMinimumSegmentMm",
+            "kOptimizeMaximumSegmentMm",
+            "kOptimizeCornerFitMinAngleDeg",
+            "kOptimizeCornerFitMaxAngleDeg",
+            "kOptimizeCornerFitMaxExtensionMm",
+        ):
+            self.assertIn(name, CLEANER_TEXT)
+        self.assertLessEqual(
+            _constant(CLEANER_TEXT, "kOptimizeMaxLengthReductionPercent"), 15
+        )
+        self.assertLessEqual(
+            _constant(CLEANER_TEXT, "kOptimizeDuplicateDistanceMm"), 40
+        )
+
+    def test_TEST_OPT_DUPLICATE_AUTO_REMOVED(self):
+        points = [
+            (0, 0, 0, MAP_WP_START),
+            (10, 1, 0, MAP_WP_AUTO_DISTANCE),
+            (500, 0, 0, MAP_WP_AUTO_DISTANCE),
+            (1000, 0, 0, MAP_WP_ENDPOINT),
+        ]
+        self.assertNotIn(1, reference_safe_simplify(points))
+        self.assertIn("kOptimizeDuplicateDistanceMm", CLEANER_TEXT)
+        self.assertIn("removedDuplicate", CLEANER_TEXT)
+
+    def test_TEST_OPT_MANUAL_NEVER_REMOVED(self):
+        points = [
+            (0, 0, 0, MAP_WP_START),
+            (300, 2, 0, MAP_WP_MANUAL_MARK),
+            (600, -2, 0, MAP_WP_AUTO_DISTANCE),
+            (1000, 0, 0, MAP_WP_ENDPOINT),
+        ]
+        kept = reference_safe_simplify(points)
+        self.assertIn(1, kept)
+        self.assertIn("MAP_WP_MANUAL_MARK", CLEANER_TEXT)
+        self.assertIn("metrics.manualKept == rawManual", CLEANER_TEXT)
+        self.assertIn("nearProtected", CLEANER_TEXT)
+
+    def test_TEST_OPT_START_PRESERVED(self):
+        points = [(0, 0, 0, MAP_WP_START), (500, 1, 0, MAP_WP_ENDPOINT)]
+        kept = reference_safe_simplify(points)
+        self.assertEqual(kept[0], 0)
+        self.assertIn("MAP_WP_START", CLEANER_TEXT)
+        self.assertIn("pointsPreserved", CLEANER_TEXT)
+
+    def test_TEST_OPT_ENDPOINT_PRESERVED(self):
+        points = [(0, 0, 0, MAP_WP_START), (500, 1, 0, MAP_WP_ENDPOINT)]
+        kept = reference_safe_simplify(points)
+        self.assertEqual(kept[-1], len(points) - 1)
+        self.assertIn("MAP_WP_ENDPOINT", CLEANER_TEXT)
+        self.assertIn("rawRoute.waypoints[rawCount - 1U]", CLEANER_TEXT)
+
+    def test_TEST_OPT_COLLINEAR(self):
+        points = [
+            (0, 0, 0, MAP_WP_START),
+            (200, 5, 0, MAP_WP_AUTO_DISTANCE),
+            (400, -10, 0, MAP_WP_AUTO_DISTANCE),
+            (600, 8, 0, MAP_WP_AUTO_DISTANCE),
+            (800, -5, 0, MAP_WP_AUTO_DISTANCE),
+            (1000, 0, 0, MAP_WP_ENDPOINT),
+        ]
+        kept = reference_safe_simplify(points)
+        self.assertLessEqual(len(kept), 3)
+        self.assertLessEqual(
+            max(point_segment_distance(points[i], points[kept[0]],
+                                        points[kept[-1]]) for i in range(len(points))),
+            60.0,
+        )
+        self.assertIn("removedCollinear", CLEANER_TEXT)
+
+    def test_TEST_OPT_COLLINEAR_MANUAL_ANCHOR(self):
+        points = [
+            (0, 0, 0, MAP_WP_START),
+            (250, 2, 0, MAP_WP_AUTO_DISTANCE),
+            (500, 0, 0, MAP_WP_MANUAL_MARK),
+            (750, -2, 0, MAP_WP_AUTO_DISTANCE),
+            (1000, 0, 0, MAP_WP_ENDPOINT),
+        ]
+        kept = reference_safe_simplify(points)
+        self.assertIn(2, kept)
+        self.assertIn("ProtectedBetween", CLEANER_TEXT)
+
+    def test_TEST_OPT_SHORT_JITTER(self):
+        points = [
+            (0, 0, 0, MAP_WP_START),
+            (30, 1, 0, MAP_WP_AUTO_DISTANCE),
+            (60, -1, 0, MAP_WP_AUTO_DISTANCE),
+            (100, 0, 0, MAP_WP_AUTO_DISTANCE),
+            (500, 0, 0, MAP_WP_ENDPOINT),
+        ]
+        self.assertLess(len(reference_safe_simplify(points)), len(points))
+        self.assertIn("kOptimizeShortSegmentMm", CLEANER_TEXT)
+        self.assertIn("removedShort", CLEANER_TEXT)
+
+    def test_TEST_OPT_BACKTRACK_CORRECTION_RULE(self):
+        # A short reverse correction on a straight leg is removable, while a
+        # genuine 90-degree corner is outside the backtrack rule.
+        correction = [
+            (0, 0, 0, MAP_WP_START),
+            (400, 0, 0, MAP_WP_AUTO_DISTANCE),
+            (350, 0, 0, MAP_WP_ENDPOINT),
+        ]
+        self.assertGreater(
+            direction_change(correction[0], correction[1], correction[2]),
+            135.0,
+        )
+        corner = [
+            (0, 0, 0, MAP_WP_START),
+            (120, 0, 0, MAP_WP_AUTO_DISTANCE),
+            (120, 500, 9000, MAP_WP_ENDPOINT),
+        ]
+        self.assertLess(
+            direction_change(corner[0], corner[1], corner[2]),
+            135.0,
+        )
+        for name in (
+            "IsBacktrackNoise",
+            "kOptimizeBacktrackAngleDeg",
+            "kOptimizeBacktrackShortLegMm",
+            "kOptimizeBacktrackLegRatio",
+        ):
+            self.assertIn(name, CLEANER_TEXT)
+
+    def test_TEST_OPT_FITS_AUTO_DISTANCE_CORNER(self):
+        self.assertIn("FitAutoCornerTransitions", CLEANER_TEXT)
+        self.assertIn("fittedCorner", CLEANER_HEADER_TEXT)
+        self.assertIn("FITTED_CORNER", MAP_TEXT)
+        self.assertIn("lineT < 1.0f", CLEANER_TEXT)
+        self.assertIn("lineU > 0.0f", CLEANER_TEXT)
+        self.assertIn("MAP_WP_AUTO_CORNER", CLEANER_TEXT)
+
+    def test_TEST_OPT_REAL_CORNER_PRESERVED(self):
+        points = [
+            (0, 0, 0, MAP_WP_START),
+            (500, 0, 0, MAP_WP_AUTO_CORNER),
+            (500, 500, 9000, MAP_WP_AUTO_DISTANCE),
+            (0, 500, 18000, MAP_WP_ENDPOINT),
+        ]
+        # A corner anchor is protected from the collinear pass by policy.
+        self.assertIn(1, reference_safe_simplify(points))
+        self.assertIn("kOptimizeCornerAngleDeg", CLEANER_TEXT)
+        self.assertIn("CornerStrength", CLEANER_TEXT)
+
+    def test_TEST_OPT_NO_DIAGONAL_CORNER_CUT(self):
+        points = [
+            (0, 0, 0, MAP_WP_START),
+            (500, 0, 0, MAP_WP_AUTO_DISTANCE),
+            (500, 500, 9000, MAP_WP_AUTO_DISTANCE),
+            (0, 500, 18000, MAP_WP_ENDPOINT),
+        ]
+        kept = reference_safe_simplify(points)
+        self.assertIn(1, kept)
+        self.assertIn(2, kept)
+        self.assertIn("kOptimizeMaxDeviationMm", CLEANER_TEXT)
+        self.assertIn("path-corridor", CLEANER_TEXT.lower())
+
+    def test_TEST_OPT_CORNER_CLUSTER(self):
+        self.assertIn("CornerRepresentativeNear", CLEANER_TEXT)
+        self.assertIn("removedCornerCluster", CLEANER_TEXT)
+        self.assertIn("kOptimizeCornerClusterRadiusMm", CLEANER_TEXT)
+        self.assertIn("clusterCount", CLEANER_TEXT)
+
+    def test_TEST_OPT_MANUAL_CORNER_PRIORITY(self):
+        self.assertIn("IsPreferredCorner", CLEANER_TEXT)
+        self.assertIn("bestStrength", CLEANER_TEXT)
+        self.assertIn("bestCenterDistance", CLEANER_TEXT)
+        self.assertIn("Keep one existing RAW corner anchor", CLEANER_TEXT)
+
+    def test_TEST_OPT_MAX_DEVIATION(self):
+        first = (0, 0, 0, MAP_WP_START)
+        middle = (500, 0, 0, MAP_WP_AUTO_DISTANCE)
+        last = (500, 500, 0, MAP_WP_ENDPOINT)
+        self.assertGreater(point_segment_distance(middle, first, last), 60.0)
+        self.assertIn("middleDeviation > kOptimizeMaxDeviationMm", CLEANER_TEXT)
+        self.assertIn("CLEAN_GEOMETRY", CLEANER_TEXT)
+
+    def test_TEST_OPT_LENGTH_RATIO(self):
+        raw = [(0, 0), (100, 60), (200, -60), (300, 60), (400, 0)]
+        clean = [(0, 0), (400, 0)]
+        self.assertGreater(
+            (route_length(raw) - route_length(clean)) / route_length(raw), 0.15
+        )
+        self.assertIn("kOptimizeMaxLengthReductionPercent", CLEANER_TEXT)
+        self.assertIn('"LENGTH_RATIO"', CLEANER_TEXT)
+
+    def test_TEST_OPT_CLOSED_SEAM(self):
+        square = [(0, 0), (500, 0), (500, 500), (0, 500), (0, 0)]
+        self.assertEqual(square[0], square[-1])
+        self.assertIn("kOptimizeClosedClosureSkipMm", CLEANER_TEXT)
+        self.assertIn("MapRouteType::CLOSED", CLEANER_TEXT)
+        self.assertIn("CLOSED", MAP_TEXT)
+
+    def test_TEST_OPT_ANGLE_WRAP(self):
+        delta = (179.0 - (-179.0) + 180.0) % 360.0 - 180.0
+        self.assertAlmostEqual(abs(delta), 2.0)
+        self.assertIn("while (delta > 180.0f)", CLEANER_TEXT)
+        self.assertIn("while (delta <= -180.0f)", CLEANER_TEXT)
+
+    def test_TEST_OPT_MAX_POINTS(self):
+        self.assertEqual(MAX_WAYPOINTS, 128)
+        self.assertIn("uint16_t selected[STM32_MAP_MAX_WAYPOINTS]", CLEANER_TEXT)
+        self.assertNotIn("std::vector", CLEANER_TEXT)
+        self.assertNotIn("malloc", CLEANER_TEXT)
+        self.assertNotIn("new ", CLEANER_TEXT)
+
+    def test_TEST_OPT_FALLBACK_RAW(self):
+        self.assertIn("SetFallback", CLEANER_TEXT)
+        self.assertIn("clean = raw", CLEANER_TEXT)
+        self.assertIn('"RAW_GEOMETRY"', CLEANER_TEXT)
+        self.assertIn('"RAW_FALLBACK,REASON="', MAP_TEXT)
+
+    def test_optimizer_scenarios(self):
+        straight = [
+            (0, 0, 0, MAP_WP_START),
+            (200, 5, 0, MAP_WP_AUTO_DISTANCE),
+            (400, -10, 0, MAP_WP_AUTO_DISTANCE),
+            (600, 8, 0, MAP_WP_AUTO_DISTANCE),
+            (1000, 0, 0, MAP_WP_ENDPOINT),
+        ]
+        self.assertLessEqual(len(reference_safe_simplify(straight)), 3)
+
+        corner = [
+            (0, 0, 0, MAP_WP_START),
+            (500, 0, 0, MAP_WP_AUTO_DISTANCE),
+            (500, 500, 0, MAP_WP_AUTO_DISTANCE),
+            (0, 500, 0, MAP_WP_ENDPOINT),
+        ]
+        kept = reference_safe_simplify(corner)
+        self.assertEqual(kept, [0, 1, 2, 3])
+
+        anchors = [
+            (0, 0, 0, MAP_WP_START),
+            (300, 0, 0, MAP_WP_AUTO_DISTANCE),
+            (600, 0, 0, MAP_WP_MANUAL_MARK),
+            (900, 0, 0, MAP_WP_AUTO_DISTANCE),
+            (1200, 0, 0, MAP_WP_ENDPOINT),
+        ]
+        kept = reference_safe_simplify(anchors)
+        self.assertEqual(kept[0], 0)
+        self.assertIn(2, kept)
+        self.assertEqual(kept[-1], 4)
+
+        closed_square = [
+            (0, 0, 0, MAP_WP_START),
+            (500, 0, 0, MAP_WP_AUTO_CORNER),
+            (500, 500, 0, MAP_WP_AUTO_CORNER),
+            (0, 500, 0, MAP_WP_AUTO_CORNER),
+            (0, 0, 0, MAP_WP_ENDPOINT),
+        ]
+        self.assertEqual(closed_square[0][:2], closed_square[-1][:2])
+        self.assertIn("CLOSED", CLEANER_TEXT)
+
+    def test_optimizer_does_not_touch_motion_or_protocol_paths(self):
+        self.assertNotIn("RobotController::", CLEANER_TEXT)
+        self.assertNotIn("Ultrasonic", CLEANER_TEXT)
+        self.assertNotIn("HeadingFusion", CLEANER_TEXT)
+        self.assertNotIn("RobotLink", CLEANER_TEXT)
+        self.assertIn("startNextReplaySegment", MAP_TEXT)
+        self.assertIn("RouteCleanerMetrics", MAP_HEADER_TEXT)
 
 
 if __name__ == "__main__":

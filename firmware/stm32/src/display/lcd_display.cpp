@@ -137,7 +137,10 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
                               uint32_t replayErrorMm,
                               uint8_t replayOperation, uint8_t routeType,
                               uint8_t replayMode, uint8_t holdReason,
-                              int16_t replayTargetDeg) {
+                              int16_t replayTargetDeg,
+                              uint32_t replayLapCounter,
+                              uint32_t closeCandidateDistanceMm,
+                              int16_t closeCandidateHeadingDeg) {
   const uint8_t normalized = slot == 2U ? 2U : 1U;
   LcdMapStatus& status = mapStatus_[normalized - 1U];
   status.valid = true;
@@ -156,6 +159,9 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
   status.routeType = routeType <= 1U ? routeType : 0U;
   status.replayMode = replayMode <= 3U ? replayMode : 0U;
   status.replayTargetDeg = replayTargetDeg;
+  status.replayLapCounter = replayLapCounter;
+  status.closeCandidateDistanceMm = closeCandidateDistanceMm;
+  status.closeCandidateHeadingDeg = closeCandidateHeadingDeg;
   if (mapSlot_ == normalized) forceRefresh();
 }
 
@@ -222,7 +228,7 @@ void LcdDisplay::buildMapLines() {
                            status.replayMode == 3U ? "PING" : "ONCE";
   if (!status.valid) {
     snprintf(desired_[0], 21, "MAP%u EMPTY", mapSlot_);
-    snprintf(desired_[1], 21, "P:000/128 L:0.0m");
+    snprintf(desired_[1], 21, "PTS:000/128 L:0.0m");
     snprintf(desired_[2], 21, "TRI TEACH");
     snprintf(desired_[3], 21, "SEL MAP L3 EXIT");
     return;
@@ -232,6 +238,15 @@ void LcdDisplay::buildMapLines() {
   const unsigned long wholeM = static_cast<unsigned long>(lengthTenthsM / 10U);
   const unsigned long tenthM = static_cast<unsigned long>(lengthTenthsM % 10U);
 
+  if (status.mode == 9U) {
+    snprintf(desired_[0], 21, "MAP%u CLOSE?", mapSlot_);
+    snprintf(desired_[1], 21, "D:%lumm H:%ddeg",
+             static_cast<unsigned long>(status.closeCandidateDistanceMm),
+             static_cast<int>(status.closeCandidateHeadingDeg));
+    snprintf(desired_[2], 21, "O=CLOSED");
+    snprintf(desired_[3], 21, "X=OPEN");
+    return;
+  }
   if (status.mode == 4U) {
     snprintf(desired_[0], 21, "MAP%u CHECK %s", mapSlot_, routeType);
     snprintf(desired_[1], 21, "WP:%02u/%02u L:%lu.%lum",
@@ -252,6 +267,18 @@ void LcdDisplay::buildMapLines() {
     return;
   }
   if (status.mode == 6U) {
+    if (status.replayMode == 1U) {
+      snprintf(desired_[0], 21, "MAP%u LOOP %02u/%02u", mapSlot_,
+               static_cast<unsigned>(status.replayWp),
+               static_cast<unsigned>(status.replayTotal));
+      snprintf(desired_[1], 21, "LAP:%lu T:%lumm",
+               static_cast<unsigned long>(status.replayLapCounter),
+               static_cast<unsigned long>(status.replayTargetMm));
+      snprintf(desired_[2], 21, "V:%lumm MODE:LOOP",
+               static_cast<unsigned long>(status.replayTravelMm));
+      snprintf(desired_[3], 21, "X HOLD X-LONG CANCEL");
+      return;
+    }
     if (status.replayOperation == 1U) {
       snprintf(desired_[0], 21, "MAP%u RUN WP:%02u/%02u", mapSlot_,
                static_cast<unsigned>(status.replayWp),
@@ -284,6 +311,13 @@ void LcdDisplay::buildMapLines() {
     snprintf(desired_[0], 21, "MAP%u HOLD %02u/%02u", mapSlot_,
              static_cast<unsigned>(status.replayWp),
              static_cast<unsigned>(status.replayTotal));
+    if (status.replayMode == 1U) {
+      snprintf(desired_[1], 21, "LOOP LAP:%lu",
+               static_cast<unsigned long>(status.replayLapCounter));
+      snprintf(desired_[2], 21, "START RESUME");
+      snprintf(desired_[3], 21, "X-LONG CANCEL");
+      return;
+    }
     if (status.holdReason == 1U) {
       snprintf(desired_[1], 21, "USER HOLD");
       snprintf(desired_[2], 21, "START RESUME");
@@ -309,7 +343,7 @@ void LcdDisplay::buildMapLines() {
 
   const char* title = "READY";
   if (status.mode == 1U) {
-    title = "TEACH";
+    title = "TEACH MAN";
   } else if (status.mode == 2U) {
     title = "SAVED";
   } else if (status.mode == 3U) {
@@ -327,13 +361,13 @@ void LcdDisplay::buildMapLines() {
   } else {
     snprintf(desired_[0], 21, "MAP%u %s %s", mapSlot_, title, routeType);
   }
-  snprintf(desired_[1], 21, "P:%03u/%03u L:%lu.%lum",
+  snprintf(desired_[1], 21, "PTS:%03u/%03u L:%lu.%lum",
            static_cast<unsigned>(status.points),
            static_cast<unsigned>(status.maxPoints), wholeM, tenthM);
 
   if (status.mode == 1U) {
-    snprintf(desired_[2], 21, "TR MARK SQ UNDO");
-    snprintf(desired_[3], 21, "CIR SAVE X CANCEL");
+    snprintf(desired_[2], 21, "TRI=MARK SQ=UNDO");
+    snprintf(desired_[3], 21, "O=SAVE X=CANCEL");
   } else if (status.mode == 2U) {
     snprintf(desired_[2], 21, "MODE:%s", replayMode);
     snprintf(desired_[3], 21, "START RUN L3 EXIT");
