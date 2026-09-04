@@ -231,6 +231,11 @@ static constexpr int16_t ULTRASONIC_DEGRADED_MAX_FORWARD_COMMAND = 8;
 // turning one dropped sample into a false "sensor fault" while still exposing
 // a genuinely disconnected sensor after the hold expires.
 static constexpr uint32_t ULTRASONIC_DISPLAY_HOLD_MS = 1000;
+// Once a channel has produced valid readings but then receives several clean
+// no-Echo timeouts, the compact LCD presents the channel as outside the
+// display range (OK). This is presentation-only: timeout health and the
+// fail-closed obstacle gate remain unchanged, so it never authorizes motion.
+static constexpr uint8_t ULTRASONIC_DISPLAY_NO_ECHO_FAR_TIMEOUTS = 4;
 // Keep the LCD far/near state stable around the 100 cm presentation boundary.
 // Safety decisions continue to use the obstacle-zone thresholds below; these
 // values affect only the compact L04/R04 display classification.

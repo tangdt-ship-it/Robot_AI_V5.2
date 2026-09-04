@@ -18,8 +18,9 @@ struct UltrasonicReading {
   float distanceCm=0, rawDistanceCm=0, rateCmS=0;
   bool valid=false, fresh=false, echoValid=false, displayFar=false;
   // True when the LCD can safely present the last real Echo during the
-  // bounded dropout hold. It is separate from echoValid, which describes the
-  // current measurement attempt.
+  // bounded dropout hold, or the established no-Echo/out-of-range display
+  // state. It is separate from echoValid, which describes the current
+  // measurement attempt.
   bool displayDistanceValid=false;
   uint32_t lastUpdateMs=0, ageMs=0, failureCount=0;
   ObstacleZone zone=ObstacleZone::UNKNOWN;
@@ -85,6 +86,7 @@ class UltrasonicSensor {
     uint32_t lastValidEchoMs=0, consecutiveTimeouts=0, invalidCount=0;
     uint8_t closerConfirmations=0, fartherConfirmations=0;
     bool displayFar=false;
+    bool noEchoFar=false;
   } channels_[2];
   static UltrasonicSensor* instance_;
   static void echoIsrMountLeft(); static void echoIsrMountRight();

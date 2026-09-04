@@ -78,6 +78,7 @@ void UltrasonicSensor::acceptPulse(uint8_t i,uint32_t pulse,uint32_t now){
     return;
   }
   c.echoValid=true;c.health=SensorHealth::HEALTHY;c.lastValidEchoMs=now;
+  c.noEchoFar=false;
   c.consecutiveTimeouts=0;c.lastMeasurementMs=now;++c.measurementSequence;c.rawDistanceCm=d;
   // A single large jump is commonly an acoustic cross-reflection from the
   // other front-facing SR04. Keep the last stable range until the new range
@@ -140,8 +141,13 @@ void UltrasonicSensor::acceptTimeout(uint8_t i,uint32_t now,bool noEcho){
     }else if(c.displayFar && c.filteredDistanceCm<=ULTRASONIC_DISPLAY_FAR_EXIT_CM) {
       c.displayFar=false;
     }
+    if(noEcho &&
+       c.consecutiveTimeouts>=ULTRASONIC_DISPLAY_NO_ECHO_FAR_TIMEOUTS) {
+      c.noEchoFar=true;
+    }
   }else{
     c.health=noEcho?SensorHealth::TIMEOUT:SensorHealth::INVALID;
+    if(!noEcho) c.noEchoFar=false;
     c.displayFar=false;
     c.zone=ObstacleZone::UNKNOWN;
   }
@@ -158,8 +164,9 @@ void UltrasonicSensor::recomputeObstacleModel(uint32_t now){
     o.rawDistanceCm=c.rawDistanceCm;
     o.valid=c.filterReady;
     o.echoValid=c.echoValid;
-    o.displayDistanceValid=recentValid&&validAge<=ULTRASONIC_DISPLAY_HOLD_MS;
-    o.displayFar=o.displayDistanceValid&&c.displayFar;
+    o.displayDistanceValid=(recentValid&&validAge<=ULTRASONIC_DISPLAY_HOLD_MS) ||
+                           c.noEchoFar;
+    o.displayFar=o.displayDistanceValid&&(c.displayFar||c.noEchoFar);
     o.fresh=c.echoValid&&recentValid&&validAge<=ULTRASONIC_FRESH_MS;
     o.lastUpdateMs=c.lastValidEchoMs;
     o.ageMs=validAge;
