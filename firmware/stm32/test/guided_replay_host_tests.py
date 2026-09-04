@@ -78,6 +78,17 @@ def steering(heading_error, cross_track_error):
     return max(-limit, min(limit, round(value)))
 
 
+def normal_decel_speed(remaining_mm, requested_speed):
+    arrival = config_number("MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM")
+    slow_distance = config_number("MAP_GUIDE_SLOW_DISTANCE_MM")
+    ratio = max(0.0, min(1.0, (remaining_mm - arrival) /
+                              (slow_distance - arrival)))
+    value = config_number("MAP_GUIDE_MIN_SPEED") + (
+        requested_speed - config_number("MAP_GUIDE_MIN_SPEED")
+    ) * ratio
+    return math.floor(value + 0.5)
+
+
 def without_comments(text):
     text = re.sub(r"//[^\n]*", "", text)
     return re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
@@ -233,6 +244,35 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertGreaterEqual(base, minimum)
         self.assertIn("guidedRequestedSpeed_", CTRL)
         self.assertIn("MAP_GUIDE_MIN_SPEED", CTRL)
+
+    def test_TEST_DECEL_250_EQUALS_CONFIG_SPEED(self):
+        self.assertEqual(normal_decel_speed(300.0, 50.0), 50)
+        self.assertEqual(normal_decel_speed(250.0, 50.0), 50)
+        self.assertIn("slowNumerator", CTRL)
+        self.assertIn("slowDenominator", CTRL)
+
+    def test_TEST_DECEL_60_EQUALS_MIN_SPEED(self):
+        self.assertEqual(normal_decel_speed(60.0, 50.0), 15)
+        self.assertEqual(normal_decel_speed(60.0, 20.0), 15)
+        self.assertIn("MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM", CTRL)
+
+    def test_TEST_DECEL_MONOTONIC(self):
+        values = [normal_decel_speed(distance, 50.0)
+                  for distance in (250.0, 200.0, 150.0, 100.0, 60.0)]
+        self.assertEqual(values, sorted(values, reverse=True))
+
+    def test_TEST_DECEL_SPEED15_CONSTANT(self):
+        for distance in (300.0, 250.0, 155.0, 100.0, 60.0):
+            self.assertEqual(normal_decel_speed(distance, 15.0), 15)
+
+    def test_TEST_SAFETY_STOP_IMMEDIATE_UNCHANGED(self):
+        self.assertIn("void RobotController::stopImmediately", CTRL)
+        self.assertIn("enterReplayHold(MapHoldReason::OBSTACLE, true)",
+                      MAP)
+        self.assertIn("finishAiDistance(AiDistanceResultCode::ENCODER_FAULT)",
+                      CTRL)
+        self.assertIn("finishAiDistance(AiDistanceResultCode::HEADING_LOST)",
+                      CTRL)
 
     def test_position_arrival_and_moderate_heading_are_explicit(self):
         self.assertLessEqual(50.0, config_number(

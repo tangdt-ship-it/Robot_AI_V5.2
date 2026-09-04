@@ -1208,6 +1208,99 @@ class MapHostTests(unittest.TestCase):
         self.assertIn("settingsMode_ != MapReplayMode::LOOP", MAP_TEXT)
         self.assertIn("settingsLoopTarget_ = settingsLoopTarget_ == MAP_LOOP_TARGET_MAX", MAP_TEXT)
 
+    def test_TEST_SETTINGS_NO_CHANGE_NO_FLASH_WRITE(self):
+        start = MAP_TEXT.index("void MapController::saveSettingsAndExit")
+        end = MAP_TEXT.index("void MapController::cancelSettings", start)
+        block = MAP_TEXT[start:end]
+        no_change_start = block.index("const bool settingsChanged")
+        candidate_start = block.index("MapRouteData candidate")
+        no_change = block[no_change_start:candidate_start]
+        self.assertIn("settingsMode_ != routeMode_", no_change)
+        self.assertIn('MAP,SETTINGS,SAVE=NO_CHANGE', no_change)
+        self.assertNotIn("store_.save", no_change)
+
+    def test_TEST_SETTINGS_NO_CHANGE_GENERATION_UNCHANGED(self):
+        start = MAP_TEXT.index("void MapController::saveSettingsAndExit")
+        end = MAP_TEXT.index("void MapController::cancelSettings", start)
+        block = MAP_TEXT[start:end]
+        no_change = block[block.index("const bool settingsChanged"):
+                          block.index("MapRouteData candidate")]
+        self.assertNotIn("updateRouteHeaderForSave", no_change)
+        self.assertIn("leaveMapUiCapture()", no_change)
+        self.assertIn("mode_ = MapControllerMode::SAVED", no_change)
+
+    def test_TEST_SETTINGS_HELP_NO_CHANGE(self):
+        self.assertIn("enterHelp()", MAP_TEXT)
+        self.assertIn("leaveHelp()", MAP_TEXT)
+        self.assertIn("settingsMode_ = routeMode_", MAP_TEXT)
+        self.assertIn("settingsSpeed_ = replaySpeed_", MAP_TEXT)
+        self.assertIn("settingsLoopTarget_ = loopTarget_", MAP_TEXT)
+
+    def test_TEST_SETTINGS_NAV_NO_CHANGE(self):
+        settings_start = MAP_TEXT.index("void MapController::handleSettingsInput")
+        settings_end = MAP_TEXT.index("void MapController::handleStart", settings_start)
+        settings_block = MAP_TEXT[settings_start:settings_end]
+        self.assertIn("settingsItem_ = static_cast<MapSettingsItem>", settings_block)
+        self.assertIn("cycleSettingsMode", settings_block)
+        self.assertIn("cycleSettingsSpeed", settings_block)
+        self.assertIn("cycleSettingsLap", settings_block)
+        self.assertIn("const bool settingsChanged", MAP_TEXT)
+
+    def test_TEST_SETTINGS_CHANGED_THEN_REVERT_NO_CHANGE(self):
+        self.assertIn("settingsSpeed_ != replaySpeed_", MAP_TEXT)
+        self.assertIn("settingsLoopTarget_ != loopTarget_", MAP_TEXT)
+        self.assertNotIn("settingsDirty_", MAP_TEXT)
+
+    def test_TEST_SETTINGS_CHANGED_WRITE_ONCE(self):
+        start = MAP_TEXT.index("void MapController::saveSettingsAndExit")
+        end = MAP_TEXT.index("void MapController::cancelSettings", start)
+        block = MAP_TEXT[start:end]
+        self.assertEqual(block.count("store_.save(selectedSlot_, candidate)"), 1)
+        self.assertIn("route_ = candidate", block)
+
+    def test_TEST_SETTINGS_SAVE_FAIL_ROLLBACK_RUNTIME(self):
+        start = MAP_TEXT.index("void MapController::saveSettingsAndExit")
+        end = MAP_TEXT.index("void MapController::cancelSettings", start)
+        block = MAP_TEXT[start:end]
+        fail_start = block.index("if (!store_.save")
+        success_start = block.index("route_ = candidate")
+        fail_block = block[fail_start:success_start]
+        self.assertIn("routeMode_ = oldMode", fail_block)
+        self.assertIn("replaySpeed_ = oldSpeed", fail_block)
+        self.assertIn("loopTarget_ = oldLoopTarget", fail_block)
+        self.assertIn("OLD_ROUTE_RETAINED=1", fail_block)
+
+    def test_TEST_SETTINGS_SAVE_FAIL_OLD_FLASH_RETAINED(self):
+        start = MAP_TEXT.index("void MapController::saveSettingsAndExit")
+        end = MAP_TEXT.index("void MapController::cancelSettings", start)
+        block = MAP_TEXT[start:end]
+        self.assertIn("MapRouteData candidate = route_", block)
+        self.assertIn("route_ = candidate", block)
+        self.assertLess(block.index("if (!store_.save"),
+                        block.index("route_ = candidate"))
+        self.assertIn("MapStoreState::STORAGE_ERROR", block)
+
+    def test_TEST_SETTINGS_SAVE_FAIL_LCD_ERROR(self):
+        for line in ("MAP%u SAVE ERROR", "OLD MAP RETAINED",
+                     "SETTINGS NOT SAVED", "X BACK"):
+            self.assertIn(line, LCD_TEXT)
+            self.assertLessEqual(len(line.replace("%u", "2")), 20)
+
+    def test_TEST_STORAGE_ERROR_PRIORITY_OVER_SAVED(self):
+        error_start = LCD_TEXT.index("if (status.storeState == 3U)")
+        saved_start = LCD_TEXT.index("if (status.mode == 2U)")
+        complete_start = LCD_TEXT.index("if (status.mode == 8U)")
+        self.assertLess(error_start, saved_start)
+        self.assertLess(error_start, complete_start)
+
+    def test_TEST_SAVE_ERROR_X_BACK(self):
+        start = MAP_TEXT.index("void MapController::handleCross()")
+        end = MAP_TEXT.index("void MapController::handleCrossLong()", start)
+        block = MAP_TEXT[start:end]
+        self.assertIn("MapStoreState::STORAGE_ERROR", block)
+        self.assertIn("MAP,SETTINGS,SAVE_ERROR_ACK", block)
+        self.assertIn("loadedValid_ ? MapControllerMode::SAVED", block)
+
     def test_finite_loop_completes_only_after_closing_edge(self):
         edges = closed_route_edges(3, laps=2)
         self.assertEqual(edges, [(0, 1), (1, 2), (2, 0),

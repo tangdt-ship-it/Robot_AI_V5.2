@@ -252,6 +252,13 @@ void LcdDisplay::buildMapLines() {
   const unsigned long wholeM = static_cast<unsigned long>(lengthTenthsM / 10U);
   const unsigned long tenthM = static_cast<unsigned long>(lengthTenthsM % 10U);
 
+  if (status.storeState == 3U) {
+    snprintf(desired_[0], 21, "MAP%u SAVE ERROR", mapSlot_);
+    snprintf(desired_[1], 21, "OLD MAP RETAINED");
+    snprintf(desired_[2], 21, "SETTINGS NOT SAVED");
+    snprintf(desired_[3], 21, "X BACK");
+    return;
+  }
   if (status.mode == 9U) {
     snprintf(desired_[0], 21, "MAP%u FINISH", mapSlot_);
     snprintf(desired_[1], 21, "PTS:%03u C:%lumm",

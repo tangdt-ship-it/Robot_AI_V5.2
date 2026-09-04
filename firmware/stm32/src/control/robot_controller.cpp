@@ -909,8 +909,12 @@ void RobotController::updateAiGuidedWaypoint(uint32_t nowMs) {
     return;
   }
 
-  const float slowRatio = constrain(
-      remaining / static_cast<float>(MAP_GUIDE_SLOW_DISTANCE_MM), 0.0f, 1.0f);
+  const float slowNumerator =
+      remaining - static_cast<float>(MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM);
+  const float slowDenominator =
+      static_cast<float>(MAP_GUIDE_SLOW_DISTANCE_MM) -
+      static_cast<float>(MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM);
+  const float slowRatio = constrain(slowNumerator / slowDenominator, 0.0f, 1.0f);
   const int16_t normalDecelSpeed = static_cast<int16_t>(lroundf(
       static_cast<float>(MAP_GUIDE_MIN_SPEED) +
       static_cast<float>(guidedRequestedSpeed_ - MAP_GUIDE_MIN_SPEED) *

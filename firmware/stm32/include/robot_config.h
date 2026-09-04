@@ -192,6 +192,9 @@ static constexpr float MAP_GUIDE_HEADING_GAIN = 0.35f;
 static constexpr float MAP_GUIDE_CROSSTRACK_GAIN = 0.015f;
 static constexpr float MAP_GUIDE_MAX_CROSSTRACK_MM = 250.0f;
 static constexpr int16_t MAP_GUIDE_MIN_SPEED = 15;
+static_assert(MAP_GUIDE_SLOW_DISTANCE_MM >
+                  MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM,
+              "MAP guide slow distance must exceed arrival tolerance");
 // MAP guided translation has its own bounded start profile. Safety STOP,
 // HOLD, CANCEL and obstacle braking always bypass this ramp.
 static constexpr uint32_t MAP_GUIDE_ACCEL_RAMP_MS = 400U;

@@ -280,14 +280,27 @@ void MapController::saveSettingsAndExit() {
     debug_.println("MAP,SETTINGS,SAVE,REJECT=MODE");
     return;
   }
+  const bool settingsChanged = settingsMode_ != routeMode_ ||
+                               settingsSpeed_ != replaySpeed_ ||
+                               settingsLoopTarget_ != loopTarget_;
+  if (!settingsChanged) {
+    storeState_ = MapStoreState::SAVED;
+    mode_ = MapControllerMode::SAVED;
+    debug_.println("MAP,SETTINGS,SAVE=NO_CHANGE");
+    leaveMapUiCapture();
+    statusDirty_ = true;
+    return;
+  }
   MapRouteData candidate = route_;
   candidate.header.replayMode = static_cast<uint8_t>(settingsMode_);
+  const MapReplayMode oldMode = routeMode_;
   const int16_t oldSpeed = replaySpeed_;
   const uint8_t oldLoopTarget = loopTarget_;
   replaySpeed_ = settingsSpeed_;
   loopTarget_ = settingsLoopTarget_;
   updateRouteHeaderForSave(candidate);
   if (!store_.save(selectedSlot_, candidate)) {
+    routeMode_ = oldMode;
     replaySpeed_ = oldSpeed;
     loopTarget_ = oldLoopTarget;
     storeState_ = MapStoreState::STORAGE_ERROR;
@@ -632,6 +645,18 @@ void MapController::handleCross() {
                        MapControllerMode::CLOSED_CONFIRM)) {
       debug_.println("MAP,CLOSE_CONFIRM,RESULT=OPEN");
     }
+  } else if (storeState_ == MapStoreState::STORAGE_ERROR &&
+             (mode_ == MapControllerMode::SAVED ||
+              mode_ == MapControllerMode::REPLAY_COMPLETE ||
+              mode_ == MapControllerMode::READY)) {
+    // A failed Settings write already released UI capture. X acknowledges
+    // the error and returns to the old valid route without deleting it.
+    mode_ = loadedValid_ ? MapControllerMode::SAVED
+                         : MapControllerMode::READY;
+    if (loadedValid_) storeState_ = MapStoreState::SAVED;
+    debug_.println("MAP,SETTINGS,SAVE_ERROR_ACK");
+    leaveMapUiCapture();
+    statusDirty_ = true;
   } else if (replayActive_) {
     // X-down is the immediate safety stop and enters a resumable USER HOLD.
     enterReplayHold(MapHoldReason::USER, true);
