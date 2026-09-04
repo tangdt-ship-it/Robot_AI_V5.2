@@ -924,7 +924,7 @@ bool MapController::prepareReplay(const char*& rejectReason) {
   }
   replayOrigin_ = live;
   replayOriginValid_ = true;
-  replayRealignPending_ = false;
+  replayRealignReason_ = ReplayRealignReason::NONE;
   replayContextSlot_ = selectedSlot_;
   replayOriginResetGeneration_ = odometry_.resetGeneration();
   replayOriginHeadingResetGeneration_ = robot_.headingResetGeneration();
@@ -1022,10 +1022,12 @@ MapController::Pose MapController::routePointWorld(uint16_t index) const {
 
 bool MapController::currentReplayPose(Pose& pose) const { return readPose(pose); }
 
-bool MapController::targetWaypointReached(const Pose& pose,
-                                           const Pose& target) const {
-  return distanceMm(pose.xMm, pose.yMm, target.xMm, target.yMm) <=
-         kWaypointToleranceMm;
+float MapController::replayIncomingBearing(uint16_t fromIndex,
+                                            uint16_t toIndex) const {
+  const Pose segmentStart = routePointWorld(fromIndex);
+  const Pose target = routePointWorld(toIndex);
+  return atan2f(target.yMm - segmentStart.yMm,
+                target.xMm - segmentStart.xMm) * kRadToDeg;
 }
 
 bool MapController::startNextReplaySegment() {
@@ -1042,64 +1044,134 @@ bool MapController::startNextReplaySegment() {
   replayTarget_ = routePointWorld(replayTargetIndex_);
   const float targetDistance = distanceMm(current.xMm, current.yMm,
                                           replayTarget_.xMm, replayTarget_.yMm);
-  const bool realignPending = replayRealignPending_;
   replayTargetDistanceMm_ = static_cast<uint32_t>(lroundf(targetDistance));
   replayTargetDeg_ = 0;
   replayTravelMm_ = 0U;
   replayErrorMm_ = replayTargetDistanceMm_;
-  // A REALIGN_REQUIRED result deliberately keeps the same target even when
-  // the robot is already inside the position tolerance. Do not let the
-  // ordinary near-target shortcut advance the waypoint before coarse heading
-  // correction has run.
-  if (!realignPending && targetDistance <= kWaypointToleranceMm) {
-    advanceReplayAfterTarget();
-    return true;
-  }
-  const float bearing = atan2f(replayTarget_.yMm - current.yMm,
-                               replayTarget_.xMm - current.xMm) * kRadToDeg;
-  const float turnDelta = shortestDeltaDeg(bearing, current.headingDeg);
-  replayGuideBearingDeg_ = bearing;
-  logGuidePlan(replayCurrentIndex_, replayTargetIndex_, targetDistance,
-               bearing, current.headingDeg, turnDelta);
-  const uint32_t segmentGeneration = nextReplayGeneration();
-  const bool startupNoiseTurn = !realignPending &&
-                                replayCurrentIndex_ == 0U &&
-                                replayTargetIndex_ == 1U &&
-                                fabsf(turnDelta) <=
-                                    kReplayStartupTurnDeadbandDeg;
-  const bool coarsePreturn = realignPending
-                                 ? fabsf(turnDelta) >
-                                       MAP_REPLAY_PRETURN_TOLERANCE_DEG
-                                 : fabsf(turnDelta) >
-                                       MAP_REPLAY_PRETURN_TOLERANCE_DEG &&
-                                   !startupNoiseTurn;
-  const bool skipPreturn = !coarsePreturn;
-  if (realignPending && skipPreturn) {
-    replayRealignPending_ = false;
-    if (targetDistance <= kWaypointToleranceMm) {
-      debug_.println("MAP,GUIDE,REALIGN,DONE=POSITION_WITHIN_TOLERANCE");
+  const float targetBearing = atan2f(replayTarget_.yMm - current.yMm,
+                                     replayTarget_.xMm - current.xMm) *
+                              kRadToDeg;
+  const float targetHeadingError =
+      shortestDeltaDeg(targetBearing, current.headingDeg);
+
+  // Arrival heading is the direction of the active route edge, not the
+  // direction from a laterally displaced chassis position into the waypoint.
+  // This keeps arbitrary-angle routes correct without using stored Teach
+  // heading or snapping to orthogonal directions.
+  const float incomingBearing =
+      replayIncomingBearing(replayCurrentIndex_, replayTargetIndex_);
+  const float arrivalHeadingError =
+      shortestDeltaDeg(incomingBearing, current.headingDeg);
+  const bool inArrivalZone = targetDistance <= kWaypointToleranceMm;
+
+  ReplayRealignReason actionReason = replayRealignReason_;
+  float desiredBearing = targetBearing;
+  float desiredHeadingError = targetHeadingError;
+  bool coarsePreturn = false;
+  bool realignAction = actionReason != ReplayRealignReason::NONE;
+
+  if (actionReason == ReplayRealignReason::ARRIVAL) {
+    realignAction = true;
+    desiredBearing = incomingBearing;
+    desiredHeadingError = arrivalHeadingError;
+    if (!inArrivalZone) {
+      // The chassis may move slightly while turning. Once it leaves the
+      // arrival zone, resume guidance to the same target from the live pose.
+      replayRealignReason_ = ReplayRealignReason::NONE;
+      logGuideRealignDone(actionReason, replayTargetIndex_, targetDistance,
+                          incomingBearing, current.headingDeg,
+                          arrivalHeadingError, "GUIDED");
+      desiredBearing = targetBearing;
+      desiredHeadingError = targetHeadingError;
+    } else if (fabsf(arrivalHeadingError) <=
+               MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG) {
+      replayRealignReason_ = ReplayRealignReason::NONE;
+      logGuideRealignDone(actionReason, replayTargetIndex_, targetDistance,
+                          incomingBearing, current.headingDeg,
+                          arrivalHeadingError, "ADVANCE");
+      advanceReplayAfterTarget();
+      return true;
+    } else {
+      // ARRIVAL realign always turns toward the incoming route edge.
+      coarsePreturn = true;
+    }
+  } else if (actionReason == ReplayRealignReason::PATH) {
+    realignAction = true;
+    if (inArrivalZone) {
+      // A PATH turn can end inside the arrival zone. Re-evaluate the arrival
+      // heading gate before deciding whether this waypoint is complete.
+      desiredBearing = incomingBearing;
+      desiredHeadingError = arrivalHeadingError;
+      if (fabsf(arrivalHeadingError) <=
+          MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG) {
+        replayRealignReason_ = ReplayRealignReason::NONE;
+        logGuideRealignDone(actionReason, replayTargetIndex_, targetDistance,
+                            incomingBearing, current.headingDeg,
+                            arrivalHeadingError, "ADVANCE");
+        advanceReplayAfterTarget();
+        return true;
+      }
+      actionReason = ReplayRealignReason::ARRIVAL;
+      replayRealignReason_ = actionReason;
+      coarsePreturn = true;
+    } else if (fabsf(targetHeadingError) >
+               MAP_REPLAY_PRETURN_TOLERANCE_DEG) {
+      // PATH realign uses the live current-pose-to-target bearing.
+      coarsePreturn = true;
+    } else {
+      replayRealignReason_ = ReplayRealignReason::NONE;
+      logGuideRealignDone(actionReason, replayTargetIndex_, targetDistance,
+                          targetBearing, current.headingDeg,
+                          targetHeadingError, "GUIDED");
+    }
+  } else if (inArrivalZone) {
+    desiredBearing = incomingBearing;
+    desiredHeadingError = arrivalHeadingError;
+    if (fabsf(arrivalHeadingError) <=
+        MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG) {
       advanceReplayAfterTarget();
       return true;
     }
+    actionReason = ReplayRealignReason::ARRIVAL;
+    replayRealignReason_ = actionReason;
+    realignAction = true;
+    coarsePreturn = true;
+  } else {
+    const bool startupNoiseTurn = replayCurrentIndex_ == 0U &&
+                                  replayTargetIndex_ == 1U &&
+                                  fabsf(targetHeadingError) <=
+                                      kReplayStartupTurnDeadbandDeg;
+    coarsePreturn = fabsf(targetHeadingError) >
+                        MAP_REPLAY_PRETURN_TOLERANCE_DEG &&
+                    !startupNoiseTurn;
   }
-  if (!skipPreturn) {
-    replayTargetDeg_ = static_cast<int16_t>(lroundf(fabsf(turnDelta)));
+
+  if (realignAction && coarsePreturn) {
+    logGuideRealign(actionReason, replayTargetIndex_, targetDistance,
+                    desiredBearing, current.headingDeg, desiredHeadingError);
+  }
+  replayGuideBearingDeg_ = desiredBearing;
+  logGuidePlan(replayCurrentIndex_, replayTargetIndex_, targetDistance,
+               desiredBearing, current.headingDeg, desiredHeadingError);
+  const uint32_t segmentGeneration = nextReplayGeneration();
+  if (coarsePreturn) {
+    replayTargetDeg_ = static_cast<int16_t>(lroundf(fabsf(desiredHeadingError)));
     replayOperation_ = MapReplayOperation::TURN;
-    logGuidePreturn(turnDelta, "TURN");
+    logGuidePreturn(desiredHeadingError, realignAction ? "REALIGN" : "TURN");
     if (!robot_.startReplayTurnRelative(
-            turnDelta > 0.0f, fabsf(turnDelta), kReplaySpeed,
-            segmentGeneration, AiTurnProfile::MAP_COARSE)) {
+            desiredHeadingError > 0.0f, fabsf(desiredHeadingError),
+            kReplaySpeed, segmentGeneration, AiTurnProfile::MAP_COARSE)) {
       replayOperation_ = MapReplayOperation::NONE;
       abortReplay("TURN_START");
       return false;
     }
   } else {
     replayOperation_ = MapReplayOperation::MOVE;
-    replayTargetDeg_ = static_cast<int16_t>(lroundf(bearing));
-    logGuidePreturn(turnDelta, "SKIP");
+    replayTargetDeg_ = static_cast<int16_t>(lroundf(desiredBearing));
+    logGuidePreturn(desiredHeadingError, "SKIP");
     if (!robot_.startReplayGuidedWaypoint(
             replayTarget_.xMm, replayTarget_.yMm, current.xMm, current.yMm,
-            kReplaySpeed, segmentGeneration)) {
+            kReplaySpeed, incomingBearing, segmentGeneration)) {
       replayOperation_ = MapReplayOperation::NONE;
       abortReplay("GUIDE_START");
       return false;
@@ -1109,7 +1181,7 @@ bool MapController::startNextReplaySegment() {
   logSegmentStart(segmentGeneration, replayCurrentIndex_, replayTargetIndex_,
                   replayOperation_);
   if (replayOperation_ == MapReplayOperation::MOVE) {
-    logGuideStart(replayTargetIndex_, targetDistance, bearing);
+    logGuideStart(replayTargetIndex_, targetDistance, desiredBearing);
   }
   statusDirty_ = true;
   return true;
@@ -1253,7 +1325,7 @@ void MapController::clearReplayResumeContext() {
   replayResumeAllowed_ = false;
   replayHoldPoseValid_ = false;
   replayOriginValid_ = false;
-  replayRealignPending_ = false;
+  replayRealignReason_ = ReplayRealignReason::NONE;
   holdReason_ = MapHoldReason::NONE;
   replayOperation_ = MapReplayOperation::NONE;
   replayCurrentIndex_ = 0U;
@@ -1381,9 +1453,9 @@ bool MapController::consumeReplayTurnResult(const AiTurnResult& result) {
                  MapReplayOperation::TURN, 0.0f, 0.0f, targetDeg,
                  result.headingDeg);
   if (result.code == AiTurnResultCode::DONE) {
-    if (replayRealignPending_) {
-      replayRealignPending_ = false;
-      debug_.println("MAP,GUIDE,REALIGN,COARSE_DONE=1");
+    if (replayRealignReason_ != ReplayRealignReason::NONE) {
+      debug_.print("MAP,GUIDE,REALIGN,TURN_DONE,TYPE=");
+      debug_.println(realignReasonName(replayRealignReason_));
     }
     logGuidePreturn(result.errorDeg, "DONE");
     return true;
@@ -1425,34 +1497,73 @@ bool MapController::consumeReplayDistanceResult(const AiDistanceResult& result) 
                        ? replayTargetDistanceMm_ - replayTravelMm_
                        : replayTravelMm_ - replayTargetDistanceMm_;
   if (result.code == AiDistanceResultCode::REALIGN_REQUIRED) {
-    // Keep the current target index and explicitly fence the next sequencer
-    // cycle into coarse heading correction before any near-target advance.
-    replayRealignPending_ = true;
     Pose current;
-    float headingError = 0.0f;
-    if (currentReplayPose(current)) {
-      const float bearing = atan2f(replayTarget_.yMm - current.yMm,
-                                   replayTarget_.xMm - current.xMm) * kRadToDeg;
-      headingError = shortestDeltaDeg(bearing, current.headingDeg);
+    if (!currentReplayPose(current)) {
+      abortReplay("POSE");
+      return true;
     }
-    logGuideRealign(to, headingError);
+    const float targetDistance =
+        distanceMm(current.xMm, current.yMm, replayTarget_.xMm,
+                   replayTarget_.yMm);
+    const float targetBearing =
+        atan2f(replayTarget_.yMm - current.yMm,
+               replayTarget_.xMm - current.xMm) * kRadToDeg;
+    const float incomingBearing =
+        replayIncomingBearing(replayCurrentIndex_, replayTargetIndex_);
+    const bool inArrivalZone = targetDistance <= kWaypointToleranceMm;
+    replayRealignReason_ = inArrivalZone ? ReplayRealignReason::ARRIVAL
+                                         : ReplayRealignReason::PATH;
+    const float desiredBearing = inArrivalZone ? incomingBearing : targetBearing;
+    const float headingError = shortestDeltaDeg(desiredBearing,
+                                                current.headingDeg);
+    replayTargetDistanceMm_ = static_cast<uint32_t>(lroundf(targetDistance));
+    replayErrorMm_ = replayTargetDistanceMm_;
+    logGuideRealign(replayRealignReason_, to, targetDistance, desiredBearing,
+                    current.headingDeg, headingError);
   } else if (result.code == AiDistanceResultCode::DONE) {
     Pose current;
-    float positionError = 0.0f;
-    float headingError = 0.0f;
-    if (currentReplayPose(current)) {
-      positionError = distanceMm(current.xMm, current.yMm,
-                                 replayTarget_.xMm, replayTarget_.yMm);
-      const float liveBearing =
-          atan2f(replayTarget_.yMm - current.yMm,
-                 replayTarget_.xMm - current.xMm) * kRadToDeg;
-      headingError = shortestDeltaDeg(liveBearing, current.headingDeg);
+    if (!currentReplayPose(current)) {
+      abortReplay("POSE");
+      return true;
     }
-    logSegmentDone(generation, from, to, MapReplayOperation::MOVE,
-                   static_cast<float>(replayTargetDistanceMm_),
-                   static_cast<float>(replayTravelMm_), 0, 0.0f);
-    logGuideDone(to, positionError, headingError);
-    advanceReplayAfterTarget();
+    const float positionError =
+        distanceMm(current.xMm, current.yMm, replayTarget_.xMm,
+                   replayTarget_.yMm);
+    const float targetBearing =
+        atan2f(replayTarget_.yMm - current.yMm,
+               replayTarget_.xMm - current.xMm) * kRadToDeg;
+    const float arrivalBearing =
+        replayIncomingBearing(replayCurrentIndex_, replayTargetIndex_);
+    const float arrivalHeadingError =
+        shortestDeltaDeg(arrivalBearing, current.headingDeg);
+    replayTargetDistanceMm_ = static_cast<uint32_t>(lroundf(positionError));
+    replayErrorMm_ = replayTargetDistanceMm_;
+    if (positionError <= kWaypointToleranceMm &&
+        fabsf(arrivalHeadingError) <=
+            MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG) {
+      logSegmentDone(generation, from, to, MapReplayOperation::MOVE,
+                     static_cast<float>(replayTargetDistanceMm_),
+                     static_cast<float>(replayTravelMm_), 0, 0.0f);
+      logGuideDone(to, positionError, arrivalBearing, current.headingDeg,
+                   arrivalHeadingError);
+      replayRealignReason_ = ReplayRealignReason::NONE;
+      advanceReplayAfterTarget();
+    } else if (positionError <= kWaypointToleranceMm) {
+      // Do not let a distance-complete result bypass the arrival heading
+      // gate. The next cycle performs ARRIVAL coarse correction.
+      replayRealignReason_ = ReplayRealignReason::ARRIVAL;
+      logGuideRealign(replayRealignReason_, to, positionError, arrivalBearing,
+                      current.headingDeg, arrivalHeadingError);
+    } else {
+      // A live pose update can move the chassis outside the arrival zone
+      // before this result is consumed. Re-enter PATH guidance to the same
+      // target instead of advancing on a stale completion.
+      replayRealignReason_ = ReplayRealignReason::PATH;
+      const float targetHeadingError =
+          shortestDeltaDeg(targetBearing, current.headingDeg);
+      logGuideRealign(replayRealignReason_, to, positionError, targetBearing,
+                      current.headingDeg, targetHeadingError);
+    }
   } else if (result.code == AiDistanceResultCode::OBSTACLE) {
     enterReplayHold(MapHoldReason::OBSTACLE, true);
   } else if (result.code == AiDistanceResultCode::CANCELLED &&
@@ -1866,13 +1977,28 @@ void MapController::logGuideUpdate() const {
   debug_.println(robot_.targetRightCommand());
 }
 
+const char* MapController::realignReasonName(
+    ReplayRealignReason reason) {
+  switch (reason) {
+    case ReplayRealignReason::NONE: return "NONE";
+    case ReplayRealignReason::PATH: return "PATH";
+    case ReplayRealignReason::ARRIVAL: return "ARRIVAL";
+  }
+  return "NONE";
+}
+
 void MapController::logGuideDone(uint16_t waypoint, float positionErrorMm,
+                                 float arrivalBearingDeg, float headingDeg,
                                  float headingErrorDeg) const {
   debug_.print("MAP,GUIDE,DONE,WP=");
   debug_.print(static_cast<unsigned>(waypoint));
   debug_.print(",POS_ERR_MM=");
   debug_.print(positionErrorMm, 1);
-  debug_.print(",HDG_ERR=");
+  debug_.print(",ARRIVAL_BEARING=");
+  debug_.print(arrivalBearingDeg, 2);
+  debug_.print(",HDG=");
+  debug_.print(headingDeg, 2);
+  debug_.print(",ARRIVAL_HDG_ERR=");
   debug_.print(headingErrorDeg, 2);
   debug_.print(",POS_TOL_MM=");
   debug_.print(MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM);
@@ -1880,12 +2006,46 @@ void MapController::logGuideDone(uint16_t waypoint, float positionErrorMm,
   debug_.println(MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG, 1);
 }
 
-void MapController::logGuideRealign(uint16_t waypoint,
+void MapController::logGuideRealign(ReplayRealignReason reason,
+                                    uint16_t waypoint, float distanceMmValue,
+                                    float desiredBearingDeg, float headingDeg,
                                     float headingErrorDeg) const {
   debug_.print("MAP,GUIDE,REALIGN,WP=");
   debug_.print(static_cast<unsigned>(waypoint));
+  debug_.print(",TYPE=");
+  debug_.print(realignReasonName(reason));
+  debug_.print(",DIST_MM=");
+  debug_.print(distanceMmValue, 1);
+  debug_.print(reason == ReplayRealignReason::ARRIVAL ? ",INCOMING="
+                                                     : ",DESIRED=");
+  debug_.print(desiredBearingDeg, 2);
+  debug_.print(",HDG=");
+  debug_.print(headingDeg, 2);
   debug_.print(",ERR=");
   debug_.print(headingErrorDeg, 2);
-  debug_.print(",THRESHOLD=");
+  debug_.print(",ARRIVAL_TOL=");
+  debug_.print(MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG, 1);
+  debug_.print(",PATH_THRESHOLD=");
   debug_.println(MAP_GUIDE_REALIGN_THRESHOLD_DEG, 1);
+}
+
+void MapController::logGuideRealignDone(
+    ReplayRealignReason reason, uint16_t waypoint, float positionErrorMm,
+    float desiredBearingDeg, float headingDeg, float headingErrorDeg,
+    const char* action) const {
+  debug_.print("MAP,GUIDE,REALIGN_DONE,TYPE=");
+  debug_.print(realignReasonName(reason));
+  debug_.print(",WP=");
+  debug_.print(static_cast<unsigned>(waypoint));
+  debug_.print(",POS_ERR_MM=");
+  debug_.print(positionErrorMm, 1);
+  debug_.print(reason == ReplayRealignReason::ARRIVAL ? ",INCOMING="
+                                                     : ",DESIRED=");
+  debug_.print(desiredBearingDeg, 2);
+  debug_.print(",HDG=");
+  debug_.print(headingDeg, 2);
+  debug_.print(",HDG_ERR=");
+  debug_.print(headingErrorDeg, 2);
+  debug_.print(",ACTION=");
+  debug_.println(action != nullptr ? action : "RETRY");
 }

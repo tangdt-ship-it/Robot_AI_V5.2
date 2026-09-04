@@ -271,7 +271,7 @@ class MapHostTests(unittest.TestCase):
         self.assertAlmostEqual(direction_change((0, 0), (100, 0),
                                                 (142.262, -90.631)), 65.0,
                                places=2)
-        self.assertIn("shortestDeltaDeg(bearing, current.headingDeg)", MAP_TEXT)
+        self.assertIn("shortestDeltaDeg(targetBearing, current.headingDeg)", MAP_TEXT)
 
     def test_TEST_ANGLE_WRAP(self):
         delta = (179.0 - (-179.0) + 180.0) % 360.0 - 180.0

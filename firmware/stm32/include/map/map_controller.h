@@ -42,6 +42,8 @@ class MapController {
   MapReplayMode replayMode() const { return routeMode_; }
 
  private:
+  enum class ReplayRealignReason : uint8_t { NONE, PATH, ARRIVAL };
+
   struct Pose {
     float xMm = 0.0f;
     float yMm = 0.0f;
@@ -85,7 +87,7 @@ class MapController {
   bool startNextReplaySegment();
   bool currentReplayPose(Pose& pose) const;
   Pose routePointWorld(uint16_t index) const;
-  bool targetWaypointReached(const Pose& pose, const Pose& target) const;
+  float replayIncomingBearing(uint16_t fromIndex, uint16_t toIndex) const;
   void advanceReplayAfterTarget();
   void enterReplayHold(MapHoldReason reason, bool allowResume);
   void abortReplay(const char* reason);
@@ -111,8 +113,16 @@ class MapController {
                      float bearingDeg) const;
   void logGuideUpdate() const;
   void logGuideDone(uint16_t waypoint, float positionErrorMm,
+                    float arrivalBearingDeg, float headingDeg,
                     float headingErrorDeg) const;
-  void logGuideRealign(uint16_t waypoint, float headingErrorDeg) const;
+  void logGuideRealign(ReplayRealignReason reason, uint16_t waypoint,
+                       float distanceMm, float desiredBearingDeg,
+                       float headingDeg, float headingErrorDeg) const;
+  void logGuideRealignDone(ReplayRealignReason reason, uint16_t waypoint,
+                           float positionErrorMm, float desiredBearingDeg,
+                           float headingDeg, float headingErrorDeg,
+                           const char* action) const;
+  static const char* realignReasonName(ReplayRealignReason reason);
 
   void serviceStorage();
   void publishStatus();
@@ -169,7 +179,7 @@ class MapController {
   uint32_t replaySegmentGeneration_ = 0U;
   MapSlot replayContextSlot_ = MapSlot::MAP_1;
   bool replayOriginValid_ = false;
-  bool replayRealignPending_ = false;
+  ReplayRealignReason replayRealignReason_ = ReplayRealignReason::NONE;
   Pose replayOrigin_{};
   Pose replayTarget_{};
   Pose replayHoldPose_{};

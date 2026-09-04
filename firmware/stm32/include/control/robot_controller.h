@@ -99,6 +99,7 @@ class RobotController {
   bool startReplayGuidedWaypoint(float targetXMm, float targetYMm,
                                  float segmentStartXMm,
                                  float segmentStartYMm, int16_t speed,
+                                 float arrivalBearingDeg,
                                  uint32_t motionGeneration = 0U);
   bool takeAiTurnResult(AiTurnResult& result);
   bool takeAiDistanceResult(AiDistanceResult& result);
@@ -247,6 +248,7 @@ class RobotController {
   float guidedTargetYMm_ = 0.0f;
   float guidedSegmentStartXMm_ = 0.0f;
   float guidedSegmentStartYMm_ = 0.0f;
+  float guidedArrivalBearingDeg_ = 0.0f;
   float guidedRemainingMm_ = 0.0f;
   float guidedBearingDeg_ = 0.0f;
   float guidedHeadingErrorDeg_ = 0.0f;

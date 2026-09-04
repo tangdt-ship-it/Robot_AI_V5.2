@@ -412,6 +412,7 @@ void RobotController::stopImmediately(bool requireFreshManualCommand) {
   aiTurnSettleMs_ = TURN_SETTLE_MS;
   guidedTargetXMm_ = guidedTargetYMm_ = 0.0f;
   guidedSegmentStartXMm_ = guidedSegmentStartYMm_ = 0.0f;
+  guidedArrivalBearingDeg_ = 0.0f;
   guidedRemainingMm_ = guidedBearingDeg_ = guidedHeadingErrorDeg_ = 0.0f;
   guidedCrossTrackMm_ = 0.0f;
   guidedBaseSpeed_ = guidedRequestedSpeed_ = 0;
@@ -517,12 +518,14 @@ bool RobotController::startReplayDistance(bool forward, uint32_t distanceMm,
 
 bool RobotController::startReplayGuidedWaypoint(
     float targetXMm, float targetYMm, float segmentStartXMm,
-    float segmentStartYMm, int16_t speed, uint32_t motionGeneration) {
+    float segmentStartYMm, int16_t speed, float arrivalBearingDeg,
+    uint32_t motionGeneration) {
   const uint32_t now = millis();
   if (!canStartReplayMotion(now) || !odometry_.ready() ||
       !odometry_.healthy() || !headingAvailable() ||
       !isfinite(targetXMm) || !isfinite(targetYMm) ||
-      !isfinite(segmentStartXMm) || !isfinite(segmentStartYMm)) {
+      !isfinite(segmentStartXMm) || !isfinite(segmentStartYMm) ||
+      !isfinite(arrivalBearingDeg)) {
     return false;
   }
   const float initialDistance = hypotf(targetXMm - segmentStartXMm,
@@ -545,6 +548,7 @@ bool RobotController::startReplayGuidedWaypoint(
   guidedTargetYMm_ = targetYMm;
   guidedSegmentStartXMm_ = segmentStartXMm;
   guidedSegmentStartYMm_ = segmentStartYMm;
+  guidedArrivalBearingDeg_ = HeadingFusion::normalize(arrivalBearingDeg);
   guidedRemainingMm_ = initialDistance;
   guidedBearingDeg_ = atan2f(targetYMm - segmentStartYMm,
                              targetXMm - segmentStartXMm) *
@@ -804,9 +808,10 @@ void RobotController::updateAiGuidedWaypoint(uint32_t nowMs) {
                   -MAP_GUIDE_MAX_CROSSTRACK_MM, MAP_GUIDE_MAX_CROSSTRACK_MM)
       : 0.0f;
 
-  const float incomingBearing = segmentLength > 1.0f
-      ? atan2f(segmentDy, segmentDx) * 57.29577951308232f
-      : targetBearing;
+  // Arrival heading is the immutable incoming route-edge bearing supplied by
+  // MapController. The live target bearing above remains the PATH steering
+  // direction and must not replace the arrival heading at a side offset.
+  const float incomingBearing = guidedArrivalBearingDeg_;
   const float arrivalHeadingError = HeadingFusion::shortestDelta(
       incomingBearing, currentHeadingDeg());
   if (remaining <= MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM &&
@@ -827,18 +832,19 @@ void RobotController::updateAiGuidedWaypoint(uint32_t nowMs) {
     return;
   }
 
-  // Position is the primary arrival gate. If the chassis is close but the
-  // incoming heading is only moderately outside tolerance, keep the bounded
-  // differential guidance alive for a short correction; do not start the
-  // precise MCP turn controller at an intermediate waypoint. A larger error
-  // uses the same coarse realign path as any other live guidance error.
+  // Arrival is a position plus incoming-segment-heading gate. The 6 degree
+  // arrival tolerance is intentionally stricter than the 15 degree PATH
+  // realign threshold: once the chassis is close, every heading error above
+  // the arrival tolerance must be corrected before the waypoint can advance.
   if (remaining <= MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM &&
-      fabsf(arrivalHeadingError) >= MAP_GUIDE_REALIGN_THRESHOLD_DEG) {
+      fabsf(arrivalHeadingError) > MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG) {
 #if ROBOT_DEBUG
     debug_.print("MAP,GUIDE,ARRIVAL,POS_ERR=");
     debug_.print(remaining, 1);
     debug_.print(",HDG_ERR=");
     debug_.print(arrivalHeadingError, 2);
+    debug_.print(",TOL=");
+    debug_.print(MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG, 1);
     debug_.println(",ACTION=REALIGN");
 #endif
     targetLeft_ = targetRight_ = currentLeft_ = currentRight_ = 0;

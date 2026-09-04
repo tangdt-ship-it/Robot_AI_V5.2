@@ -80,17 +80,35 @@ def without_comments(text):
     return re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
 
 
-def sequencer_action(distance_mm, heading_error_deg, realign_pending):
-    """Return the required next action for the near-target state machine."""
+def arrival_action(distance_mm, incoming_heading_deg, current_heading_deg):
+    """Mirror the position + incoming-segment-heading arrival gate."""
+    position_tolerance = config_number("MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM")
+    heading_tolerance = config_number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG")
+    error = shortest_delta(incoming_heading_deg, current_heading_deg)
+    if distance_mm <= position_tolerance:
+        return "ADVANCE" if abs(error) <= heading_tolerance else "ARRIVAL_REALIGN"
+    return "PATH_GUIDANCE"
+
+
+def realign_action(reason, distance_mm, incoming_heading_deg,
+                   target_bearing_deg, current_heading_deg):
+    """Mirror the MAP sequencer's next action for a realign reason."""
     position_tolerance = config_number("MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM")
     preturn_tolerance = config_number("MAP_REPLAY_PRETURN_TOLERANCE_DEG")
-    if not realign_pending and distance_mm <= position_tolerance:
-        return "ADVANCE"
-    if realign_pending:
-        if abs(heading_error_deg) > preturn_tolerance:
-            return "COARSE_TURN"
-        return "ADVANCE" if distance_mm <= position_tolerance else "GUIDED"
-    return "COARSE_TURN" if abs(heading_error_deg) > preturn_tolerance else "GUIDED"
+    if reason == "ARRIVAL":
+        if distance_mm > position_tolerance:
+            return "GUIDED"
+        error = shortest_delta(incoming_heading_deg, current_heading_deg)
+        return "ADVANCE" if abs(error) <= config_number(
+            "MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"
+        ) else "ARRIVAL_COARSE_TURN"
+    error = shortest_delta(target_bearing_deg, current_heading_deg)
+    if distance_mm <= position_tolerance:
+        arrival_error = shortest_delta(incoming_heading_deg, current_heading_deg)
+        return "ADVANCE" if abs(arrival_error) <= config_number(
+            "MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"
+        ) else "ARRIVAL_COARSE_TURN"
+    return "PATH_COARSE_TURN" if abs(error) > preturn_tolerance else "GUIDED"
 
 
 class GuidedReplayHostTests(unittest.TestCase):
@@ -105,6 +123,15 @@ class GuidedReplayHostTests(unittest.TestCase):
     def test_guided_primitive_is_replay_only_and_internal(self):
         self.assertIn("GUIDED_WAYPOINT", CTRL_HEADER)
         self.assertIn("startReplayGuidedWaypoint", CTRL_HEADER)
+        self.assertIn("float arrivalBearingDeg", CTRL_HEADER)
+        self.assertIn("guidedArrivalBearingDeg_", CTRL_HEADER)
+        self.assertIn(
+            "guidedArrivalBearingDeg_ = HeadingFusion::normalize(arrivalBearingDeg)",
+            CTRL,
+        )
+        self.assertIn(
+            "const float incomingBearing = guidedArrivalBearingDeg_", CTRL,
+        )
         self.assertIn("motionOwner_ = MotionOwner::REPLAY", CTRL)
         self.assertNotIn("startReplayGuidedWaypoint", MAIN)
         self.assertNotIn("GUIDED_WAYPOINT", (ROOT / "src" / "communication" /
@@ -114,9 +141,10 @@ class GuidedReplayHostTests(unittest.TestCase):
 
     def test_preturn_skip_at_three_degrees(self):
         self.assertLessEqual(3.0, config_number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"))
-        self.assertIn("const bool skipPreturn", MAP)
+        self.assertIn("bool coarsePreturn = false", MAP)
+        self.assertIn("!startupNoiseTurn", MAP)
         self.assertIn("startReplayGuidedWaypoint", MAP)
-        self.assertIn('logGuidePreturn(turnDelta, "SKIP")', MAP)
+        self.assertIn('logGuidePreturn(desiredHeadingError, "SKIP")', MAP)
 
     def test_preturn_coarse_at_seventy_degrees(self):
         self.assertGreater(70.0, config_number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"))
@@ -172,11 +200,13 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertLessEqual(50.0, config_number(
             "MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM"
         ))
-        self.assertLessEqual(4.5, config_number(
-            "MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"
-        ))
+        self.assertEqual(config_number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"), 6.0)
         self.assertIn("remaining <= MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM", CTRL)
         self.assertIn("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG", CTRL)
+        self.assertIn(
+            "fabsf(arrivalHeadingError) > MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG",
+            CTRL,
+        )
         self.assertIn("MAP,GUIDE,ARRIVAL", CTRL)
         self.assertNotIn("startAiTurnAbsolute", CTRL[CTRL.find("void RobotController::updateAiGuidedWaypoint"):])
 
@@ -184,10 +214,10 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertIn("MAP_GUIDE_REALIGN_THRESHOLD_DEG", CTRL)
         self.assertIn("AiDistanceResultCode::REALIGN_REQUIRED", CTRL)
         self.assertIn("result.code == AiDistanceResultCode::REALIGN_REQUIRED", MAP)
-        self.assertIn("logGuideRealign(to, headingError)", MAP)
+        self.assertIn("ReplayRealignReason", MAP_HEADER)
+        self.assertIn("replayRealignReason_", MAP)
+        self.assertIn("logGuideRealign(replayRealignReason_", MAP)
         self.assertIn("startReplayGuidedWaypoint", MAP)
-        # REALIGN clears only the current operation; the sequencer's target
-        # index remains unchanged until DONE calls advanceReplayAfterTarget.
         realign_start = MAP.find(
             "if (result.code == AiDistanceResultCode::REALIGN_REQUIRED)"
         )
@@ -197,46 +227,91 @@ class GuidedReplayHostTests(unittest.TestCase):
         )]
         self.assertNotIn("advanceReplayAfterTarget", realign_block)
 
-    def test_40mm_20deg_realign_forces_coarse_turn_without_advance(self):
-        self.assertEqual(sequencer_action(40.0, 20.0, True), "COARSE_TURN")
-        self.assertIn("bool replayRealignPending_ = false;", MAP_HEADER)
-        self.assertIn("const bool realignPending = replayRealignPending_;", MAP)
+    def test_arrival_side_offset_uses_incoming_bearing(self):
+        incoming = bearing((0.0, 0.0), (1000.0, 0.0))
+        current_to_target = bearing((1000.0, 40.0), (1000.0, 0.0))
+        arrival_error = shortest_delta(incoming, 20.0)
+        self.assertAlmostEqual(incoming, 0.0, places=4)
+        self.assertAlmostEqual(current_to_target, -90.0, places=4)
+        self.assertAlmostEqual(arrival_error, -20.0, places=4)
+        self.assertEqual(arrival_action(40.0, incoming, 20.0), "ARRIVAL_REALIGN")
+        self.assertIn("replayIncomingBearing(replayCurrentIndex_, replayTargetIndex_)", MAP)
+        self.assertIn("desiredBearing = incomingBearing", MAP)
+        self.assertIn("ReplayRealignReason::ARRIVAL", MAP)
+        self.assertIn("AiTurnProfile::MAP_COARSE", MAP)
+
+    def test_arrival_40mm_4deg_advances_exactly_once(self):
+        self.assertEqual(arrival_action(40.0, 0.0, 4.0), "ADVANCE")
         self.assertIn(
-            "if (!realignPending && targetDistance <= kWaypointToleranceMm)",
+            "fabsf(arrivalHeadingError) <=\n        MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG",
             MAP,
         )
-        self.assertIn("replayRealignPending_ = true;", MAP)
-        pending_cycle = MAP[MAP.find("const bool realignPending"):
-                            MAP.find("void MapController::logSegmentStart")]
-        self.assertIn("AiTurnProfile::MAP_COARSE", pending_cycle)
-        self.assertNotIn(
-            "advanceReplayAfterTarget();\n      return true;",
-            pending_cycle[pending_cycle.find("if (realignPending)"):],
-        )
-
-    def test_coarse_done_at_40mm_5deg_advances_once(self):
-        self.assertEqual(sequencer_action(40.0, 5.0, True), "ADVANCE")
-        self.assertIn("replayRealignPending_ = false;", MAP)
-        self.assertIn("MAP,GUIDE,REALIGN,COARSE_DONE=1", MAP)
         self.assertIn("advanceReplayAfterTarget();", MAP)
 
-    def test_realign_at_100mm_resumes_guided_same_target(self):
-        self.assertEqual(sequencer_action(100.0, 20.0, True), "COARSE_TURN")
-        self.assertEqual(sequencer_action(100.0, 5.0, True), "GUIDED")
+    def test_arrival_40mm_10deg_requires_arrival_realign(self):
+        self.assertEqual(arrival_action(40.0, 0.0, 10.0), "ARRIVAL_REALIGN")
+        self.assertIn("replayRealignReason_ = actionReason", MAP)
+        self.assertIn("logGuideRealign(actionReason, replayTargetIndex_", MAP)
+
+    def test_arrival_40mm_20deg_does_not_use_current_target_bearing(self):
+        self.assertEqual(arrival_action(40.0, 0.0, 20.0), "ARRIVAL_REALIGN")
+        self.assertNotIn(
+            "replayRealignReason_ = ReplayRealignReason::PATH;\n      logGuideRealign",
+            MAP,
+        )
+        self.assertIn("desiredHeadingError = arrivalHeadingError", MAP)
+        self.assertIn("logGuideRealign(replayRealignReason_, to, targetDistance, desiredBearing", MAP)
+
+    def test_arrival_turn_complete_advances_once(self):
+        self.assertEqual(realign_action("ARRIVAL", 42.0, 0.0, 0.0, 4.0), "ADVANCE")
+        self.assertIn("logGuideRealignDone(actionReason, replayTargetIndex_", MAP)
+        self.assertIn('"ADVANCE"', MAP)
+        self.assertIn("replayRealignReason_ = ReplayRealignReason::NONE", MAP)
+
+    def test_arrival_turn_drift_resumes_guided_same_target(self):
+        self.assertEqual(realign_action("ARRIVAL", 75.0, 0.0, 0.0, 4.0), "GUIDED")
+        self.assertIn("if (!inArrivalZone)", MAP)
+        self.assertIn('"GUIDED"', MAP)
         self.assertIn("startReplayGuidedWaypoint", MAP)
         self.assertIn("replayTarget_.xMm, replayTarget_.yMm", MAP)
 
-    def test_stale_result_after_realign_is_dropped(self):
-        self.assertIn("result.motionGeneration != replaySegmentGeneration_", MAP)
-        self.assertIn("MAP,SEGMENT_DROP_STALE", MAP)
-        self.assertIn("replayRealignPending_ = true;", MAP)
+    def test_path_realign_uses_live_target_bearing(self):
+        incoming = bearing((0.0, 0.0), (1000.0, 0.0))
+        target_bearing = bearing((500.0, 100.0), (1000.0, 0.0))
+        self.assertEqual(
+            realign_action("PATH", math.hypot(500.0, 100.0), incoming,
+                           target_bearing, 20.0),
+            "PATH_COARSE_TURN",
+        )
+        self.assertIn("replayRealignReason_ = inArrivalZone ? ReplayRealignReason::ARRIVAL", MAP)
+        self.assertIn("shortestDeltaDeg(targetBearing, current.headingDeg)", MAP)
+        self.assertIn("PATH realign uses the live current-pose-to-target bearing", MAP)
 
-    def test_hold_and_cancel_during_realign_keep_safety_semantics(self):
+    def test_arrival_6deg_boundary_is_exact(self):
+        self.assertEqual(arrival_action(50.0, 0.0, 6.0), "ADVANCE")
+        self.assertEqual(arrival_action(50.0, 0.0, 6.5), "ARRIVAL_REALIGN")
+        self.assertIn(
+            "fabsf(arrivalHeadingError) <=\n               MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG",
+            MAP,
+        )
+
+    def test_arbitrary_incoming_angles_are_not_snapped(self):
+        for angle in (60.0, 70.0, 130.0, -65.0, 170.0, -170.0):
+            target = (math.cos(math.radians(angle)), math.sin(math.radians(angle)))
+            self.assertAlmostEqual(bearing((0.0, 0.0), target), angle, places=4)
+        incoming_source = MAP[MAP.find("float MapController::replayIncomingBearing"):
+                              MAP.find("bool MapController::startNextReplaySegment")]
+        self.assertIn("atan2f(target.yMm - segmentStart.yMm", incoming_source)
+        self.assertNotIn("90.0f", incoming_source)
+        self.assertNotIn("headingDeg", incoming_source)
+
+    def test_hold_and_cancel_during_arrival_realign_keep_safety_semantics(self):
         hold_start = MAP.find("void MapController::enterReplayHold")
         hold_end = MAP.find("void MapController::abortReplay", hold_start)
         hold_block = MAP[hold_start:hold_end]
         self.assertIn("stopImmediately", hold_block)
         self.assertNotIn("clearReplayResumeContext", hold_block)
+        self.assertNotIn("replayRealignReason_ =", hold_block)
         cancel_start = MAP.find("void MapController::cancelReplay")
         cancel_end = MAP.find("void MapController::clearReplayResumeContext", cancel_start)
         cancel_block = MAP[cancel_start:cancel_end]
@@ -244,7 +319,23 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertIn("clearReplayResumeContext", cancel_block)
         clear_start = MAP.find("void MapController::clearReplayResumeContext")
         clear_end = MAP.find("bool MapController::canResumeReplay", clear_start)
-        self.assertIn("replayRealignPending_ = false;", MAP[clear_start:clear_end])
+        self.assertIn("replayRealignReason_ = ReplayRealignReason::NONE;", MAP[clear_start:clear_end])
+
+    def test_stale_turn_result_after_realign_is_dropped(self):
+        turn_start = MAP.find("bool MapController::consumeReplayTurnResult")
+        turn_done = MAP.find("const uint16_t from", turn_start)
+        validation = MAP[turn_start:turn_done]
+        self.assertIn("result.motionGeneration != replaySegmentGeneration_", validation)
+        self.assertIn("MAP,SEGMENT_DROP_STALE", validation)
+        self.assertNotIn("replayRealignReason_ =", validation)
+
+    def test_obstacle_during_arrival_realign_preserves_hold(self):
+        turn_start = MAP.find("bool MapController::consumeReplayTurnResult")
+        turn_end = MAP.find("bool MapController::consumeReplayDistanceResult", turn_start)
+        turn_block = MAP[turn_start:turn_end]
+        self.assertIn("AiTurnResultCode::OBSTACLE", turn_block)
+        self.assertIn("enterReplayHold(MapHoldReason::OBSTACLE, true)", turn_block)
+        self.assertNotIn("advanceReplayAfterTarget", turn_block)
 
     def test_done_telemetry_uses_live_bearing(self):
         done_start = MAP.find(
@@ -255,9 +346,12 @@ class GuidedReplayHostTests(unittest.TestCase):
             done_start,
         )
         done_block = MAP[done_start:obstacle_start]
-        self.assertIn("const float liveBearing", done_block)
-        self.assertIn("atan2f(replayTarget_.yMm - current.yMm", done_block)
+        self.assertIn("const float arrivalBearing", done_block)
+        self.assertIn("replayIncomingBearing(replayCurrentIndex_, replayTargetIndex_)", done_block)
+        self.assertIn("logGuideDone(to, positionError, arrivalBearing, current.headingDeg", done_block)
         self.assertNotIn("replayGuideBearingDeg_", done_block)
+        self.assertIn("ARRIVAL_BEARING", MAP)
+        self.assertIn("ARRIVAL_HDG_ERR", MAP)
 
     def test_mcp_precise_turn_contract_is_unchanged(self):
         self.assertEqual(config_number("TURN_TOLERANCE_DEG"), 0.5)
