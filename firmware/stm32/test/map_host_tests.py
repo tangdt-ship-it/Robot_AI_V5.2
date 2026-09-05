@@ -1286,8 +1286,128 @@ class MapHostTests(unittest.TestCase):
             self.assertIn(line, LCD_TEXT)
             self.assertLessEqual(len(line.replace("%u", "2")), 20)
 
+    def test_TEST_SETTINGS_SAVE_FAIL_REASON(self):
+        for reason in ("NONE", "SETTINGS_SAVE", "TEACH_SAVE", "MODE_SAVE",
+                       "STORAGE_INIT", "GENERIC"):
+            self.assertIn("MapStorageErrorReason::" + reason, MAP_HEADER_TEXT + MAP_TEXT)
+        start = MAP_TEXT.index("void MapController::saveSettingsAndExit")
+        end = MAP_TEXT.index("void MapController::cancelSettings", start)
+        block = MAP_TEXT[start:end]
+        self.assertIn("storageErrorReason_ = MapStorageErrorReason::SETTINGS_SAVE", block)
+        self.assertIn("const MapReplayMode oldMode = routeMode_", block)
+
+    def test_TEST_SETTINGS_FAIL_OLD_ROUTE_X_BACK(self):
+        start = MAP_TEXT.index("void MapController::handleCross()")
+        end = MAP_TEXT.index("void MapController::handleCrossLong()", start)
+        block = MAP_TEXT[start:end]
+        self.assertIn("storageErrorReason_ != MapStorageErrorReason::STORAGE_INIT", block)
+        self.assertIn("loadedValid_", block)
+        self.assertIn("MAP,STORAGE_ERROR,ACK=BACK,OLD_ROUTE=1", block)
+        self.assertIn("storageErrorReason_ = MapStorageErrorReason::NONE", block)
+
+    def test_TEST_SETTINGS_FAIL_NO_OLD_ROUTE(self):
+        for line in ("SAVE FAILED", "NO VALID ROUTE", "CHECK STORAGE"):
+            self.assertIn(line, LCD_TEXT)
+        self.assertIn("oldRouteAvailable", LCD_TEXT)
+
+    def test_TEST_TEACH_SAVE_FAIL_REASON(self):
+        self.assertIn("storageErrorReason_ = MapStorageErrorReason::TEACH_SAVE", MAP_TEXT)
+        self.assertIn("teachOldRouteAvailable_", MAP_TEXT)
+
+    def test_TEST_TEACH_FAIL_OLD_ROUTE_RESTORE(self):
+        self.assertIn("const bool restored = teachOldRouteAvailable_ && loadSelected()", MAP_TEXT)
+        self.assertIn("TEACH_SAVE=FAIL,OLD_ROUTE_RETAINED=1", MAP_TEXT)
+
+    def test_TEST_TEACH_FAIL_EMPTY_SLOT_NO_BACK(self):
+        self.assertIn("route_ = {}", MAP_TEXT)
+        self.assertIn("loadedValid_ = false", MAP_TEXT)
+        self.assertIn("TEACH_SAVE=FAIL,NO_VALID_ROUTE=1", MAP_TEXT)
+        self.assertIn('"ROUTE NOT SAVED"', LCD_TEXT)
+        self.assertIn('"NO VALID MAP"', LCD_TEXT)
+        self.assertIn('status.oldRouteAvailable', LCD_TEXT)
+
+    def test_TEST_STORAGE_INIT_FATAL(self):
+        self.assertIn("MapStorageErrorReason::STORAGE_INIT", MAP_TEXT)
+        self.assertIn("robot_.stopImmediately(true)", MAP_TEXT)
+        for line in ("MAP STORAGE ERR", "FLASH INIT FAILED", "MAP DISABLED",
+                     "CHECK STORAGE"):
+            self.assertIn(line, LCD_TEXT)
+
+    def test_TEST_START_BLOCKED_ON_STORAGE_ERROR(self):
+        start = MAP_TEXT.index("void MapController::handleStart()")
+        end = MAP_TEXT.index("void MapController::handleTriangle()", start)
+        block = MAP_TEXT[start:end]
+        self.assertIn("storageErrorReason_ != MapStorageErrorReason::NONE", block)
+        self.assertIn("robot_.stopImmediately(true)", block)
+        self.assertIn("STORAGE_INIT", block)
+        self.assertIn("STORAGE_ERROR", block)
+
+    def test_TEST_SETTINGS_BLOCKED_ON_FATAL_STORAGE_ERROR(self):
+        settings_start = MAP_TEXT.index("bool MapController::enterSettings")
+        settings_end = MAP_TEXT.index("void MapController::saveSettingsAndExit", settings_start)
+        settings_block = MAP_TEXT[settings_start:settings_end]
+        self.assertIn("storageErrorReason_ != MapStorageErrorReason::NONE", settings_block)
+
+    def test_TEST_DELETE_BLOCKED_ON_FATAL_STORAGE_ERROR(self):
+        circle_start = MAP_TEXT.index("void MapController::handleCircle()")
+        circle_end = MAP_TEXT.index("void MapController::handleCross()", circle_start)
+        circle_block = MAP_TEXT[circle_start:circle_end]
+        self.assertIn("storageErrorReason_ != MapStorageErrorReason::NONE", circle_block)
+
+    def test_TEST_ERROR_REASON_CLEARED_AFTER_SUCCESS(self):
+        self.assertGreaterEqual(
+            MAP_TEXT.count("storageErrorReason_ = MapStorageErrorReason::NONE"), 5
+        )
+        self.assertIn("MAP,SETTINGS,SAVE=NO_CHANGE", MAP_TEXT)
+        self.assertIn("MapStorageErrorReason::NONE", MAP_TEXT[MAP_TEXT.index("void MapController::begin()"):])
+
+    def test_TEST_ERROR_REASON_CLEARED_AFTER_ACK(self):
+        start = MAP_TEXT.index("void MapController::handleCross()")
+        end = MAP_TEXT.index("void MapController::handleCrossLong()", start)
+        block = MAP_TEXT[start:end]
+        self.assertIn("storageErrorReason_ = MapStorageErrorReason::NONE", block)
+        self.assertIn("storeState_ = MapStoreState::SAVED", block)
+        self.assertIn("mode_ = MapControllerMode::SAVED", block)
+
+    def test_TEST_LCD_SETTINGS_ERROR(self):
+        for line in ("MAP%u SAVE ERROR", "OLD MAP RETAINED",
+                     "SETTINGS NOT SAVED", "X BACK"):
+            self.assertIn(line, LCD_TEXT)
+
+    def test_TEST_LCD_TEACH_ERROR_OLD(self):
+        for line in ("MAP%u TEACH ERROR", "NEW ROUTE NOT SAVED",
+                     "OLD MAP RETAINED", "X BACK"):
+            self.assertIn(line, LCD_TEXT)
+
+    def test_TEST_LCD_TEACH_ERROR_EMPTY(self):
+        for line in ("MAP%u TEACH ERROR", "ROUTE NOT SAVED",
+                     "NO VALID MAP", "CHECK STORAGE"):
+            self.assertIn(line, LCD_TEXT)
+
+    def test_TEST_LCD_INIT_FATAL(self):
+        for line in ("MAP STORAGE ERR", "FLASH INIT FAILED",
+                     "MAP DISABLED", "CHECK STORAGE"):
+            self.assertIn(line, LCD_TEXT)
+
+    def test_TEST_ERROR_LCD_20_CHAR(self):
+        error_start = LCD_TEXT.index("if (status.storeState == 3U || status.storageErrorReason != 0U)")
+        saved_start = LCD_TEXT.index("if (status.mode == 2U)")
+        complete_start = LCD_TEXT.index("if (status.mode == 8U)")
+        self.assertLess(error_start, saved_start)
+        self.assertLess(error_start, complete_start)
+        for line in (
+            "MAP STORAGE ERR", "FLASH INIT FAILED", "MAP DISABLED", "CHECK STORAGE",
+            "MAP%u SAVE ERROR", "OLD MAP RETAINED", "SETTINGS NOT SAVED", "X BACK",
+            "MAP%u TEACH ERROR", "NEW ROUTE NOT SAVED", "ROUTE NOT SAVED",
+            "NO VALID MAP", "MAP%u MODE ERROR", "OLD MODE RETAINED", "SAVE FAILED",
+            "MAP%u STORAGE ERR", "NO VALID ROUTE",
+        ):
+            self.assertLessEqual(len(line.replace("%u", "2")), 20, msg=line)
+
     def test_TEST_STORAGE_ERROR_PRIORITY_OVER_SAVED(self):
-        error_start = LCD_TEXT.index("if (status.storeState == 3U)")
+        error_start = LCD_TEXT.index(
+            "if (status.storeState == 3U || status.storageErrorReason != 0U)"
+        )
         saved_start = LCD_TEXT.index("if (status.mode == 2U)")
         complete_start = LCD_TEXT.index("if (status.mode == 8U)")
         self.assertLess(error_start, saved_start)
@@ -1297,9 +1417,8 @@ class MapHostTests(unittest.TestCase):
         start = MAP_TEXT.index("void MapController::handleCross()")
         end = MAP_TEXT.index("void MapController::handleCrossLong()", start)
         block = MAP_TEXT[start:end]
-        self.assertIn("MapStoreState::STORAGE_ERROR", block)
-        self.assertIn("MAP,SETTINGS,SAVE_ERROR_ACK", block)
-        self.assertIn("loadedValid_ ? MapControllerMode::SAVED", block)
+        self.assertIn("MAP,STORAGE_ERROR,ACK=BACK,OLD_ROUTE=1", block)
+        self.assertIn("storageErrorReason_ = MapStorageErrorReason::NONE", block)
 
     def test_finite_loop_completes_only_after_closing_edge(self):
         edges = closed_route_edges(3, laps=2)

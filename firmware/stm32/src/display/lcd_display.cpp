@@ -142,7 +142,9 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
                               uint32_t closeCandidateDistanceMm,
                               int16_t closeCandidateHeadingDeg,
                               uint8_t settingsItem, int16_t settingsSpeed,
-                              uint8_t settingsLoopTarget, uint8_t helpPage) {
+                              uint8_t settingsLoopTarget, uint8_t helpPage,
+                              uint8_t storageErrorReason,
+                              bool oldRouteAvailable) {
   const uint8_t normalized = slot == 2U ? 2U : 1U;
   LcdMapStatus& status = mapStatus_[normalized - 1U];
   status.valid = true;
@@ -170,6 +172,8 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
                                   ? settingsLoopTarget
                                   : 0U;
   status.helpPage = helpPage <= 1U ? helpPage : 0U;
+  status.storageErrorReason = storageErrorReason;
+  status.oldRouteAvailable = oldRouteAvailable;
   if (mapSlot_ == normalized) forceRefresh();
 }
 
@@ -252,11 +256,46 @@ void LcdDisplay::buildMapLines() {
   const unsigned long wholeM = static_cast<unsigned long>(lengthTenthsM / 10U);
   const unsigned long tenthM = static_cast<unsigned long>(lengthTenthsM % 10U);
 
-  if (status.storeState == 3U) {
-    snprintf(desired_[0], 21, "MAP%u SAVE ERROR", mapSlot_);
-    snprintf(desired_[1], 21, "OLD MAP RETAINED");
-    snprintf(desired_[2], 21, "SETTINGS NOT SAVED");
-    snprintf(desired_[3], 21, "X BACK");
+  if (status.storeState == 3U || status.storageErrorReason != 0U) {
+    if (status.storageErrorReason == 4U) {
+      snprintf(desired_[0], 21, "MAP STORAGE ERR");
+      snprintf(desired_[1], 21, "FLASH INIT FAILED");
+      snprintf(desired_[2], 21, "MAP DISABLED");
+      snprintf(desired_[3], 21, "CHECK STORAGE");
+    } else if (status.storageErrorReason == 1U &&
+               status.oldRouteAvailable) {
+      snprintf(desired_[0], 21, "MAP%u SAVE ERROR", mapSlot_);
+      snprintf(desired_[1], 21, "OLD MAP RETAINED");
+      snprintf(desired_[2], 21, "SETTINGS NOT SAVED");
+      snprintf(desired_[3], 21, "X BACK");
+    } else if (status.storageErrorReason == 2U &&
+               status.oldRouteAvailable) {
+      snprintf(desired_[0], 21, "MAP%u TEACH ERROR", mapSlot_);
+      snprintf(desired_[1], 21, "NEW ROUTE NOT SAVED");
+      snprintf(desired_[2], 21, "OLD MAP RETAINED");
+      snprintf(desired_[3], 21, "X BACK");
+    } else if (status.storageErrorReason == 2U) {
+      snprintf(desired_[0], 21, "MAP%u TEACH ERROR", mapSlot_);
+      snprintf(desired_[1], 21, "ROUTE NOT SAVED");
+      snprintf(desired_[2], 21, "NO VALID MAP");
+      snprintf(desired_[3], 21, "CHECK STORAGE");
+    } else if (status.storageErrorReason == 3U &&
+               status.oldRouteAvailable) {
+      snprintf(desired_[0], 21, "MAP%u MODE ERROR", mapSlot_);
+      snprintf(desired_[1], 21, "OLD MODE RETAINED");
+      snprintf(desired_[2], 21, "SAVE FAILED");
+      snprintf(desired_[3], 21, "X BACK");
+    } else if (status.oldRouteAvailable) {
+      snprintf(desired_[0], 21, "MAP%u STORAGE ERR", mapSlot_);
+      snprintf(desired_[1], 21, "OLD MAP RETAINED");
+      snprintf(desired_[2], 21, "SAVE FAILED");
+      snprintf(desired_[3], 21, "X BACK");
+    } else {
+      snprintf(desired_[0], 21, "MAP%u STORAGE ERR", mapSlot_);
+      snprintf(desired_[1], 21, "SAVE FAILED");
+      snprintf(desired_[2], 21, "NO VALID ROUTE");
+      snprintf(desired_[3], 21, "CHECK STORAGE");
+    }
     return;
   }
   if (status.mode == 9U) {

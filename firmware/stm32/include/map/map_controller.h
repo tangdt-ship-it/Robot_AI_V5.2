@@ -43,6 +43,14 @@ class MapController {
 
  private:
   enum class ReplayRealignReason : uint8_t { NONE, PATH, ARRIVAL };
+  enum class MapStorageErrorReason : uint8_t {
+    NONE = 0U,
+    SETTINGS_SAVE = 1U,
+    TEACH_SAVE = 2U,
+    MODE_SAVE = 3U,
+    STORAGE_INIT = 4U,
+    GENERIC = 5U,
+  };
   enum class MapSettingsItem : uint8_t { MODE = 0U, SPEED = 1U, LAP = 2U,
                                          DELETE_MAP = 3U };
 
@@ -142,6 +150,7 @@ class MapController {
   void logOptimizeSummary(const RouteCleanerMetrics& metrics) const;
   void logSemanticSummary(const SemanticRouteMetrics& metrics) const;
   void log(const char* message) const;
+  static const char* storageErrorReasonName(MapStorageErrorReason reason);
 
   RobotController& robot_;
   Ps2Controller& ps2_;
@@ -160,6 +169,7 @@ class MapController {
   uint8_t loopTarget_ = MAP_LOOP_TARGET_INF;
   MapTeachMode teachMode_ = MapTeachMode::MANUAL_KEYFRAME;
   MapStoreState storeState_ = MapStoreState::EMPTY;
+  MapStorageErrorReason storageErrorReason_ = MapStorageErrorReason::NONE;
   // route_ is the active Replay buffer. optimizedRoute_ and semanticRoute_
   // are fixed-size working buffers used only after Teach stops; the previous
   // A/B record remains in Flash if an optimization or save step fails.
@@ -175,6 +185,7 @@ class MapController {
   uint8_t cornerStableSamples_ = 0U;
   uint32_t nextTeachSampleMs_ = 0U;
   bool teachFinishPending_ = false;
+  bool teachOldRouteAvailable_ = false;
   bool savePending_ = false;
   bool deletePending_ = false;
   bool modeSavePending_ = false;

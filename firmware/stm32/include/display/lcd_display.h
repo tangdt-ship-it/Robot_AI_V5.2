@@ -74,6 +74,8 @@ struct LcdMapStatus {
   int16_t settingsSpeed = 20;
   uint8_t settingsLoopTarget = 0;  // 0 = INF.
   uint8_t helpPage = 0;
+  uint8_t storageErrorReason = 0;  // NONE/SETTINGS/TEACH/MODE/INIT/GENERIC.
+  bool oldRouteAvailable = false;
 };
 
 class LcdDisplay {
@@ -117,7 +119,9 @@ class LcdDisplay {
                     uint8_t settingsItem = 0,
                     int16_t settingsSpeed = 20,
                     uint8_t settingsLoopTarget = 0,
-                    uint8_t helpPage = 0);
+                    uint8_t helpPage = 0,
+                    uint8_t storageErrorReason = 0,
+                    bool oldRouteAvailable = false);
 
  private:
   class SoftI2C {

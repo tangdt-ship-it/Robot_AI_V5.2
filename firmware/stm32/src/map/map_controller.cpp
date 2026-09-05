@@ -76,14 +76,30 @@ MapController::MapController(RobotController& robot, Ps2Controller& ps2,
     : robot_(robot), ps2_(ps2), display_(display), odometry_(odometry),
       fusion_(fusion), ultrasonic_(ultrasonic), debug_(debugStream) {}
 
+const char* MapController::storageErrorReasonName(
+    MapStorageErrorReason reason) {
+  switch (reason) {
+    case MapStorageErrorReason::SETTINGS_SAVE: return "SETTINGS_SAVE";
+    case MapStorageErrorReason::TEACH_SAVE: return "TEACH_SAVE";
+    case MapStorageErrorReason::MODE_SAVE: return "MODE_SAVE";
+    case MapStorageErrorReason::STORAGE_INIT: return "STORAGE_INIT";
+    case MapStorageErrorReason::GENERIC: return "GENERIC";
+    case MapStorageErrorReason::NONE: return "NONE";
+  }
+  return "GENERIC";
+}
+
 void MapController::begin() {
   ps2_.setMapUiCapture(false);
   if (!store_.begin()) {
     storeState_ = MapStoreState::STORAGE_ERROR;
+    storageErrorReason_ = MapStorageErrorReason::STORAGE_INIT;
+    robot_.stopImmediately(true);
     log("OWNER=STM32,STORE=ERROR");
     publishStatus();
     return;
   }
+  storageErrorReason_ = MapStorageErrorReason::NONE;
   const MapSlotMetadata metadata = store_.metadata(selectedSlot_);
   storeState_ = metadata.state;
   routeType_ = metadata.routeType;
@@ -193,7 +209,8 @@ void MapController::handleEvent(const Ps2MapEvent& event) {
 }
 
 void MapController::handleSlot(uint8_t slot) {
-  if (mode_ == MapControllerMode::TEACHING || replayActive_ ||
+  if (storageErrorReason_ != MapStorageErrorReason::NONE ||
+      mode_ == MapControllerMode::TEACHING || replayActive_ ||
       mode_ == MapControllerMode::DELETE_CONFIRM ||
       mode_ == MapControllerMode::REPLAY_HOLD ||
       mode_ == MapControllerMode::CLOSED_CONFIRM ||
@@ -211,6 +228,7 @@ void MapController::handleSlot(uint8_t slot) {
                    : MapReplayMode::ONCE;
   replaySpeed_ = metadata.replaySpeed;
   loopTarget_ = metadata.loopTarget;
+  storageErrorReason_ = MapStorageErrorReason::NONE;
   mode_ = metadata.state == MapStoreState::SAVED
               ? MapControllerMode::SAVED
               : MapControllerMode::READY;
@@ -224,6 +242,12 @@ bool MapController::enterSettings(const char*& reason) {
   }
   if (mode_ == MapControllerMode::TEACHING) {
     reason = "TEACHING";
+    return false;
+  }
+  if (storageErrorReason_ != MapStorageErrorReason::NONE) {
+    reason = storageErrorReason_ == MapStorageErrorReason::STORAGE_INIT
+                 ? "STORAGE_INIT"
+                 : "STORAGE_ERROR";
     return false;
   }
   if (replayActive_ || mode_ == MapControllerMode::REPLAY_HOLD ||
@@ -285,6 +309,7 @@ void MapController::saveSettingsAndExit() {
                                settingsLoopTarget_ != loopTarget_;
   if (!settingsChanged) {
     storeState_ = MapStoreState::SAVED;
+    storageErrorReason_ = MapStorageErrorReason::NONE;
     mode_ = MapControllerMode::SAVED;
     debug_.println("MAP,SETTINGS,SAVE=NO_CHANGE");
     leaveMapUiCapture();
@@ -304,6 +329,7 @@ void MapController::saveSettingsAndExit() {
     replaySpeed_ = oldSpeed;
     loopTarget_ = oldLoopTarget;
     storeState_ = MapStoreState::STORAGE_ERROR;
+    storageErrorReason_ = MapStorageErrorReason::SETTINGS_SAVE;
     debug_.println("MAP,SETTINGS,SAVE=FAIL,OLD_ROUTE_RETAINED=1");
     mode_ = MapControllerMode::SAVED;
     leaveMapUiCapture();
@@ -316,6 +342,7 @@ void MapController::saveSettingsAndExit() {
   loopTarget_ = settingsLoopTarget_;
   loadedValid_ = true;
   storeState_ = MapStoreState::SAVED;
+  storageErrorReason_ = MapStorageErrorReason::NONE;
   mode_ = MapControllerMode::SAVED;
   debug_.print("MAP,SETTINGS,SAVE=OK,MODE=");
   debug_.print(MapRouteStore::replayModeName(routeMode_));
@@ -463,6 +490,14 @@ void MapController::handleSettingsInput(Ps2MapAction action) {
 }
 
 void MapController::handleStart() {
+  if (storageErrorReason_ != MapStorageErrorReason::NONE) {
+    robot_.stopImmediately(true);
+    debug_.print("MAP,START,REJECT,REASON=");
+    debug_.println(storageErrorReason_ == MapStorageErrorReason::STORAGE_INIT
+                       ? "STORAGE_INIT"
+                       : "STORAGE_ERROR");
+    return;
+  }
   if (mode_ == MapControllerMode::SETTINGS) {
     saveSettingsAndExit();
     return;
@@ -539,6 +574,11 @@ void MapController::handleStart() {
 }
 
 void MapController::handleTriangle() {
+  if (storageErrorReason_ != MapStorageErrorReason::NONE) {
+    debug_.print("MAP,TEACH,REJECT,REASON=");
+    debug_.println(storageErrorReasonName(storageErrorReason_));
+    return;
+  }
   if (mode_ == MapControllerMode::SETTINGS ||
       mode_ == MapControllerMode::HELP) {
     if (mode_ == MapControllerMode::HELP) {
@@ -562,6 +602,11 @@ void MapController::handleTriangle() {
 void MapController::handleCircle() {
   debug_.print("MAP,CIRCLE,HANDLE,MODE=");
   debug_.println(static_cast<unsigned>(mode_));
+  if (storageErrorReason_ != MapStorageErrorReason::NONE) {
+    debug_.print("MAP,CIRCLE,REJECT,REASON=");
+    debug_.println(storageErrorReasonName(storageErrorReason_));
+    return;
+  }
   if (mode_ == MapControllerMode::SETTINGS) {
     if (settingsCanDelete()) {
       mode_ = MapControllerMode::DELETE_CONFIRM;
@@ -645,16 +690,16 @@ void MapController::handleCross() {
                        MapControllerMode::CLOSED_CONFIRM)) {
       debug_.println("MAP,CLOSE_CONFIRM,RESULT=OPEN");
     }
-  } else if (storeState_ == MapStoreState::STORAGE_ERROR &&
-             (mode_ == MapControllerMode::SAVED ||
-              mode_ == MapControllerMode::REPLAY_COMPLETE ||
-              mode_ == MapControllerMode::READY)) {
-    // A failed Settings write already released UI capture. X acknowledges
-    // the error and returns to the old valid route without deleting it.
-    mode_ = loadedValid_ ? MapControllerMode::SAVED
-                         : MapControllerMode::READY;
-    if (loadedValid_) storeState_ = MapStoreState::SAVED;
-    debug_.println("MAP,SETTINGS,SAVE_ERROR_ACK");
+  } else if (storageErrorReason_ != MapStorageErrorReason::NONE &&
+             storageErrorReason_ != MapStorageErrorReason::STORAGE_INIT &&
+             loadedValid_) {
+    // X BACK exists only when the old Flash route was restored in RAM. It
+    // acknowledges the runtime error without deleting or rewriting Flash.
+    robot_.stopImmediately(true);
+    storageErrorReason_ = MapStorageErrorReason::NONE;
+    storeState_ = MapStoreState::SAVED;
+    mode_ = MapControllerMode::SAVED;
+    debug_.println("MAP,STORAGE_ERROR,ACK=BACK,OLD_ROUTE=1");
     leaveMapUiCapture();
     statusDirty_ = true;
   } else if (replayActive_) {
@@ -717,15 +762,25 @@ bool MapController::loadSelected() {
   routeMode_ = static_cast<MapReplayMode>(route_.header.replayMode);
   replaySpeed_ = mapReplaySpeedFromReserved(route_.header.reserved);
   loopTarget_ = mapLoopTargetFromReserved(route_.header.reserved);
+  storageErrorReason_ = MapStorageErrorReason::NONE;
   mode_ = MapControllerMode::SAVED;
   return true;
 }
 
 bool MapController::beginTeach() {
+  if (storageErrorReason_ != MapStorageErrorReason::NONE) {
+    debug_.print("MAP,TEACH,REJECT,REASON=");
+    debug_.println(storageErrorReasonName(storageErrorReason_));
+    return false;
+  }
   if (replayActive_ || !robot_.motorsStopped() || robot_.aiMotionActive() ||
       robot_.brakeEnabled() || ps2_.motionCommandActive()) {
     return false;
   }
+  teachOldRouteAvailable_ = storeState_ == MapStoreState::SAVED &&
+                            (loadedValid_ ||
+                             store_.metadata(selectedSlot_).state ==
+                                 MapStoreState::SAVED);
   Pose origin;
   if (!readPose(origin)) return false;
   teachOrigin_ = origin;
@@ -760,6 +815,7 @@ void MapController::cancelTeach() {
   route_ = {};
   teachOriginValid_ = false;
   teachFinishPending_ = false;
+  teachOldRouteAvailable_ = false;
   mode_ = storeState_ == MapStoreState::SAVED ? MapControllerMode::SAVED
                                               : MapControllerMode::READY;
 }
@@ -2049,10 +2105,12 @@ void MapController::serviceStorage() {
     if (store_.erase(selectedSlot_)) {
       loadedValid_ = false;
       storeState_ = MapStoreState::EMPTY;
+      storageErrorReason_ = MapStorageErrorReason::NONE;
       mode_ = MapControllerMode::READY;
       log("DELETE=OK");
     } else {
       storeState_ = MapStoreState::STORAGE_ERROR;
+      storageErrorReason_ = MapStorageErrorReason::GENERIC;
       mode_ = MapControllerMode::READY;
       log("DELETE=FAIL");
     }
@@ -2066,18 +2124,29 @@ void MapController::serviceStorage() {
     if (saved) {
       loadedValid_ = true;
       storeState_ = MapStoreState::SAVED;
+      storageErrorReason_ = MapStorageErrorReason::NONE;
+      teachOldRouteAvailable_ = false;
       routeType_ = static_cast<MapRouteType>(route_.header.routeType);
       routeMode_ = static_cast<MapReplayMode>(route_.header.replayMode);
       mode_ = MapControllerMode::SAVED;
       log("TEACH_SAVE=OK");
     } else {
       // The previous active A/B record remains untouched on a failed erase,
-      // program or read-back. Drop the in-progress RAM record and expose the
-      // failed save explicitly; a later START reloads the old Flash record.
-      loadedValid_ = false;
+      // program or read-back. Restore it into RAM when this Teach session
+      // started from a valid route; otherwise discard the failed new route.
+      const bool restored = teachOldRouteAvailable_ && loadSelected();
+      teachOldRouteAvailable_ = false;
+      storageErrorReason_ = MapStorageErrorReason::TEACH_SAVE;
       storeState_ = MapStoreState::STORAGE_ERROR;
-      mode_ = MapControllerMode::READY;
-      log("TEACH_SAVE=FAIL,OLD_ROUTE_RETAINED=1");
+      if (restored) {
+        mode_ = MapControllerMode::SAVED;
+        log("TEACH_SAVE=FAIL,OLD_ROUTE_RETAINED=1");
+      } else {
+        route_ = {};
+        loadedValid_ = false;
+        mode_ = MapControllerMode::READY;
+        log("TEACH_SAVE=FAIL,NO_VALID_ROUTE=1");
+      }
     }
     statusDirty_ = true;
     return;
@@ -2091,9 +2160,12 @@ void MapController::serviceStorage() {
       routeMode_ = modeBeforeSave_;
       route_.header.replayMode = static_cast<uint8_t>(routeMode_);
       storeState_ = MapStoreState::STORAGE_ERROR;
+      storageErrorReason_ = MapStorageErrorReason::MODE_SAVE;
+      mode_ = MapControllerMode::SAVED;
       log("REPLAY_MODE_SAVE=FAIL");
     } else {
       storeState_ = MapStoreState::SAVED;
+      storageErrorReason_ = MapStorageErrorReason::NONE;
       log("REPLAY_MODE_SAVE=OK");
     }
     statusDirty_ = true;
@@ -2139,7 +2211,7 @@ void MapController::publishStatus() {
       static_cast<uint8_t>(holdReason_), replayTargetDeg_, replayLapCounter_,
       closeCandidateDistanceMm_, closeCandidateHeadingDeg_,
       static_cast<uint8_t>(settingsItem_), displaySpeed, displayLoopTarget,
-      helpPage_);
+      helpPage_, static_cast<uint8_t>(storageErrorReason_), loadedValid_);
   const uint32_t now = millis();
   if (replayActive_ && replayOperation_ == MapReplayOperation::MOVE &&
       robot_.guidedWaypointActive() &&
