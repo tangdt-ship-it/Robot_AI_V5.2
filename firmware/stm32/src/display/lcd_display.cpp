@@ -145,7 +145,8 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
                               uint8_t settingsItem, int16_t settingsSpeed,
                               uint8_t settingsLoopTarget, uint8_t helpPage,
                               uint8_t storageErrorReason,
-                              bool oldRouteAvailable) {
+                              bool oldRouteAvailable, uint8_t userMode,
+                              uint32_t replayCycleCounter) {
   const uint8_t normalized = slot == 2U ? 2U : 1U;
   LcdMapStatus& status = mapStatus_[normalized - 1U];
   status.valid = true;
@@ -163,9 +164,11 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
   status.holdReason = holdReason;
   status.routeType = routeType <= 1U ? routeType : 0U;
   status.replayMode = replayMode <= 4U ? replayMode : 0U;
+  status.userMode = userMode <= 2U ? userMode : 0U;
   status.returnPhase = returnPhase <= 2U ? returnPhase : 0U;
   status.replayTargetDeg = replayTargetDeg;
   status.replayLapCounter = replayLapCounter;
+  status.replayCycleCounter = replayCycleCounter;
   status.closeCandidateDistanceMm = closeCandidateDistanceMm;
   status.closeCandidateHeadingDeg = closeCandidateHeadingDeg;
   status.settingsItem = settingsItem <= 3U ? settingsItem : 0U;
@@ -236,24 +239,59 @@ void LcdDisplay::buildRobotLines() {
 
 void LcdDisplay::buildMapLines() {
   const LcdMapStatus& status = mapStatus_[mapSlot_ - 1U];
-  const char* routeType = status.routeType == 1U ? "CLOSED" : "OPEN";
-  const char* replayMode = status.replayMode == 1U ? "LOOP" :
-                           status.replayMode == 2U ? "RETURN" :
-                           status.replayMode == 3U ? "PING" : "ONCE";
-  if (status.replayMode == 4U) replayMode = "CLOSED";
-  const bool returnPhaseActive =
-      status.replayMode == 2U && status.returnPhase != 0U &&
-      (status.mode == 6U || status.mode == 7U);
-  const char* activeMode = replayMode;
-  if (returnPhaseActive) {
-    activeMode = status.returnPhase == 2U ? "RETURN BACK" : "RETURN OUT";
-  }
   // Keep the 20-column LCD bounded even if an infinite loop has been running
   // for a very long time. Finite loop targets remain exact (1..20).
   const uint32_t completedLapDisplay =
       status.replayLapCounter > 99U ? 99U : status.replayLapCounter;
   const uint32_t activeLapDisplay =
       completedLapDisplay < 99U ? completedLapDisplay + 1U : 99U;
+  const uint32_t completedCycleDisplay =
+      status.replayCycleCounter > 99U ? 99U : status.replayCycleCounter;
+  const uint32_t activeCycleDisplay =
+      completedCycleDisplay < 99U ? completedCycleDisplay + 1U : 99U;
+  auto writeSavedMode = [&](char (&line)[21]) {
+    if (status.userMode == 1U) {
+      if (status.settingsLoopTarget == 0U) {
+        snprintf(line, 21, "MODE:SHUTTLE CY:INF");
+      } else {
+        snprintf(line, 21, "MODE:SHUTTLE CY:%u",
+                 static_cast<unsigned>(status.settingsLoopTarget));
+      }
+    } else if (status.userMode == 2U) {
+      if (status.settingsLoopTarget == 0U) {
+        snprintf(line, 21, "MODE:LOOP LAP:INF");
+      } else {
+        snprintf(line, 21, "MODE:LOOP LAP:%u",
+                 static_cast<unsigned>(status.settingsLoopTarget));
+      }
+    } else {
+      snprintf(line, 21, "MODE:ONCE");
+    }
+  };
+  auto writeRunMode = [&](char (&line)[21]) {
+    if (status.userMode == 1U) {
+      const char* phase = status.returnPhase == 2U ? "BACK" : "OUT";
+      if (status.settingsLoopTarget == 0U) {
+        snprintf(line, 21, "SHUT %s CY:%lu/INF", phase,
+                 static_cast<unsigned long>(activeCycleDisplay));
+      } else {
+        snprintf(line, 21, "SHUT %s CY:%lu/%u", phase,
+                 static_cast<unsigned long>(activeCycleDisplay),
+                 static_cast<unsigned>(status.settingsLoopTarget));
+      }
+    } else if (status.userMode == 2U) {
+      if (status.settingsLoopTarget == 0U) {
+        snprintf(line, 21, "MODE:LOOP LAP:%lu/INF",
+                 static_cast<unsigned long>(activeLapDisplay));
+      } else {
+        snprintf(line, 21, "MODE:LOOP LAP:%lu/%u",
+                 static_cast<unsigned long>(activeLapDisplay),
+                 static_cast<unsigned>(status.settingsLoopTarget));
+      }
+    } else {
+      snprintf(line, 21, "MODE:ONCE");
+    }
+  };
   if (!status.valid) {
     snprintf(desired_[0], 21, "MAP%u EMPTY", mapSlot_);
     snprintf(desired_[1], 21, "PTS:000/128 L:0.0m");
@@ -309,11 +347,11 @@ void LcdDisplay::buildMapLines() {
     return;
   }
   if (status.mode == 4U) {
-    snprintf(desired_[0], 21, "MAP%u CHECK %s", mapSlot_, routeType);
+    snprintf(desired_[0], 21, "MAP%u CHECK", mapSlot_);
     snprintf(desired_[1], 21, "WP:%02u/%02u L:%lu.%lum",
              static_cast<unsigned>(status.replayWp),
              static_cast<unsigned>(status.replayTotal), wholeM, tenthM);
-    snprintf(desired_[2], 21, "MODE:%s", replayMode);
+    writeSavedMode(desired_[2]);
     snprintf(desired_[3], 21, "START RUN X CANCEL");
     return;
   }
@@ -323,7 +361,7 @@ void LcdDisplay::buildMapLines() {
              static_cast<unsigned>(status.replayWp),
              static_cast<unsigned>(status.replayTotal),
              static_cast<unsigned long>(status.replayTargetMm));
-    snprintf(desired_[2], 21, "MODE:%s", replayMode);
+    writeSavedMode(desired_[2]);
     snprintf(desired_[3], 21, "START GO X CANCEL");
     return;
   }
@@ -331,19 +369,28 @@ void LcdDisplay::buildMapLines() {
     const unsigned item = static_cast<unsigned>(status.settingsItem) + 1U;
     snprintf(desired_[0], 21, "MAP%u SETTINGS %u/4", mapSlot_, item);
     if (status.settingsItem == 0U) {
-      snprintf(desired_[1], 21, ">MODE:%s", replayMode);
+      snprintf(desired_[1], 21, ">MODE:%s",
+               status.userMode == 1U ? "SHUTTLE" :
+               status.userMode == 2U ? "LOOP" : "ONCE");
     } else if (status.settingsItem == 1U) {
       snprintf(desired_[1], 21, ">SPEED:%d", status.settingsSpeed);
     } else if (status.settingsItem == 2U) {
-      if (status.replayMode == 1U) {
+      if (status.userMode == 0U) {
+        snprintf(desired_[1], 21, ">COUNT:--");
+      } else if (status.userMode == 1U) {
+        if (status.settingsLoopTarget == 0U) {
+          snprintf(desired_[1], 21, ">CYCLE:INF");
+        } else {
+          snprintf(desired_[1], 21, ">CYCLE:%u", static_cast<unsigned>(
+                                                   status.settingsLoopTarget));
+        }
+      } else {
         if (status.settingsLoopTarget == 0U) {
           snprintf(desired_[1], 21, ">LAP:INF");
         } else {
           snprintf(desired_[1], 21, ">LAP:%u", static_cast<unsigned>(
                                                status.settingsLoopTarget));
         }
-      } else {
-        snprintf(desired_[1], 21, ">LAP:--");
       }
     } else {
       snprintf(desired_[1], 21, ">DELETE MAP");
@@ -361,8 +408,8 @@ void LcdDisplay::buildMapLines() {
       snprintf(desired_[3], 21, "TRI NEXT");
     } else if (status.helpPage == 1U) {
       snprintf(desired_[1], 21, "ONCE ONE WAY");
-      snprintf(desired_[2], 21, "RETURN GO + BACK");
-      snprintf(desired_[3], 21, "CLOSED CLOSE ONCE");
+      snprintf(desired_[2], 21, "SHUTTLE GO/BACK");
+      snprintf(desired_[3], 21, "LOOP REPEAT LAPS");
     } else {
       snprintf(desired_[1], 21, "LOOP CLOSE REPEAT");
       snprintf(desired_[2], 21, "X HOLD XL CANCEL");
@@ -371,64 +418,17 @@ void LcdDisplay::buildMapLines() {
     return;
   }
   if (status.mode == 6U) {
-    if (status.replayOperation == 1U) {
-      snprintf(desired_[0], 21, "MAP%u RUN WP:%02u/%02u", mapSlot_,
-               static_cast<unsigned>(status.replayWp),
-               static_cast<unsigned>(status.replayTotal));
-      snprintf(desired_[1], 21, "TGT:%lu TRV:%lu",
-               static_cast<unsigned long>(status.replayTargetMm),
-               static_cast<unsigned long>(status.replayTravelMm));
-      if (status.replayMode == 1U) {
-        if (status.settingsLoopTarget == 0U) {
-          snprintf(desired_[2], 21, "MODE:LOOP LAP:%lu/INF",
-                   static_cast<unsigned long>(activeLapDisplay));
-        } else {
-          snprintf(desired_[2], 21, "MODE:LOOP LAP:%lu/%u",
-                   static_cast<unsigned long>(activeLapDisplay),
-                   static_cast<unsigned>(status.settingsLoopTarget));
-        }
-      } else {
-        snprintf(desired_[2], 21, "MODE:%s", activeMode);
-      }
-      snprintf(desired_[3], 21, "X HOLD XL CANCEL");
-      return;
-    }
-    if (status.replayOperation == 2U) {
-      snprintf(desired_[0], 21, "MAP%u RUN WP:%02u/%02u", mapSlot_,
-               static_cast<unsigned>(status.replayWp),
-               static_cast<unsigned>(status.replayTotal));
-      snprintf(desired_[1], 21, "TURN %+ddeg", status.replayTargetDeg);
-      if (status.replayMode == 1U) {
-        if (status.settingsLoopTarget == 0U) {
-          snprintf(desired_[2], 21, "MODE:LOOP LAP:%lu/INF",
-                   static_cast<unsigned long>(activeLapDisplay));
-        } else {
-          snprintf(desired_[2], 21, "MODE:LOOP LAP:%lu/%u",
-                   static_cast<unsigned long>(activeLapDisplay),
-                   static_cast<unsigned>(status.settingsLoopTarget));
-        }
-      } else {
-        snprintf(desired_[2], 21, "MODE:%s", activeMode);
-      }
-      snprintf(desired_[3], 21, "X HOLD XL CANCEL");
-      return;
-    }
     snprintf(desired_[0], 21, "MAP%u RUN WP:%02u/%02u", mapSlot_,
              static_cast<unsigned>(status.replayWp),
              static_cast<unsigned>(status.replayTotal));
-    snprintf(desired_[1], 21, "TURN %+ddeg", status.replayTargetDeg);
-    if (status.replayMode == 1U) {
-      if (status.settingsLoopTarget == 0U) {
-        snprintf(desired_[2], 21, "MODE:LOOP LAP:%lu/INF",
-                 static_cast<unsigned long>(activeLapDisplay));
-      } else {
-        snprintf(desired_[2], 21, "MODE:LOOP LAP:%lu/%u",
-                 static_cast<unsigned long>(activeLapDisplay),
-                 static_cast<unsigned>(status.settingsLoopTarget));
-      }
+    if (status.replayOperation == 1U) {
+      snprintf(desired_[1], 21, "TGT:%lu TRV:%lu",
+               static_cast<unsigned long>(status.replayTargetMm),
+               static_cast<unsigned long>(status.replayTravelMm));
     } else {
-      snprintf(desired_[2], 21, "MODE:%s", activeMode);
+      snprintf(desired_[1], 21, "TURN %+ddeg", status.replayTargetDeg);
     }
+    writeRunMode(desired_[2]);
     snprintf(desired_[3], 21, "X HOLD XL CANCEL");
     return;
   }
@@ -439,26 +439,14 @@ void LcdDisplay::buildMapLines() {
     snprintf(desired_[1], 21, "TGT:%lu TRV:%lu",
              static_cast<unsigned long>(status.replayTargetMm),
              static_cast<unsigned long>(status.replayTravelMm));
-    if (status.replayMode == 1U) {
-      if (status.settingsLoopTarget == 0U) {
-        snprintf(desired_[2], 21, "MODE:LOOP LAP:%lu/INF",
-                 static_cast<unsigned long>(activeLapDisplay));
-      } else {
-        snprintf(desired_[2], 21, "MODE:LOOP LAP:%lu/%u",
-                 static_cast<unsigned long>(activeLapDisplay),
-                 static_cast<unsigned>(status.settingsLoopTarget));
-      }
-      snprintf(desired_[3], 21, "START RES XL CANCEL");
-      return;
-    }
-    snprintf(desired_[2], 21, "MODE:%s", activeMode);
+    writeRunMode(desired_[2]);
     snprintf(desired_[3], 21, "START RES XL CANCEL");
     return;
   }
   if (status.mode == 8U) {
     snprintf(desired_[0], 21, "MAP%u COMPLETE", mapSlot_);
     snprintf(desired_[1], 21, "STOPPED");
-    if (status.replayMode == 1U) {
+    if (status.userMode == 2U) {
       if (status.settingsLoopTarget == 0U) {
         snprintf(desired_[2], 21, "MODE:LOOP LAP:%lu/INF",
                  static_cast<unsigned long>(completedLapDisplay));
@@ -467,8 +455,15 @@ void LcdDisplay::buildMapLines() {
                  static_cast<unsigned long>(completedLapDisplay),
                  static_cast<unsigned>(status.settingsLoopTarget));
       }
+    } else if (status.userMode == 1U) {
+      if (status.settingsLoopTarget == 0U) {
+        snprintf(desired_[2], 21, "MODE:SHUTTLE CY:INF");
+      } else {
+        snprintf(desired_[2], 21, "MODE:SHUTTLE CY:%lu",
+                 static_cast<unsigned long>(completedCycleDisplay));
+      }
     } else {
-      snprintf(desired_[2], 21, "MODE:%s", replayMode);
+      snprintf(desired_[2], 21, "MODE:ONCE");
     }
     snprintf(desired_[3], 21, "START RUN SEL-L SET");
     return;
@@ -509,16 +504,7 @@ void LcdDisplay::buildMapLines() {
     snprintf(desired_[2], 21, "TRI=MARK SQ=UNDO");
     snprintf(desired_[3], 21, "O=SAVE X=CANCEL");
   } else if (status.mode == 2U) {
-    if (status.replayMode == 1U) {
-      if (status.settingsLoopTarget == 0U) {
-        snprintf(desired_[2], 21, "MODE:LOOP LAP:0/INF");
-      } else {
-        snprintf(desired_[2], 21, "MODE:LOOP LAP:0/%u",
-                 static_cast<unsigned>(status.settingsLoopTarget));
-      }
-    } else {
-      snprintf(desired_[2], 21, "MODE:%s", replayMode);
-    }
+    writeSavedMode(desired_[2]);
     snprintf(desired_[3], 21, "START RUN SEL-L SET");
   } else if (status.storeState == 0U) {
     snprintf(desired_[2], 21, "START TEACH");

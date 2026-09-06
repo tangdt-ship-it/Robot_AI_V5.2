@@ -23,6 +23,9 @@ constexpr uint8_t MAP_LOOP_TARGET_MAX = 20U;
 constexpr uint32_t MAP_SETTINGS_SPEED_MASK = 0x000000FFUL;
 constexpr uint32_t MAP_SETTINGS_LOOP_MASK = 0x0000FF00UL;
 constexpr uint8_t MAP_SETTINGS_LOOP_SHIFT = 8U;
+// Audited V5.2.11 marker. Bits 16..31 of MapRouteHeader::reserved were
+// unused by the STM32 firmware before the three user-mode migration.
+constexpr uint32_t MAP_SETTINGS_SHUTTLE_REPEAT_MASK = 0x00010000UL;
 
 constexpr bool mapReplaySpeedValid(uint8_t speed) {
   return speed >= MAP_REPLAY_SPEED_MIN &&
@@ -61,7 +64,22 @@ constexpr uint32_t mapLoopTargetToReserved(uint32_t reserved,
          (static_cast<uint32_t>(encoded) << MAP_SETTINGS_LOOP_SHIFT);
 }
 
+constexpr bool mapShuttleRepeatFromReserved(uint32_t reserved) {
+  return (reserved & MAP_SETTINGS_SHUTTLE_REPEAT_MASK) != 0U;
+}
+
+constexpr uint32_t mapShuttleRepeatToReserved(uint32_t reserved,
+                                              bool shuttleRepeat) {
+  return shuttleRepeat ? (reserved | MAP_SETTINGS_SHUTTLE_REPEAT_MASK)
+                        : (reserved & ~MAP_SETTINGS_SHUTTLE_REPEAT_MASK);
+}
+
 enum class MapSlot : uint8_t { MAP_1 = 1U, MAP_2 = 2U };
+enum class MapUserMode : uint8_t {
+  ONCE = 0U,
+  SHUTTLE = 1U,
+  LOOP = 2U,
+};
 enum class MapStoreState : uint8_t {
   EMPTY = 0U,
   SAVED = 1U,
@@ -161,6 +179,7 @@ struct MapSlotMetadata {
   uint32_t generation = 0U;
   int16_t replaySpeed = MAP_REPLAY_SPEED_DEFAULT;
   uint8_t loopTarget = MAP_LOOP_TARGET_INF;
+  bool shuttleRepeat = false;
 };
 
 static_assert(sizeof(MapWaypoint) == 12U, "MAP waypoint wire/storage size changed");

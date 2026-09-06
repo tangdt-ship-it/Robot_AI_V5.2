@@ -40,6 +40,7 @@ class MapController {
   MapControllerMode mode() const { return mode_; }
   MapSlot selectedSlot() const { return selectedSlot_; }
   MapReplayMode replayMode() const { return routeMode_; }
+  MapUserMode userMode() const { return userMode_; }
 
  private:
   enum class ReplayRealignReason : uint8_t { NONE, PATH, ARRIVAL };
@@ -56,7 +57,7 @@ class MapController {
     STORAGE_INIT = 4U,
     GENERIC = 5U,
   };
-  enum class MapSettingsItem : uint8_t { MODE = 0U, SPEED = 1U, LAP = 2U,
+  enum class MapSettingsItem : uint8_t { MODE = 0U, SPEED = 1U, COUNT = 2U,
                                          DELETE_MAP = 3U };
 
   struct Pose {
@@ -110,6 +111,17 @@ class MapController {
                                   MapRouteType persistedType) const;
   static MapRouteType persistedRouteType(MapReplayMode mode);
   static MapReplayMode persistedReplayMode(MapReplayMode mode);
+  static MapReplayMode executionModeFor(MapUserMode mode,
+                                        uint8_t repeatTarget);
+  static MapUserMode userModeFromStored(MapRouteType type,
+                                        MapReplayMode mode,
+                                        bool shuttleRepeat);
+  static const char* userModeName(MapUserMode mode);
+  static bool userModeNeedsClosingEdge(MapUserMode mode);
+  void applyStoredSettings(MapRouteType type, MapReplayMode mode,
+                           bool shuttleRepeat, uint8_t encodedTarget);
+  void updateRouteHeaderForSave(MapRouteData& route, MapUserMode mode,
+                                uint8_t repeatTarget) const;
   void updateRouteHeaderForSave(MapRouteData& route) const;
   void normalizeRouteForRuntime(MapRouteData& route,
                                 MapReplayMode runtimeMode) const;
@@ -178,9 +190,10 @@ class MapController {
   MapSlot selectedSlot_ = MapSlot::MAP_1;
   MapControllerMode mode_ = MapControllerMode::READY;
   MapRouteType routeType_ = MapRouteType::OPEN;
+  MapUserMode userMode_ = MapUserMode::ONCE;
   MapReplayMode routeMode_ = MapReplayMode::ONCE;
   int16_t replaySpeed_ = MAP_REPLAY_SPEED_DEFAULT;
-  uint8_t loopTarget_ = MAP_LOOP_TARGET_INF;
+  uint8_t loopTarget_ = MAP_LOOP_TARGET_MIN;
   MapTeachMode teachMode_ = MapTeachMode::MANUAL_KEYFRAME;
   MapStoreState storeState_ = MapStoreState::EMPTY;
   MapStorageErrorReason storageErrorReason_ = MapStorageErrorReason::NONE;
@@ -206,9 +219,9 @@ class MapController {
   MapReplayMode modeBeforeSave_ = MapReplayMode::ONCE;
 
   MapSettingsItem settingsItem_ = MapSettingsItem::MODE;
-  MapReplayMode settingsMode_ = MapReplayMode::ONCE;
+  MapUserMode settingsUserMode_ = MapUserMode::ONCE;
   int16_t settingsSpeed_ = MAP_REPLAY_SPEED_DEFAULT;
-  uint8_t settingsLoopTarget_ = MAP_LOOP_TARGET_INF;
+  uint8_t settingsRepeatTarget_ = MAP_LOOP_TARGET_MIN;
   uint8_t helpPage_ = 0U;
 
   bool replayActive_ = false;
@@ -237,6 +250,7 @@ class MapController {
   uint32_t replayTravelMm_ = 0U;
   uint32_t replayErrorMm_ = 0U;
   uint32_t replayLapCounter_ = 0U;
+  uint32_t replayCycleCounter_ = 0U;
   const char* replayReason_ = "NONE";
   MapHoldReason holdReason_ = MapHoldReason::NONE;
   uint32_t closeCandidateDistanceMm_ = 0U;

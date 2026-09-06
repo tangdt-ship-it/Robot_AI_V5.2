@@ -55,7 +55,8 @@ struct LcdMapStatus {
   // RUNNING, HOLD, COMPLETE and CLOSED_CONFIRM.
   uint8_t mode = 0;
   uint8_t routeType = 0;   // Compatibility: 0 OPEN, 1 legacy CLOSED.
-  uint8_t replayMode = 0;  // 0 ONCE, 1 LOOP, 2 RETURN, 3 PING, 4 CLOSED.
+  uint8_t replayMode = 0;  // Persisted/execution compatibility mode.
+  uint8_t userMode = 0;    // 0 ONCE, 1 SHUTTLE, 2 LOOP.
   uint8_t returnPhase = 0; // 0 NONE, 1 OUTBOUND, 2 INBOUND.
   uint16_t points = 0;
   uint16_t maxPoints = 128;
@@ -69,9 +70,10 @@ struct LcdMapStatus {
   uint8_t holdReason = 0;       // 0 NONE, 1 USER, 2 OBSTACLE, ...
   int16_t replayTargetDeg = 0;
   uint32_t replayLapCounter = 0;
+  uint32_t replayCycleCounter = 0;
   uint32_t closeCandidateDistanceMm = 0;
   int16_t closeCandidateHeadingDeg = 0;
-  uint8_t settingsItem = 0;  // MODE/SPEED/LAP/DELETE MAP.
+  uint8_t settingsItem = 0;  // MODE/SPEED/COUNT/DELETE MAP.
   int16_t settingsSpeed = 20;
   uint8_t settingsLoopTarget = 0;  // 0 = INF.
   uint8_t helpPage = 0;
@@ -123,7 +125,9 @@ class LcdDisplay {
                     uint8_t settingsLoopTarget = 0,
                     uint8_t helpPage = 0,
                     uint8_t storageErrorReason = 0,
-                    bool oldRouteAvailable = false);
+                    bool oldRouteAvailable = false,
+                    uint8_t userMode = 0,
+                    uint32_t replayCycleCounter = 0);
 
  private:
   class SoftI2C {

@@ -168,6 +168,43 @@ class StorageCompatibilityModel:
         return "OK"
 
 
+def v521_execution_mode(user_mode, repeat_target):
+    if user_mode == "ONCE":
+        return "ONCE"
+    if user_mode == "SHUTTLE":
+        return "RETURN" if repeat_target == 1 else "PING_PONG"
+    return "CLOSED" if repeat_target == 1 else "LOOP"
+
+
+def v521_persisted_record(user_mode, repeat_target, speed=20):
+    execution = v521_execution_mode(user_mode, repeat_target)
+    if user_mode == "LOOP":
+        route_type = "CLOSED"
+        replay_mode = "ONCE" if repeat_target == 1 else "LOOP"
+    elif user_mode == "SHUTTLE":
+        route_type = "OPEN"
+        replay_mode = "RETURN"
+    else:
+        route_type = "OPEN"
+        replay_mode = "ONCE"
+    return {
+        "route_type": route_type,
+        "replay_mode": replay_mode,
+        "repeat_target": repeat_target,
+        "speed": speed,
+        "shuttle_flag": user_mode == "SHUTTLE" and repeat_target != 1,
+        "execution": execution,
+    }
+
+
+def shuttle_edges(count, cycles):
+    edges = []
+    for _ in range(cycles):
+        edges.extend((index, index + 1) for index in range(count - 1))
+        edges.extend((index, index - 1) for index in range(count - 1, 0, -1))
+    return edges
+
+
 def advance(current, direction, count, route_type, replay_mode):
     """Mirror MapController::advanceReplayAfterTarget for planner testing."""
     replay_mode = effective_mode(route_type, replay_mode)
@@ -677,7 +714,7 @@ class MapHostTests(unittest.TestCase):
         self.assertNotIn('MAP,CLOSE_CONFIRM,RESULT=CLOSED', MAP_TEXT)
         self.assertNotIn('snprintf(desired_[2], 21, "X=OPEN")', LCD_TEXT)
         self.assertNotIn('snprintf(desired_[3], 21, "O=CLOSED")', LCD_TEXT)
-        self.assertIn('candidate.header.routeType = static_cast<uint8_t>(MapRouteType::OPEN)', MAP_TEXT)
+        self.assertIn('updateRouteHeaderForSave(candidate, settingsUserMode_, normalizedTarget)', MAP_TEXT)
 
     def test_manual_open_and_closed_selection_model(self):
         points = [(0.0, 0.0), (1000.0, 0.0), (1500.0, 800.0)]
@@ -705,7 +742,7 @@ class MapHostTests(unittest.TestCase):
             'MapReplayMode::CLOSED',
             'hasValidClosingEdge',
             'MAP,MODE,CLOSE_UNAVAILABLE,REASON=',
-            'candidate.header.routeType = static_cast<uint8_t>(MapRouteType::OPEN)',
+            'updateRouteHeaderForSave(candidate, settingsUserMode_, normalizedTarget)',
         ):
             self.assertIn(token, MAP_TEXT)
         self.assertIn('status.mode != 8U', _read(INCLUDE_ROOT / 'display' / 'lcd_display.h'))
@@ -928,16 +965,16 @@ class MapHostTests(unittest.TestCase):
         current, direction, complete = advance(0, -1, 4, "OPEN", "RETURN")
         self.assertEqual((current, direction, complete), (None, -1, True))
 
-    def test_ping_pong_does_not_emit_return_phase_telemetry(self):
+    def test_shuttle_ping_emits_dedicated_phase_telemetry(self):
         advance_body = MAP_TEXT.split(
             'void MapController::advanceReplayAfterTarget', 1
         )[1].split('void MapController::enterReplayHold', 1)[0]
         turnaround = advance_body[advance_body.index(
             'replayDirection_ = -1;'
         ):]
-        self.assertIn('routeMode_ == MapReplayMode::RETURN', turnaround)
-        self.assertIn('replayReturnPhase_ = ReplayReturnPhase::NONE', turnaround)
-        self.assertIn('MAP,RETURN,TURNAROUND,WP=', turnaround)
+        self.assertIn('routeMode_ == MapReplayMode::PING_PONG', turnaround)
+        self.assertIn('replayReturnPhase_ = ReplayReturnPhase::INBOUND', turnaround)
+        self.assertIn('MAP,PING,TURNAROUND,WP=', turnaround)
 
     def test_one_canonical_route_supports_all_replay_modes(self):
         self.assertEqual(
@@ -1361,7 +1398,8 @@ class MapHostTests(unittest.TestCase):
     def test_hold_lcd_semantics(self):
         self.assertIn("uint8_t holdReason", _read(INCLUDE_ROOT / "display" / "lcd_display.h"))
         self.assertIn('"TGT:%lu TRV:%lu"', LCD_TEXT)
-        self.assertIn('"MODE:%s", replayMode', LCD_TEXT)
+        self.assertIn("writeRunMode(desired_[2])", LCD_TEXT)
+        self.assertIn('"SHUT %s CY:%lu/INF"', LCD_TEXT)
         self.assertIn('snprintf(desired_[3], 21, "X HOLD XL CANCEL")', LCD_TEXT)
 
     def test_map_settings_and_motion_capture(self):
@@ -1385,10 +1423,13 @@ class MapHostTests(unittest.TestCase):
         for token in (
             "MAP_SETTINGS_SPEED_MASK",
             "MAP_SETTINGS_LOOP_MASK",
+            "MAP_SETTINGS_SHUTTLE_REPEAT_MASK",
             "mapReplaySpeedFromReserved",
             "mapLoopTargetFromReserved",
             "mapReplaySpeedToReserved",
             "mapLoopTargetToReserved",
+            "mapShuttleRepeatFromReserved",
+            "mapShuttleRepeatToReserved",
         ):
             self.assertIn(token, TYPES_TEXT)
         self.assertEqual(_constant(TYPES_TEXT, "MAP_REPLAY_SPEED_DEFAULT"), 20)
@@ -1398,6 +1439,106 @@ class MapHostTests(unittest.TestCase):
         self.assertEqual(_constant(TYPES_TEXT, "MAP_LOOP_TARGET_MAX"), 20)
         self.assertIn("result.replaySpeed", STORE_TEXT)
         self.assertIn("result.loopTarget", STORE_TEXT)
+        self.assertIn("result.shuttleRepeat", STORE_TEXT)
+
+    def test_v521_user_mode_layer_and_execution_mapping(self):
+        self.assertIn("enum class MapUserMode", TYPES_TEXT)
+        self.assertIn("MapUserMode::ONCE", MAP_HEADER_TEXT)
+        self.assertIn("settingsUserMode_", MAP_HEADER_TEXT)
+        self.assertIn("executionModeFor", MAP_TEXT)
+        self.assertEqual(v521_execution_mode("ONCE", 1), "ONCE")
+        self.assertEqual(v521_execution_mode("SHUTTLE", 1), "RETURN")
+        self.assertEqual(v521_execution_mode("SHUTTLE", 3), "PING_PONG")
+        self.assertEqual(v521_execution_mode("SHUTTLE", 0), "PING_PONG")
+        self.assertEqual(v521_execution_mode("LOOP", 1), "CLOSED")
+        self.assertEqual(v521_execution_mode("LOOP", 3), "LOOP")
+
+    def test_v521_reserved_shuttle_flag_isolated_from_speed_and_count(self):
+        flag = _constant(TYPES_TEXT, "MAP_SETTINGS_SHUTTLE_REPEAT_MASK")
+        speed_mask = _constant(TYPES_TEXT, "MAP_SETTINGS_SPEED_MASK")
+        count_mask = _constant(TYPES_TEXT, "MAP_SETTINGS_LOOP_MASK")
+        original = 0xA5000000 | 27 | (3 << 8)
+        self.assertEqual(flag, 0x00010000)
+        marked = original | flag
+        cleared = marked & ~flag
+        self.assertEqual(marked & (speed_mask | count_mask),
+                         original & (speed_mask | count_mask))
+        self.assertEqual(cleared & (speed_mask | count_mask),
+                         original & (speed_mask | count_mask))
+        self.assertIn("mapShuttleRepeatToReserved", TYPES_TEXT)
+        self.assertIn("~MAP_SETTINGS_SHUTTLE_REPEAT_MASK", TYPES_TEXT)
+
+    def test_v521_exact_new_persistence_records(self):
+        expected = {
+            ("ONCE", 1): ("OPEN", "ONCE", False),
+            ("SHUTTLE", 1): ("OPEN", "RETURN", False),
+            ("SHUTTLE", 3): ("OPEN", "RETURN", True),
+            ("SHUTTLE", 0): ("OPEN", "RETURN", True),
+            ("LOOP", 1): ("CLOSED", "ONCE", False),
+            ("LOOP", 3): ("CLOSED", "LOOP", False),
+            ("LOOP", 0): ("CLOSED", "LOOP", False),
+        }
+        for key, persisted in expected.items():
+            record = v521_persisted_record(*key)
+            self.assertEqual((record["route_type"], record["replay_mode"],
+                              record["shuttle_flag"]), persisted)
+        self.assertNotIn('storedMode = MapReplayMode::PING_PONG', MAP_TEXT)
+        self.assertIn("storedMode = MapReplayMode::RETURN", MAP_TEXT)
+
+    def test_v521_shuttle_sequences_and_cycle_boundary(self):
+        one = shuttle_edges(4, 1)
+        two = shuttle_edges(4, 2)
+        self.assertEqual(one, [(0, 1), (1, 2), (2, 3),
+                               (3, 2), (2, 1), (1, 0)])
+        self.assertEqual(two[:len(one)], one)
+        self.assertEqual(two[len(one):], one)
+        self.assertIn("replayCycleCounter_", MAP_HEADER_TEXT)
+        self.assertIn("MAP,PING,CYCLE_COMPLETE,CYCLE=", MAP_TEXT)
+        self.assertIn("replayCycleCounter_ >= loopTarget_", MAP_TEXT)
+        self.assertIn("replayCycleCounter_ != 0xFFFFFFFFUL", MAP_TEXT)
+
+    def test_v521_shuttle_infinite_is_iterative_and_safe(self):
+        edges = shuttle_edges(3, 5)
+        self.assertEqual(len(edges), 20)
+        self.assertEqual(edges[:4], [(0, 1), (1, 2), (2, 1), (1, 0)])
+        self.assertEqual(edges[4:8], edges[:4])
+        self.assertIn("replayTargetIndex_ = 1U", MAP_TEXT)
+        self.assertIn("replayReturnPhase_ = ReplayReturnPhase::OUTBOUND", MAP_TEXT)
+        self.assertIn("MAP,PING,PHASE=OUT,CYCLE=", MAP_TEXT)
+        self.assertNotIn("startNextReplaySegment();", MAP_TEXT[MAP_TEXT.index(
+            "void MapController::advanceReplayAfterTarget"):MAP_TEXT.index(
+            "void MapController::enterReplayHold")])
+
+    def test_v521_mode_cycle_and_count_semantics(self):
+        self.assertIn("MapUserMode::ONCE, MapUserMode::SHUTTLE, MapUserMode::LOOP",
+                      MAP_TEXT)
+        self.assertIn("settingsRepeatTarget_", MAP_TEXT)
+        self.assertIn("settingsUserMode_ == MapUserMode::ONCE", MAP_TEXT)
+        self.assertIn('">COUNT:--"', LCD_TEXT)
+        self.assertIn('">CYCLE:INF"', LCD_TEXT)
+        self.assertIn('">LAP:INF"', LCD_TEXT)
+
+    def test_v521_legacy_load_and_safe_degrade_contract(self):
+        # Legacy records remain readable, while only new shuttle records use
+        # OPEN+RETURN plus the marker rather than persisted PING_PONG.
+        self.assertIn("mode == MapReplayMode::PING_PONG", MAP_TEXT)
+        self.assertIn("Legacy PING_PONG is always infinite", MAP_TEXT)
+        self.assertIn("mapShuttleRepeatFromReserved", MAP_TEXT)
+        self.assertIn("mode == MapReplayMode::RETURN", MAP_TEXT)
+        self.assertIn("shuttleRepeat ? encodedTarget", MAP_TEXT)
+        self.assertIn("MapReplayMode::RETURN", STORE_TEXT)
+
+    def test_v521_user_ui_hides_legacy_mode_names(self):
+        self.assertNotIn('"RETURN GO + BACK"', LCD_TEXT)
+        self.assertNotIn('"CLOSED CLOSE ONCE"', LCD_TEXT)
+        self.assertNotIn('"MODE:RETURN"', LCD_TEXT)
+        self.assertNotIn('"MODE:PING"', LCD_TEXT)
+        self.assertNotIn('"MODE:CLOSED"', LCD_TEXT)
+        for line in (
+            "MODE:ONCE", "MODE:SHUTTLE CY:INF", "MODE:LOOP LAP:INF",
+            "SHUT OUT CY:%lu/INF", "SHUT BACK CY:%lu/INF",
+        ):
+            self.assertLessEqual(len(line), 20)
 
     def test_return_phase_and_storage_encoding_are_runtime_only(self):
         for token in (
@@ -1487,8 +1628,8 @@ class MapHostTests(unittest.TestCase):
         self.assertIn("MAP_REPLAY_SPEED_MAX", MAP_TEXT)
         self.assertIn("MAP_REPLAY_SPEED_STEP", MAP_TEXT)
         self.assertIn("MAP_LOOP_TARGET_INF", MAP_TEXT)
-        self.assertIn("settingsMode_ != MapReplayMode::LOOP", MAP_TEXT)
-        self.assertIn("settingsLoopTarget_ = settingsLoopTarget_ == MAP_LOOP_TARGET_MAX", MAP_TEXT)
+        self.assertIn("settingsUserMode_ == MapUserMode::ONCE", MAP_TEXT)
+        self.assertIn("settingsRepeatTarget_ = settingsRepeatTarget_ == MAP_LOOP_TARGET_MAX", MAP_TEXT)
 
     def test_TEST_SETTINGS_NO_CHANGE_NO_FLASH_WRITE(self):
         start = MAP_TEXT.index("void MapController::saveSettingsAndExit")
@@ -1497,7 +1638,7 @@ class MapHostTests(unittest.TestCase):
         no_change_start = block.index("const bool settingsChanged")
         candidate_start = block.index("MapRouteData candidate")
         no_change = block[no_change_start:candidate_start]
-        self.assertIn("settingsMode_ != routeMode_", no_change)
+        self.assertIn("settingsUserMode_ != userMode_", no_change)
         self.assertIn('MAP,SETTINGS,SAVE=NO_CHANGE', no_change)
         self.assertNotIn("store_.save", no_change)
 
@@ -1514,9 +1655,9 @@ class MapHostTests(unittest.TestCase):
     def test_TEST_SETTINGS_HELP_NO_CHANGE(self):
         self.assertIn("enterHelp()", MAP_TEXT)
         self.assertIn("leaveHelp()", MAP_TEXT)
-        self.assertIn("settingsMode_ = routeMode_", MAP_TEXT)
+        self.assertIn("settingsUserMode_ = userMode_", MAP_TEXT)
         self.assertIn("settingsSpeed_ = replaySpeed_", MAP_TEXT)
-        self.assertIn("settingsLoopTarget_ = loopTarget_", MAP_TEXT)
+        self.assertIn("settingsRepeatTarget_ = loopTarget_", MAP_TEXT)
 
     def test_TEST_SETTINGS_NAV_NO_CHANGE(self):
         settings_start = MAP_TEXT.index("void MapController::handleSettingsInput")
@@ -1530,7 +1671,7 @@ class MapHostTests(unittest.TestCase):
 
     def test_TEST_SETTINGS_CHANGED_THEN_REVERT_NO_CHANGE(self):
         self.assertIn("settingsSpeed_ != replaySpeed_", MAP_TEXT)
-        self.assertIn("settingsLoopTarget_ != loopTarget_", MAP_TEXT)
+        self.assertIn("normalizedTarget != loopTarget_", MAP_TEXT)
         self.assertNotIn("settingsDirty_", MAP_TEXT)
 
     def test_TEST_SETTINGS_CHANGED_WRITE_ONCE(self):
@@ -1723,8 +1864,10 @@ class MapHostTests(unittest.TestCase):
     def test_lcd_map_lines_match_settings_loop_and_delete_ux(self):
         for token in (
             '"TGT:%lu TRV:%lu"',
-            '"MODE:LOOP LAP:0/INF"',
+            '"MODE:SHUTTLE CY:INF"',
+            '"MODE:LOOP LAP:INF"',
             '"MODE:LOOP LAP:%lu/%u"',
+            '"SHUT %s CY:%lu/INF"',
             '"MAP%u RUN WP:%02u/%02u"',
             '"UD/LR EDIT TRI HELP"',
             '"START RES XL CANCEL"',
@@ -1733,8 +1876,8 @@ class MapHostTests(unittest.TestCase):
             '"O YES"',
             '"X NO"',
             '"MAP%u HELP %u/3"',
-            '"RETURN GO + BACK"',
-            '"CLOSED CLOSE ONCE"',
+            '"SHUTTLE GO/BACK"',
+            '"LOOP REPEAT LAPS"',
             '"LOOP CLOSE REPEAT"',
             'helpPage <= 2U ? helpPage : 0U',
         ):
@@ -1744,19 +1887,13 @@ class MapHostTests(unittest.TestCase):
 
     def test_loop_move_lcd_lap(self):
         self.assertIn("status.replayOperation == 1U", LCD_TEXT)
-        move_block = LCD_TEXT[LCD_TEXT.index("status.replayOperation == 1U"):]
-        self.assertIn('"MAP%u RUN WP:%02u/%02u"', move_block)
-        self.assertIn('"MODE:LOOP LAP:%lu/%u"', move_block)
+        self.assertIn('"MAP%u RUN WP:%02u/%02u"', LCD_TEXT)
+        self.assertIn('"MODE:LOOP LAP:%lu/%u"', LCD_TEXT)
 
     def test_loop_turn_lcd_lap(self):
-        self.assertIn("status.replayOperation == 2U", LCD_TEXT)
-        turn_start = LCD_TEXT.index("status.replayOperation == 2U")
-        turn_end = LCD_TEXT.index("if (status.mode == 7U)", turn_start)
-        turn_block = LCD_TEXT[turn_start:turn_end]
-        self.assertIn('"MAP%u RUN WP:%02u/%02u"', turn_block)
-        self.assertIn('"TURN %+ddeg"', turn_block)
-        self.assertIn('"MODE:LOOP LAP:%lu/%u"', turn_block)
-        self.assertNotIn('"MAP%u TURN WP:%02u/%02u"', turn_block)
+        self.assertIn('"TURN %+ddeg"', LCD_TEXT)
+        self.assertIn('writeRunMode(desired_[2])', LCD_TEXT)
+        self.assertNotIn('"MAP%u TURN WP:%02u/%02u"', LCD_TEXT)
 
     def test_loop_realign_lcd_lap(self):
         self.assertIn('"MODE:LOOP LAP:%lu/%u"', LCD_TEXT)
@@ -1765,11 +1902,9 @@ class MapHostTests(unittest.TestCase):
         self.assertNotIn('"MAP%u TURN WP:%02u/%02u"', LCD_TEXT)
 
     def test_once_turn_no_lap(self):
-        turn_start = LCD_TEXT.index("status.replayOperation == 2U")
-        turn_end = LCD_TEXT.index("if (status.mode == 7U)", turn_start)
-        turn_block = LCD_TEXT[turn_start:turn_end]
-        self.assertIn('"MODE:%s", activeMode', turn_block)
-        self.assertNotIn('"MODE:ONCE LAP:', turn_block)
+        self.assertIn('snprintf(line, 21, "MODE:ONCE")', LCD_TEXT)
+        self.assertIn('status.userMode == 0U', LCD_TEXT)
+        self.assertNotIn('"MODE:ONCE LAP:', LCD_TEXT)
 
     def test_settings_tri_help_visible(self):
         self.assertIn('"UD/LR EDIT TRI HELP"', LCD_TEXT)
@@ -1780,8 +1915,8 @@ class MapHostTests(unittest.TestCase):
         for line in (
             "UD/LR EDIT TRI HELP",
             "ONCE ONE WAY",
-            "RETURN GO + BACK",
-            "CLOSED CLOSE ONCE",
+            "SHUTTLE GO/BACK",
+            "LOOP REPEAT LAPS",
             "LOOP CLOSE REPEAT",
             "X HOLD XL CANCEL",
             "TRI NEXT X BACK",

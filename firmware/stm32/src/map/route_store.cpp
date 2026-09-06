@@ -170,6 +170,7 @@ MapSlotMetadata MapRouteStore::metadata(MapSlot slot) const {
     result.generation = header.generation;
     result.replaySpeed = mapReplaySpeedFromReserved(header.reserved);
     result.loopTarget = mapLoopTargetFromReserved(header.reserved);
+    result.shuttleRepeat = mapShuttleRepeatFromReserved(header.reserved);
     return result;
   }
 

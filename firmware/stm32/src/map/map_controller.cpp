@@ -119,6 +119,74 @@ const char* MapController::returnPhaseName(ReplayReturnPhase phase) {
   return "NONE";
 }
 
+MapReplayMode MapController::executionModeFor(MapUserMode mode,
+                                              uint8_t repeatTarget) {
+  switch (mode) {
+    case MapUserMode::ONCE:
+      return MapReplayMode::ONCE;
+    case MapUserMode::SHUTTLE:
+      return repeatTarget == MAP_LOOP_TARGET_MIN ? MapReplayMode::RETURN
+                                                 : MapReplayMode::PING_PONG;
+    case MapUserMode::LOOP:
+      return repeatTarget == MAP_LOOP_TARGET_MIN ? MapReplayMode::CLOSED
+                                                 : MapReplayMode::LOOP;
+  }
+  return MapReplayMode::ONCE;
+}
+
+MapUserMode MapController::userModeFromStored(MapRouteType type,
+                                               MapReplayMode mode,
+                                               bool shuttleRepeat) {
+  (void)shuttleRepeat;
+  if (type == MapRouteType::CLOSED || mode == MapReplayMode::CLOSED) {
+    return MapUserMode::LOOP;
+  }
+  if (mode == MapReplayMode::RETURN || mode == MapReplayMode::PING_PONG) {
+    return MapUserMode::SHUTTLE;
+  }
+  if (mode == MapReplayMode::LOOP) {
+    // Accept the experimental OPEN+LOOP representation from older builds.
+    return MapUserMode::LOOP;
+  }
+  return MapUserMode::ONCE;
+}
+
+const char* MapController::userModeName(MapUserMode mode) {
+  switch (mode) {
+    case MapUserMode::ONCE: return "ONCE";
+    case MapUserMode::SHUTTLE: return "SHUTTLE";
+    case MapUserMode::LOOP: return "LOOP";
+  }
+  return "ONCE";
+}
+
+bool MapController::userModeNeedsClosingEdge(MapUserMode mode) {
+  return mode == MapUserMode::LOOP;
+}
+
+void MapController::applyStoredSettings(MapRouteType type, MapReplayMode mode,
+                                         bool shuttleRepeat,
+                                         uint8_t encodedTarget) {
+  userMode_ = userModeFromStored(type, mode, shuttleRepeat);
+  if (type == MapRouteType::CLOSED || mode == MapReplayMode::CLOSED) {
+    loopTarget_ = mode == MapReplayMode::LOOP ? encodedTarget
+                                              : MAP_LOOP_TARGET_MIN;
+  } else if (mode == MapReplayMode::RETURN) {
+    loopTarget_ = shuttleRepeat ? encodedTarget : MAP_LOOP_TARGET_MIN;
+  } else if (mode == MapReplayMode::PING_PONG) {
+    // Legacy PING_PONG is always infinite.
+    userMode_ = MapUserMode::SHUTTLE;
+    loopTarget_ = MAP_LOOP_TARGET_INF;
+  } else if (mode == MapReplayMode::LOOP) {
+    loopTarget_ = encodedTarget;
+  } else {
+    loopTarget_ = MAP_LOOP_TARGET_MIN;
+  }
+  routeMode_ = mode == MapReplayMode::PING_PONG
+                   ? MapReplayMode::PING_PONG
+                   : executionModeFor(userMode_, loopTarget_);
+}
+
 void MapController::begin() {
   ps2_.setMapUiCapture(false);
   if (!store_.begin()) {
@@ -133,11 +201,15 @@ void MapController::begin() {
   const MapSlotMetadata metadata = store_.metadata(selectedSlot_);
   storeState_ = metadata.state;
   routeType_ = MapRouteType::OPEN;
-  routeMode_ = IsReplayModeAllowed(metadata.routeType, metadata.replayMode)
-                   ? EffectiveReplayMode(metadata.routeType, metadata.replayMode)
-                   : MapReplayMode::ONCE;
   replaySpeed_ = metadata.replaySpeed;
-  loopTarget_ = metadata.loopTarget;
+  if (IsReplayModeAllowed(metadata.routeType, metadata.replayMode)) {
+    applyStoredSettings(metadata.routeType, metadata.replayMode,
+                        metadata.shuttleRepeat, metadata.loopTarget);
+  } else {
+    userMode_ = MapUserMode::ONCE;
+    routeMode_ = MapReplayMode::ONCE;
+    loopTarget_ = MAP_LOOP_TARGET_MIN;
+  }
   mode_ = metadata.state == MapStoreState::SAVED
               ? MapControllerMode::SAVED
               : MapControllerMode::READY;
@@ -253,11 +325,15 @@ void MapController::handleSlot(uint8_t slot) {
   const MapSlotMetadata metadata = store_.metadata(selectedSlot_);
   storeState_ = metadata.state;
   routeType_ = MapRouteType::OPEN;
-  routeMode_ = IsReplayModeAllowed(metadata.routeType, metadata.replayMode)
-                   ? EffectiveReplayMode(metadata.routeType, metadata.replayMode)
-                   : MapReplayMode::ONCE;
   replaySpeed_ = metadata.replaySpeed;
-  loopTarget_ = metadata.loopTarget;
+  if (IsReplayModeAllowed(metadata.routeType, metadata.replayMode)) {
+    applyStoredSettings(metadata.routeType, metadata.replayMode,
+                        metadata.shuttleRepeat, metadata.loopTarget);
+  } else {
+    userMode_ = MapUserMode::ONCE;
+    routeMode_ = MapReplayMode::ONCE;
+    loopTarget_ = MAP_LOOP_TARGET_MIN;
+  }
   storageErrorReason_ = MapStorageErrorReason::NONE;
   mode_ = metadata.state == MapStoreState::SAVED
               ? MapControllerMode::SAVED
@@ -307,11 +383,9 @@ bool MapController::enterSettings(const char*& reason) {
     return false;
   }
   settingsItem_ = MapSettingsItem::MODE;
-  settingsMode_ = routeMode_ == MapReplayMode::PING_PONG
-                      ? MapReplayMode::ONCE
-                      : routeMode_;
+  settingsUserMode_ = userMode_;
   settingsSpeed_ = replaySpeed_;
-  settingsLoopTarget_ = loopTarget_;
+  settingsRepeatTarget_ = loopTarget_;
   helpPage_ = 0U;
   mode_ = MapControllerMode::SETTINGS;
   // Entering Settings is itself a safety boundary. It is currently allowed
@@ -333,15 +407,19 @@ void MapController::leaveMapUiCapture() {
 void MapController::saveSettingsAndExit() {
   if (mode_ != MapControllerMode::SETTINGS) return;
   const char* modeReason = nullptr;
-  if (!IsReplayModeAllowed(MapRouteType::OPEN, settingsMode_) ||
-      (IsClosingMode(settingsMode_) &&
-       !hasValidClosingEdge(route_, modeReason))) {
+  if (userModeNeedsClosingEdge(settingsUserMode_) &&
+      !hasValidClosingEdge(route_, modeReason)) {
     debug_.println("MAP,SETTINGS,SAVE,REJECT=MODE");
     return;
   }
-  const bool settingsChanged = settingsMode_ != routeMode_ ||
+  const uint8_t normalizedTarget = settingsUserMode_ == MapUserMode::ONCE
+                                       ? MAP_LOOP_TARGET_MIN
+                                       : settingsRepeatTarget_;
+  const MapReplayMode settingsExecution =
+      executionModeFor(settingsUserMode_, normalizedTarget);
+  const bool settingsChanged = settingsUserMode_ != userMode_ ||
                                settingsSpeed_ != replaySpeed_ ||
-                               settingsLoopTarget_ != loopTarget_;
+                               normalizedTarget != loopTarget_;
   if (!settingsChanged) {
     storeState_ = MapStoreState::SAVED;
     storageErrorReason_ = MapStorageErrorReason::NONE;
@@ -353,17 +431,17 @@ void MapController::saveSettingsAndExit() {
   }
   MapRouteData candidate = route_;
   // The route geometry remains canonical one-map data. Storage encoding is
-  // applied by updateRouteHeaderForSave() so V5.2.9 can read every mode.
-  candidate.header.routeType = static_cast<uint8_t>(MapRouteType::OPEN);
-  candidate.header.replayMode = static_cast<uint8_t>(settingsMode_);
+  // applied by updateRouteHeaderForSave() so V5.2.10 can read every mode.
   const MapReplayMode oldMode = routeMode_;
+  const MapUserMode oldUserMode = userMode_;
   const int16_t oldSpeed = replaySpeed_;
   const uint8_t oldLoopTarget = loopTarget_;
   replaySpeed_ = settingsSpeed_;
-  loopTarget_ = settingsLoopTarget_;
-  updateRouteHeaderForSave(candidate);
+  loopTarget_ = normalizedTarget;
+  updateRouteHeaderForSave(candidate, settingsUserMode_, normalizedTarget);
   if (!store_.save(selectedSlot_, candidate)) {
     routeMode_ = oldMode;
+    userMode_ = oldUserMode;
     replaySpeed_ = oldSpeed;
     loopTarget_ = oldLoopTarget;
     storeState_ = MapStoreState::STORAGE_ERROR;
@@ -375,20 +453,23 @@ void MapController::saveSettingsAndExit() {
     return;
   }
   route_ = candidate;
-  normalizeRouteForRuntime(route_, settingsMode_);
+  normalizeRouteForRuntime(route_, settingsExecution);
   routeType_ = MapRouteType::OPEN;
-  routeMode_ = settingsMode_;
+  userMode_ = settingsUserMode_;
+  routeMode_ = settingsExecution;
   replaySpeed_ = settingsSpeed_;
-  loopTarget_ = settingsLoopTarget_;
+  loopTarget_ = normalizedTarget;
   loadedValid_ = true;
   storeState_ = MapStoreState::SAVED;
   storageErrorReason_ = MapStorageErrorReason::NONE;
   mode_ = MapControllerMode::SAVED;
   debug_.print("MAP,SETTINGS,SAVE=OK,MODE=");
+  debug_.print(userModeName(userMode_));
+  debug_.print(",EXEC=");
   debug_.print(MapRouteStore::replayModeName(routeMode_));
   debug_.print(",SPEED=");
   debug_.print(replaySpeed_);
-  debug_.print(",LAP=");
+  debug_.print(",COUNT=");
   if (loopTarget_ == MAP_LOOP_TARGET_INF) {
     debug_.println("INF");
   } else {
@@ -433,32 +514,28 @@ void MapController::cycleSettingsMode(int8_t direction) {
   if (direction == 0) return;
   const char* closeReason = nullptr;
   const bool closeAvailable = hasValidClosingEdge(route_, closeReason);
-  if (settingsMode_ == MapReplayMode::PING_PONG) {
-    settingsMode_ = MapReplayMode::ONCE;
-  }
   if (closeAvailable) {
-    constexpr MapReplayMode kModes[] = {
-        MapReplayMode::ONCE, MapReplayMode::RETURN, MapReplayMode::CLOSED,
-        MapReplayMode::LOOP};
+    constexpr MapUserMode kModes[] = {
+        MapUserMode::ONCE, MapUserMode::SHUTTLE, MapUserMode::LOOP};
     int index = 0;
-    for (int i = 0; i < 4; ++i) {
-      if (kModes[i] == settingsMode_) {
+    for (int i = 0; i < 3; ++i) {
+      if (kModes[i] == settingsUserMode_) {
         index = i;
         break;
       }
     }
-    index = (index + (direction > 0 ? 1 : 3)) % 4;
-    settingsMode_ = kModes[index];
+    index = (index + (direction > 0 ? 1 : 2)) % 3;
+    settingsUserMode_ = kModes[index];
     return;
   }
-  if ((direction > 0 && settingsMode_ == MapReplayMode::RETURN) ||
-      (direction < 0 && settingsMode_ == MapReplayMode::ONCE)) {
+  if ((direction > 0 && settingsUserMode_ == MapUserMode::SHUTTLE) ||
+      (direction < 0 && settingsUserMode_ == MapUserMode::ONCE)) {
     debug_.print("MAP,MODE,CLOSE_UNAVAILABLE,REASON=");
     debug_.println(closeReason != nullptr ? closeReason : "CLOSURE");
   }
-  settingsMode_ = settingsMode_ == MapReplayMode::ONCE
-                      ? MapReplayMode::RETURN
-                      : MapReplayMode::ONCE;
+  settingsUserMode_ = settingsUserMode_ == MapUserMode::ONCE
+                          ? MapUserMode::SHUTTLE
+                          : MapUserMode::ONCE;
 }
 
 void MapController::cycleSettingsSpeed(int8_t direction) {
@@ -469,17 +546,17 @@ void MapController::cycleSettingsSpeed(int8_t direction) {
 }
 
 void MapController::cycleSettingsLap(int8_t direction) {
-  if (settingsMode_ != MapReplayMode::LOOP || direction == 0) return;
+  if (settingsUserMode_ == MapUserMode::ONCE || direction == 0) return;
   if (direction > 0) {
-    settingsLoopTarget_ = settingsLoopTarget_ == MAP_LOOP_TARGET_MAX
-                              ? MAP_LOOP_TARGET_INF
-                              : settingsLoopTarget_ + 1U;
+    settingsRepeatTarget_ = settingsRepeatTarget_ == MAP_LOOP_TARGET_MAX
+                                 ? MAP_LOOP_TARGET_INF
+                                 : settingsRepeatTarget_ + 1U;
   } else {
-    settingsLoopTarget_ = settingsLoopTarget_ == MAP_LOOP_TARGET_INF
-                              ? MAP_LOOP_TARGET_MAX
-                              : settingsLoopTarget_ <= MAP_LOOP_TARGET_MIN
-                                  ? MAP_LOOP_TARGET_INF
-                                  : settingsLoopTarget_ - 1U;
+    settingsRepeatTarget_ = settingsRepeatTarget_ == MAP_LOOP_TARGET_INF
+                                 ? MAP_LOOP_TARGET_MAX
+                                 : settingsRepeatTarget_ <= MAP_LOOP_TARGET_MIN
+                                     ? MAP_LOOP_TARGET_INF
+                                     : settingsRepeatTarget_ - 1U;
   }
 }
 
@@ -513,7 +590,7 @@ void MapController::handleSettingsInput(Ps2MapAction action) {
         cycleSettingsMode(-1);
       } else if (settingsItem_ == MapSettingsItem::SPEED) {
         cycleSettingsSpeed(-1);
-      } else if (settingsItem_ == MapSettingsItem::LAP) {
+      } else if (settingsItem_ == MapSettingsItem::COUNT) {
         cycleSettingsLap(-1);
       }
       break;
@@ -522,7 +599,7 @@ void MapController::handleSettingsInput(Ps2MapAction action) {
         cycleSettingsMode(1);
       } else if (settingsItem_ == MapSettingsItem::SPEED) {
         cycleSettingsSpeed(1);
-      } else if (settingsItem_ == MapSettingsItem::LAP) {
+      } else if (settingsItem_ == MapSettingsItem::COUNT) {
         cycleSettingsLap(1);
       } else if (settingsCanDelete()) {
         mode_ = MapControllerMode::DELETE_CONFIRM;
@@ -599,6 +676,13 @@ void MapController::handleStart() {
         debug_.print(returnPhaseName(replayReturnPhase_));
         debug_.print(",WP=");
         debug_.println(static_cast<unsigned>(replayTargetIndex_));
+      } else if (routeMode_ == MapReplayMode::PING_PONG) {
+        debug_.print("MAP,PING,RESUME,PHASE=");
+        debug_.print(returnPhaseName(replayReturnPhase_));
+        debug_.print(",CYCLE=");
+        debug_.print(replayCycleCounter_ + 1U);
+        debug_.print(",WP=");
+        debug_.println(static_cast<unsigned>(replayTargetIndex_));
       }
     } else {
       const char* reason = rejectReason != nullptr ? rejectReason
@@ -620,6 +704,14 @@ void MapController::handleStart() {
       debug_.print("MAP,RETURN,START,POINTS=");
       debug_.println(static_cast<unsigned>(route_.header.waypointCount));
       debug_.println("MAP,RETURN,PHASE=OUT");
+    } else if (routeMode_ == MapReplayMode::PING_PONG) {
+      debug_.print("MAP,PING,START,CYCLE_TARGET=");
+      if (loopTarget_ == MAP_LOOP_TARGET_INF) {
+        debug_.println("INF");
+      } else {
+        debug_.println(static_cast<unsigned>(loopTarget_));
+      }
+      debug_.println("MAP,PING,PHASE=OUT,CYCLE=1");
     }
   } else {
     logStartReject(reason != nullptr ? reason : "PRECHECK");
@@ -791,14 +883,17 @@ bool MapController::loadSelected() {
   const MapReplayMode storedMode =
       static_cast<MapReplayMode>(route_.header.replayMode);
   routeType_ = MapRouteType::OPEN;
-  routeMode_ = EffectiveReplayMode(storedType, storedMode);
+  const uint8_t encodedTarget =
+      mapLoopTargetFromReserved(route_.header.reserved);
+  applyStoredSettings(storedType, storedMode,
+                      mapShuttleRepeatFromReserved(route_.header.reserved),
+                      encodedTarget);
   // Normalize the compatibility representation in RAM. Flash remains in the
   // V5.2.9-readable encoding unless a real setting change is saved.
   route_.header.routeType = static_cast<uint8_t>(MapRouteType::OPEN);
   route_.header.replayMode = static_cast<uint8_t>(routeMode_);
   route_.header.routeLengthMm = routeLengthMm(route_);
   replaySpeed_ = mapReplaySpeedFromReserved(route_.header.reserved);
-  loopTarget_ = mapLoopTargetFromReserved(route_.header.reserved);
   storageErrorReason_ = MapStorageErrorReason::NONE;
   mode_ = MapControllerMode::SAVED;
   return true;
@@ -826,9 +921,10 @@ bool MapController::beginTeach() {
   route_ = {};
   route_.header.waypointCount = 0U;
   routeType_ = MapRouteType::OPEN;
+  userMode_ = MapUserMode::ONCE;
   routeMode_ = MapReplayMode::ONCE;
   replaySpeed_ = MAP_REPLAY_SPEED_DEFAULT;
-  loopTarget_ = MAP_LOOP_TARGET_INF;
+  loopTarget_ = MAP_LOOP_TARGET_MIN;
   closeCandidateDistanceMm_ = 0U;
   closeCandidateHeadingDeg_ = 0;
   const Pose localOrigin{};
@@ -1118,6 +1214,7 @@ bool MapController::finalizeTeach() {
     closeCandidateDistanceMm_ = static_cast<uint32_t>(lroundf(closeDistance));
     closeCandidateHeadingDeg_ = static_cast<int16_t>(lroundf(closeHeading));
     routeType_ = MapRouteType::OPEN;
+    userMode_ = MapUserMode::ONCE;
     routeMode_ = MapReplayMode::ONCE;
     route_.header.routeType = static_cast<uint8_t>(routeType_);
     route_.header.replayMode = static_cast<uint8_t>(routeMode_);
@@ -1263,11 +1360,22 @@ MapReplayMode MapController::persistedReplayMode(MapReplayMode mode) {
   return mode == MapReplayMode::CLOSED ? MapReplayMode::ONCE : mode;
 }
 
-void MapController::updateRouteHeaderForSave(MapRouteData& route) const {
-  const MapReplayMode runtimeMode =
-      static_cast<MapReplayMode>(route.header.replayMode);
-  const MapRouteType storedType = persistedRouteType(runtimeMode);
-  const MapReplayMode storedMode = persistedReplayMode(runtimeMode);
+void MapController::updateRouteHeaderForSave(MapRouteData& route,
+                                             MapUserMode userMode,
+                                             uint8_t repeatTarget) const {
+  const MapRouteType storedType = userMode == MapUserMode::LOOP
+                                      ? MapRouteType::CLOSED
+                                      : MapRouteType::OPEN;
+  MapReplayMode storedMode = MapReplayMode::ONCE;
+  if (userMode == MapUserMode::SHUTTLE) {
+    // New records deliberately use OPEN+RETURN for every shuttle count. The
+    // marker bit makes multi-cycle shuttle records degrade safely to one
+    // RETURN on V5.2.10 instead of becoming legacy infinite PING_PONG.
+    storedMode = MapReplayMode::RETURN;
+  } else if (userMode == MapUserMode::LOOP &&
+             repeatTarget != MAP_LOOP_TARGET_MIN) {
+    storedMode = MapReplayMode::LOOP;
+  }
   route.header.slot = static_cast<uint8_t>(selectedSlot_);
   route.header.waypointCount =
       constrain(route.header.waypointCount, 0U, STM32_MAP_MAX_WAYPOINTS);
@@ -1279,7 +1387,14 @@ void MapController::updateRouteHeaderForSave(MapRouteData& route) const {
   route.header.reserved = mapReplaySpeedToReserved(
       route.header.reserved, replaySpeed_);
   route.header.reserved = mapLoopTargetToReserved(
-      route.header.reserved, loopTarget_);
+      route.header.reserved, repeatTarget);
+  route.header.reserved = mapShuttleRepeatToReserved(
+      route.header.reserved,
+      userMode == MapUserMode::SHUTTLE && repeatTarget != MAP_LOOP_TARGET_MIN);
+}
+
+void MapController::updateRouteHeaderForSave(MapRouteData& route) const {
+  updateRouteHeaderForSave(route, userMode_, loopTarget_);
 }
 
 void MapController::normalizeRouteForRuntime(MapRouteData& route,
@@ -1435,10 +1550,12 @@ bool MapController::prepareReplay(const char*& rejectReason) {
   replayTargetIndex_ = 1U;
   replayDirection_ = 1;
   replayReturned_ = false;
-  replayReturnPhase_ = routeMode_ == MapReplayMode::RETURN
+  replayReturnPhase_ = (routeMode_ == MapReplayMode::RETURN ||
+                        routeMode_ == MapReplayMode::PING_PONG)
                            ? ReplayReturnPhase::OUTBOUND
                            : ReplayReturnPhase::NONE;
   replayLapCounter_ = 0U;
+  replayCycleCounter_ = 0U;
   replayOriginRouteGeneration_ = route_.header.generation;
   replayTargetDistanceMm_ = 0U;
   replayTargetDeg_ = 0;
@@ -1778,13 +1895,24 @@ void MapController::advanceReplayAfterTarget() {
     }
     replayDirection_ = -1;
     replayReturned_ = true;
-    if (routeMode_ == MapReplayMode::RETURN) {
+    if (routeMode_ == MapReplayMode::RETURN ||
+        routeMode_ == MapReplayMode::PING_PONG) {
       replayReturnPhase_ = ReplayReturnPhase::INBOUND;
-      debug_.print("MAP,RETURN,TURNAROUND,WP=");
+      const bool ping = routeMode_ == MapReplayMode::PING_PONG;
+      debug_.print(ping ? "MAP,PING,TURNAROUND,WP="
+                       : "MAP,RETURN,TURNAROUND,WP=");
       debug_.println(static_cast<unsigned>(replayCurrentIndex_));
-      debug_.print("MAP,RETURN,PHASE=BACK,FROM=");
-      debug_.print(static_cast<unsigned>(replayCurrentIndex_));
-      debug_.print(",TO=");
+      debug_.print(ping ? "MAP,PING,PHASE=BACK,CYCLE="
+                       : "MAP,RETURN,PHASE=BACK,FROM=");
+      if (ping) debug_.print(replayCycleCounter_ + 1U);
+      if (!ping) {
+        debug_.print(static_cast<unsigned>(replayCurrentIndex_));
+        debug_.print(",TO=");
+      } else {
+        debug_.print(",FROM=");
+        debug_.print(static_cast<unsigned>(replayCurrentIndex_));
+        debug_.print(",TO=");
+      }
       debug_.println(static_cast<unsigned>(count - 2U));
     } else {
       replayReturnPhase_ = ReplayReturnPhase::NONE;
@@ -1799,6 +1927,25 @@ void MapController::advanceReplayAfterTarget() {
   }
   if (routeMode_ == MapReplayMode::RETURN) {
     completeReplay();
+    return;
+  }
+  if (routeMode_ == MapReplayMode::PING_PONG) {
+    if (replayCycleCounter_ != 0xFFFFFFFFUL) ++replayCycleCounter_;
+    debug_.print("MAP,PING,CYCLE_COMPLETE,CYCLE=");
+    debug_.println(replayCycleCounter_);
+    if (loopTarget_ != MAP_LOOP_TARGET_INF &&
+        replayCycleCounter_ >= loopTarget_) {
+      debug_.print("MAP,PING,TARGET_REACHED,CYCLE=");
+      debug_.println(replayCycleCounter_);
+      completeReplay();
+      return;
+    }
+    replayDirection_ = 1;
+    replayReturned_ = false;
+    replayReturnPhase_ = ReplayReturnPhase::OUTBOUND;
+    replayTargetIndex_ = 1U;
+    debug_.print("MAP,PING,PHASE=OUT,CYCLE=");
+    debug_.println(replayCycleCounter_ + 1U);
     return;
   }
   replayDirection_ = 1;
@@ -1838,6 +1985,13 @@ void MapController::enterReplayHold(MapHoldReason reason, bool allowResume) {
     debug_.print(returnPhaseName(replayReturnPhase_));
     debug_.print(",WP=");
     debug_.println(static_cast<unsigned>(replayTargetIndex_));
+  } else if (routeMode_ == MapReplayMode::PING_PONG) {
+    debug_.print("MAP,PING,HOLD,PHASE=");
+    debug_.print(returnPhaseName(replayReturnPhase_));
+    debug_.print(",CYCLE=");
+    debug_.print(replayCycleCounter_ + 1U);
+    debug_.print(",WP=");
+    debug_.println(static_cast<unsigned>(replayTargetIndex_));
   }
 }
 
@@ -1855,10 +2009,13 @@ void MapController::abortReplay(const char* reason) {
 
 void MapController::completeReplay() {
   const uint32_t completedLap = replayLapCounter_;
+  const uint32_t completedCycle = replayCycleCounter_;
   const bool wasReturn = routeMode_ == MapReplayMode::RETURN;
+  const bool wasPing = routeMode_ == MapReplayMode::PING_PONG;
   nextReplayGeneration();
   clearReplayResumeContext();
   replayLapCounter_ = completedLap;
+  replayCycleCounter_ = completedCycle;
   replayActive_ = false;
   replayReason_ = "DONE";
   mode_ = MapControllerMode::REPLAY_COMPLETE;
@@ -1867,12 +2024,16 @@ void MapController::completeReplay() {
   if (wasReturn) {
     debug_.println("MAP,RETURN,COMPLETE,WP=0");
     debug_.println("MAP,RETURN,PHASE=NONE");
+  } else if (wasPing) {
+    debug_.print("MAP,PING,COMPLETE,CYCLES=");
+    debug_.println(replayCycleCounter_);
   }
 }
 
 void MapController::cancelReplay(const char* reason) {
   const bool wasClosedLoop = routeMode_ == MapReplayMode::LOOP;
   const bool wasReturn = routeMode_ == MapReplayMode::RETURN;
+  const bool wasPing = routeMode_ == MapReplayMode::PING_PONG;
   const ReplayReturnPhase cancelledReturnPhase = replayReturnPhase_;
   const uint32_t cancelledLap = replayLapCounter_;
   robot_.stopImmediately(true);
@@ -1892,6 +2053,11 @@ void MapController::cancelReplay(const char* reason) {
   } else if (wasReturn) {
     debug_.print("MAP,RETURN,CANCEL,PHASE=");
     debug_.println(returnPhaseName(cancelledReturnPhase));
+  } else if (wasPing) {
+    debug_.print("MAP,PING,CANCEL,PHASE=");
+    debug_.print(returnPhaseName(cancelledReturnPhase));
+    debug_.print(",CYCLE=");
+    debug_.println(replayCycleCounter_ + 1U);
   }
   debug_.println("MAP,REPLAY_CANCEL");
   beginCancelTrace();
@@ -1921,6 +2087,7 @@ void MapController::clearReplayResumeContext() {
   replayTravelMm_ = 0U;
   replayErrorMm_ = 0U;
   replayLapCounter_ = 0U;
+  replayCycleCounter_ = 0U;
 }
 
 bool MapController::canResumeReplay(const char*& rejectReason) const {
@@ -2317,9 +2484,12 @@ void MapController::publishStatus() {
   const uint16_t replayWp = replayTargetIndex_ + 1U;
   const bool settingsUi = mode_ == MapControllerMode::SETTINGS ||
                           mode_ == MapControllerMode::HELP;
-  const MapReplayMode displayMode = settingsUi ? settingsMode_ : routeMode_;
+  const MapUserMode displayUserMode = settingsUi ? settingsUserMode_ : userMode_;
+  const MapReplayMode displayMode =
+      executionModeFor(displayUserMode,
+                       settingsUi ? settingsRepeatTarget_ : loopTarget_);
   const int16_t displaySpeed = settingsUi ? settingsSpeed_ : replaySpeed_;
-  const uint8_t displayLoopTarget = settingsUi ? settingsLoopTarget_
+  const uint8_t displayLoopTarget = settingsUi ? settingsRepeatTarget_
                                                 : loopTarget_;
   display_.setMapStatus(
       static_cast<uint8_t>(selectedSlot_), static_cast<uint8_t>(metadata.state),
@@ -2334,7 +2504,8 @@ void MapController::publishStatus() {
       static_cast<uint8_t>(holdReason_), replayTargetDeg_, replayLapCounter_,
       closeCandidateDistanceMm_, closeCandidateHeadingDeg_,
       static_cast<uint8_t>(settingsItem_), displaySpeed, displayLoopTarget,
-      helpPage_, static_cast<uint8_t>(storageErrorReason_), loadedValid_);
+      helpPage_, static_cast<uint8_t>(storageErrorReason_), loadedValid_,
+      static_cast<uint8_t>(displayUserMode), replayCycleCounter_);
   const uint32_t now = millis();
   if (replayActive_ && replayOperation_ == MapReplayOperation::MOVE &&
       robot_.guidedWaypointActive() &&
