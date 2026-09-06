@@ -181,7 +181,7 @@ static constexpr int16_t TURN_MAX_RELATIVE_DEG = 720;
 // MAP replay intentionally uses a faster, moderate-accuracy pre-turn.  The
 // precise +/-0.5-degree contract above remains reserved for MCP/AI angle
 // commands and is not changed by the MAP guidance profile.
-static constexpr float MAP_REPLAY_PRETURN_TOLERANCE_DEG = 5.0f;
+static constexpr float MAP_REPLAY_PRETURN_TOLERANCE_DEG = 3.0f;
 static constexpr uint32_t MAP_REPLAY_PRETURN_SETTLE_MS = 100U;
 // MAP coarse turns use a separate conservative PD slew law.  The minimum
 // keeps the chassis above the commissioned static-friction threshold while
@@ -195,8 +195,8 @@ static constexpr float MAP_TURN_PD_SLOW_ZONE_DEG = 25.0f;
 static constexpr float MAP_TURN_PD_PULSE_ZONE_DEG = 8.0f;
 static constexpr float MAP_TURN_PD_SETTLE_RATE_DEG_S = 2.0f;
 static constexpr float MAP_TURN_PD_PREDICT_TIME_S = 0.25f;
-static constexpr uint32_t MAP_TURN_PD_TELEMETRY_MS = 150U;
-static constexpr float MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG = 6.0f;
+static constexpr uint32_t MAP_TURN_PD_TELEMETRY_MS = 300U;
+static constexpr float MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG = 3.0f;
 static constexpr uint32_t MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM = 60U;
 static constexpr float MAP_GUIDE_REALIGN_THRESHOLD_DEG = 15.0f;
 static constexpr uint32_t MAP_GUIDE_SLOW_DISTANCE_MM = 250U;

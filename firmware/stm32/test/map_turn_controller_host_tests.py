@@ -71,8 +71,8 @@ class MapTurnControllerHostTests(unittest.TestCase):
 
     def test_pd_constants_preserve_map_contract_and_no_integral(self):
         self.assertEqual(number("TURN_TOLERANCE_DEG"), 0.5)
-        self.assertEqual(number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"), 5.0)
-        self.assertEqual(number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"), 6.0)
+        self.assertEqual(number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"), 3.0)
+        self.assertEqual(number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"), 3.0)
         self.assertEqual(number("MAP_GUIDE_REALIGN_THRESHOLD_DEG"), 15.0)
         self.assertEqual(number("TURN_MIN_SPEED"), 15.0)
         self.assertEqual(number("TURN_MAX_SPEED"), 30.0)
@@ -141,6 +141,7 @@ class MapTurnControllerHostTests(unittest.TestCase):
             self.assertIn(field, CTRL_HEADER)
             self.assertIn(field, CTRL)
         self.assertIn("MAP_TURN_PD_TELEMETRY_MS", CTRL)
+        self.assertEqual(number("MAP_TURN_PD_TELEMETRY_MS"), 300.0)
         self.assertIn("MAP_TURN_PD_KI = 0.0f", CONFIG)
 
     def test_peak_overshoot_tracks_every_sample_after_first_cross(self):
@@ -163,6 +164,17 @@ class MapTurnControllerHostTests(unittest.TestCase):
         self.assertIn("mapTurnMaxOvershootDeg_ =", fresh_sample)
         self.assertEqual(CTRL.count("mapTurnFirstTargetCrossMs_ = nowMs;"), 1)
         self.assertIn("mapTurnMaxOvershootDeg_ = 0.0f;", CTRL)
+
+    def test_map_heading_tolerance_boundaries(self):
+        tolerance = number("MAP_REPLAY_PRETURN_TOLERANCE_DEG")
+        self.assertLessEqual(2.9, tolerance)
+        self.assertLessEqual(tolerance, 3.0)
+        self.assertGreater(3.1, tolerance)
+
+        arrival_tolerance = number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG")
+        self.assertLessEqual(2.9, arrival_tolerance)
+        self.assertLessEqual(arrival_tolerance, 3.0)
+        self.assertGreater(3.1, arrival_tolerance)
 
 
 if __name__ == "__main__":

@@ -127,10 +127,10 @@ def realign_action(reason, distance_mm, incoming_heading_deg,
 
 class GuidedReplayHostTests(unittest.TestCase):
     def test_named_map_profile_constants(self):
-        self.assertEqual(config_number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"), 5.0)
+        self.assertEqual(config_number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"), 3.0)
         self.assertGreaterEqual(config_number("MAP_REPLAY_PRETURN_SETTLE_MS"), 80.0)
         self.assertLessEqual(config_number("MAP_REPLAY_PRETURN_SETTLE_MS"), 120.0)
-        self.assertEqual(config_number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"), 6.0)
+        self.assertEqual(config_number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"), 3.0)
         self.assertEqual(config_number("MAP_GUIDE_REALIGN_THRESHOLD_DEG"), 15.0)
         self.assertEqual(config_number("MAP_GUIDE_SLOW_DISTANCE_MM"), 250.0)
 
@@ -154,7 +154,10 @@ class GuidedReplayHostTests(unittest.TestCase):
                                                ))
 
     def test_preturn_skip_at_three_degrees(self):
-        self.assertLessEqual(3.0, config_number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"))
+        self.assertEqual(config_number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"), 3.0)
+        self.assertEqual(realign_action("PATH", 100.0, 0.0, 0.0, -2.9), "GUIDED")
+        self.assertEqual(realign_action("PATH", 100.0, 0.0, 0.0, -3.0), "GUIDED")
+        self.assertEqual(realign_action("PATH", 100.0, 0.0, 0.0, -3.1), "PATH_COARSE_TURN")
         self.assertIn("bool coarsePreturn = false", MAP)
         self.assertIn("!startupNoiseTurn", MAP)
         self.assertIn("startReplayGuidedWaypoint", MAP)
@@ -278,7 +281,7 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertLessEqual(50.0, config_number(
             "MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM"
         ))
-        self.assertEqual(config_number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"), 6.0)
+        self.assertEqual(config_number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"), 3.0)
         self.assertIn("remaining <= MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM", CTRL)
         self.assertIn("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG", CTRL)
         self.assertIn(
@@ -318,8 +321,8 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertIn("ReplayRealignReason::ARRIVAL", MAP)
         self.assertIn("AiTurnProfile::MAP_COARSE", MAP)
 
-    def test_arrival_40mm_4deg_advances_exactly_once(self):
-        self.assertEqual(arrival_action(40.0, 0.0, 4.0), "ADVANCE")
+    def test_arrival_40mm_2_9deg_advances_exactly_once(self):
+        self.assertEqual(arrival_action(40.0, 0.0, 2.9), "ADVANCE")
         self.assertIn(
             "fabsf(arrivalHeadingError) <=\n        MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG",
             MAP,
@@ -341,7 +344,7 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertIn("logGuideRealign(replayRealignReason_, to, targetDistance, desiredBearing", MAP)
 
     def test_arrival_turn_complete_advances_once(self):
-        self.assertEqual(realign_action("ARRIVAL", 42.0, 0.0, 0.0, 4.0), "ADVANCE")
+        self.assertEqual(realign_action("ARRIVAL", 42.0, 0.0, 0.0, 2.9), "ADVANCE")
         self.assertIn("logGuideRealignDone(actionReason, replayTargetIndex_", MAP)
         self.assertIn('"ADVANCE"', MAP)
         self.assertIn("replayRealignReason_ = ReplayRealignReason::NONE", MAP)
@@ -365,9 +368,10 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertIn("shortestDeltaDeg(targetBearing, current.headingDeg)", MAP)
         self.assertIn("PATH realign uses the live current-pose-to-target bearing", MAP)
 
-    def test_arrival_6deg_boundary_is_exact(self):
-        self.assertEqual(arrival_action(50.0, 0.0, 6.0), "ADVANCE")
-        self.assertEqual(arrival_action(50.0, 0.0, 6.5), "ARRIVAL_REALIGN")
+    def test_arrival_3deg_boundary_is_exact(self):
+        self.assertEqual(arrival_action(50.0, 0.0, 2.9), "ADVANCE")
+        self.assertEqual(arrival_action(50.0, 0.0, 3.0), "ADVANCE")
+        self.assertEqual(arrival_action(50.0, 0.0, 3.1), "ARRIVAL_REALIGN")
         self.assertIn(
             "fabsf(arrivalHeadingError) <=\n               MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG",
             MAP,
