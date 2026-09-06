@@ -241,11 +241,14 @@ static constexpr int16_t ULTRASONIC_DEGRADED_MAX_FORWARD_COMMAND = 8;
 // turning one dropped sample into a false "sensor fault" while still exposing
 // a genuinely disconnected sensor after the hold expires.
 static constexpr uint32_t ULTRASONIC_DISPLAY_HOLD_MS = 1000;
-// Once a channel has produced valid readings but then receives several clean
-// no-Echo timeouts, the compact LCD presents the channel as outside the
-// display range (OK). This is presentation-only: timeout health and the
-// fail-closed obstacle gate remain unchanged, so it never authorizes motion.
+// Once a channel has produced valid far/CLEAR readings but then receives
+// several clean no-Echo timeouts, keep a short, explicitly bounded far-clear
+// state. This covers the normal HC-SR04 case where there is no reflector in
+// range, while the timeout budget still returns the channel to fail-closed
+// UNKNOWN/TIMEOUT if the module is disconnected or remains silent.
 static constexpr uint8_t ULTRASONIC_DISPLAY_NO_ECHO_FAR_TIMEOUTS = 4;
+static constexpr uint32_t ULTRASONIC_NO_ECHO_FAR_GRACE_MS = 1800;
+static constexpr uint32_t ULTRASONIC_NO_ECHO_FAR_MAX_TIMEOUTS = 10;
 // Keep the LCD far/near state stable around the 100 cm presentation boundary.
 // Safety decisions continue to use the obstacle-zone thresholds below; these
 // values affect only the compact L04/R04 display classification.

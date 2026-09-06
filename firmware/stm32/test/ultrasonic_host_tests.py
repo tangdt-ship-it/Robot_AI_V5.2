@@ -71,12 +71,15 @@ class UltrasonicHostTests(unittest.TestCase):
         self.assertNotIn("const bool recoveredFromNoEcho=c.displayFar", SENSOR_TEXT)
         self.assertNotIn("c.historyCount=0;", SENSOR_TEXT)
 
-    def test_lcd_can_present_no_echo_as_far_without_changing_safety_health(self):
+    def test_no_echo_far_is_bounded_and_requires_prior_clear_far_evidence(self):
         self.assertIn("ULTRASONIC_DISPLAY_NO_ECHO_FAR_TIMEOUTS", CONFIG_TEXT)
+        self.assertIn("ULTRASONIC_NO_ECHO_FAR_GRACE_MS", CONFIG_TEXT)
+        self.assertIn("ULTRASONIC_NO_ECHO_FAR_MAX_TIMEOUTS", CONFIG_TEXT)
         self.assertIn("c.noEchoFar=true", SENSOR_TEXT)
         self.assertIn("c.noEchoFar=false", SENSOR_TEXT)
         self.assertIn("c.consecutiveTimeouts>=ULTRASONIC_DISPLAY_NO_ECHO_FAR_TIMEOUTS", SENSOR_TEXT)
-        self.assertRegex(SENSOR_TEXT, r"\|\|\s+c\.noEchoFar")
+        self.assertIn("c.displayFar && c.zone==ObstacleZone::CLEAR", SENSOR_TEXT)
+        self.assertIn("hasBoundedNoEchoFar", SENSOR_TEXT)
         self.assertIn("c.health=noEcho?SensorHealth::TIMEOUT:SensorHealth::INVALID", SENSOR_TEXT)
 
 

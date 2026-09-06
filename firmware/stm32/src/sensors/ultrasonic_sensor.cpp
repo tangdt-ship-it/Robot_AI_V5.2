@@ -49,10 +49,21 @@ void UltrasonicSensor::handleEchoEdge(uint8_t i){
   }
 }
 bool UltrasonicSensor::channelFresh(const Channel& c,uint32_t now)const{return c.measurementSequence && now-c.lastMeasurementMs<=ULTRASONIC_FRESH_MS;}
+bool UltrasonicSensor::hasBoundedNoEchoFar(const Channel& c,uint32_t now)const{
+  // No-Echo is only promoted to a temporary far-clear observation after this
+  // same channel has already proved a wide, stable clear sector. A startup
+  // timeout, a close obstacle, and an electrical/invalid pulse can therefore
+  // never manufacture CLEAR/OK from silence.
+  return c.noEchoFar && c.filterReady && c.displayFar &&
+         c.zone==ObstacleZone::CLEAR && c.lastValidEchoMs!=0U &&
+         now-c.lastValidEchoMs<=ULTRASONIC_NO_ECHO_FAR_GRACE_MS &&
+         c.consecutiveTimeouts<=ULTRASONIC_NO_ECHO_FAR_MAX_TIMEOUTS;
+}
 bool UltrasonicSensor::hasRecentValidEcho(const Channel& c,uint32_t now)const{
-  return c.filterReady && c.lastValidEchoMs!=0U &&
-         now-c.lastValidEchoMs<=ULTRASONIC_DEGRADED_GRACE_MS &&
-         c.consecutiveTimeouts<=ULTRASONIC_DEGRADED_MAX_TIMEOUTS;
+  const bool recentEcho = c.filterReady && c.lastValidEchoMs!=0U &&
+                          now-c.lastValidEchoMs<=ULTRASONIC_DEGRADED_GRACE_MS &&
+                          c.consecutiveTimeouts<=ULTRASONIC_DEGRADED_MAX_TIMEOUTS;
+  return recentEcho || hasBoundedNoEchoFar(c,now);
 }
 float UltrasonicSensor::medianHistory(const Channel& c)const{
   float a[5]; for(uint8_t i=0;i<c.historyCount;i++)a[i]=c.history[i];
@@ -141,13 +152,17 @@ void UltrasonicSensor::acceptTimeout(uint8_t i,uint32_t now,bool noEcho){
     }else if(c.displayFar && c.filteredDistanceCm<=ULTRASONIC_DISPLAY_FAR_EXIT_CM) {
       c.displayFar=false;
     }
-    if(noEcho &&
+    if(noEcho && c.displayFar && c.zone==ObstacleZone::CLEAR &&
+       c.filteredDistanceCm>=ULTRASONIC_DISPLAY_FAR_ENTER_CM &&
        c.consecutiveTimeouts>=ULTRASONIC_DISPLAY_NO_ECHO_FAR_TIMEOUTS) {
       c.noEchoFar=true;
     }
   }else{
     c.health=noEcho?SensorHealth::TIMEOUT:SensorHealth::INVALID;
-    if(!noEcho) c.noEchoFar=false;
+    // Invalid electrical pulses are never eligible for the far/no-Echo grace.
+    // A persistent no-Echo channel also expires its qualified far state once
+    // the bounded budget in hasBoundedNoEchoFar() is exhausted.
+    c.noEchoFar=false;
     c.displayFar=false;
     c.zone=ObstacleZone::UNKNOWN;
   }
@@ -159,14 +174,15 @@ void UltrasonicSensor::acceptTimeout(uint8_t i,uint32_t now,bool noEcho){
 void UltrasonicSensor::recomputeObstacleModel(uint32_t now){
   auto fill=[this,now](const Channel& c,UltrasonicReading& o){
     const bool recentValid=hasRecentValidEcho(c,now);
+    const bool boundedNoEchoFar=hasBoundedNoEchoFar(c,now);
     const uint32_t validAge=c.lastValidEchoMs!=0U?now-c.lastValidEchoMs:0U;
     o.distanceCm=c.filteredDistanceCm;
     o.rawDistanceCm=c.rawDistanceCm;
     o.valid=c.filterReady;
     o.echoValid=c.echoValid;
     o.displayDistanceValid=(recentValid&&validAge<=ULTRASONIC_DISPLAY_HOLD_MS) ||
-                           c.noEchoFar;
-    o.displayFar=o.displayDistanceValid&&(c.displayFar||c.noEchoFar);
+                           boundedNoEchoFar;
+    o.displayFar=o.displayDistanceValid&&(c.displayFar||boundedNoEchoFar);
     o.fresh=c.echoValid&&recentValid&&validAge<=ULTRASONIC_FRESH_MS;
     o.lastUpdateMs=c.lastValidEchoMs;
     o.ageMs=validAge;
@@ -198,7 +214,8 @@ void UltrasonicSensor::recomputeObstacleModel(uint32_t now){
 bool UltrasonicSensor::degradedClearWindow(uint32_t nowMs) const{
   for(uint8_t i=0;i<2;++i){
     const Channel& c=channels_[i];
-    if(!c.filterReady || c.lastValidEchoMs==0 || nowMs-c.lastValidEchoMs>ULTRASONIC_DEGRADED_GRACE_MS || c.consecutiveTimeouts>ULTRASONIC_DEGRADED_MAX_TIMEOUTS || c.filteredDistanceCm<=ULTRASONIC_DEGRADED_CLEAR_CM) return false;
+    if(!c.filterReady || !hasRecentValidEcho(c,nowMs) ||
+       c.filteredDistanceCm<=ULTRASONIC_DEGRADED_CLEAR_CM) return false;
   }
   return true;
 }

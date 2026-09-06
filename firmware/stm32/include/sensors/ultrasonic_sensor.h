@@ -96,6 +96,7 @@ class UltrasonicSensor {
   void updateChannelZone(uint8_t index,float distanceCm);
   float medianHistory(const Channel& channel) const; bool channelFresh(const Channel& channel,uint32_t nowMs) const;
   bool hasRecentValidEcho(const Channel& channel,uint32_t nowMs) const;
+  bool hasBoundedNoEchoFar(const Channel& channel,uint32_t nowMs) const;
   bool degradedClearWindow(uint32_t nowMs) const;
   void recomputeObstacleModel(uint32_t nowMs);
   UltrasonicReading frontLeft_,frontRight_; float nearestDistanceCm_=0,nearestRawDistanceCm_=0,nearestRateCmS_=0;
