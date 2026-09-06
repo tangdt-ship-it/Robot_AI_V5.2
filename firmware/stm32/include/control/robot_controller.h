@@ -235,6 +235,13 @@ class RobotController {
   bool aiTurnPulseDriving_ = false;
   uint32_t aiTurnPulseUntilMs_ = 0;
   uint32_t aiTurnCoastUntilMs_ = 0;
+  uint32_t lastMapTurnTelemetryMs_ = 0;
+  float mapTurnStartHeading_ = 0.0f;
+  float mapTurnMaxAbsYawRate_ = 0.0f;
+  float mapTurnMaxOvershootDeg_ = 0.0f;
+  uint32_t mapTurnFirstTargetCrossMs_ = 0;
+  uint32_t mapTurnSettleDurationMs_ = 0;
+  float mapTurnFinalError_ = 0.0f;
   bool aiTurnResultPending_ = false;
   AiTurnResult aiTurnResult_;
   uint32_t aiMotionGeneration_ = 0U;

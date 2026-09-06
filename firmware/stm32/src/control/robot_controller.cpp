@@ -1,6 +1,31 @@
 #include <control/robot_controller.h>
 #include <robot_config.h>
 
+namespace {
+
+float mapTurnPdDamping(float errorDeg, float yawRateDegS) {
+  const float relation = errorDeg * yawRateDegS;
+  const float rate = fabsf(yawRateDegS);
+  if (relation > 0.0f) return MAP_TURN_PD_KD * rate;
+  if (relation < 0.0f) return -MAP_TURN_PD_KD * rate;
+  return 0.0f;
+}
+
+int16_t mapTurnPdCommand(float errorDeg, float yawRateDegS,
+                         int16_t maxSpeed) {
+  const float upper = fminf(
+      static_cast<float>(constrain(maxSpeed, MAP_TURN_PD_MIN_COMMAND,
+                                   MAP_TURN_PD_MAX_COMMAND)),
+      static_cast<float>(MAP_TURN_PD_MAX_COMMAND));
+  const float proportional = MAP_TURN_PD_KP * fabsf(errorDeg);
+  const float command = proportional -
+                        mapTurnPdDamping(errorDeg, yawRateDegS);
+  return static_cast<int16_t>(lroundf(constrain(
+      command, static_cast<float>(MAP_TURN_PD_MIN_COMMAND), upper)));
+}
+
+}  // namespace
+
 RobotController::RobotController(MotorController& motors, Ps2Controller& ps2,
                                  LcdDisplay& display,
                                  HeadingController& heading,
@@ -699,6 +724,15 @@ bool RobotController::startTurnSession(MotionOwner owner, float targetHeading,
   aiTurnPulseDriving_ = false;
   aiTurnPulseUntilMs_ = 0;
   aiTurnCoastUntilMs_ = 0;
+  lastMapTurnTelemetryMs_ = 0;
+  mapTurnStartHeading_ = profile == AiTurnProfile::MAP_COARSE
+                             ? startHeading
+                             : 0.0f;
+  mapTurnMaxAbsYawRate_ = 0.0f;
+  mapTurnMaxOvershootDeg_ = 0.0f;
+  mapTurnFirstTargetCrossMs_ = 0;
+  mapTurnSettleDurationMs_ = 0;
+  mapTurnFinalError_ = aiTurnErrorDeg_;
   aiTurnResultPending_ = false;
   aiMotionGeneration_ = motionGeneration;
   stopPwmLatched_ = false;
@@ -760,9 +794,17 @@ void RobotController::finishAiTurn(AiTurnResultCode code) {
   const uint32_t motionGeneration = aiMotionGeneration_;
   const float headingNow = currentHeadingDeg();
   const float target = aiTurnTargetDeg_;
+  const bool mapTurnProfile = aiTurnProfile_ == AiTurnProfile::MAP_COARSE;
   const float error = aiTurnMultiTurn_
       ? aiTurnTargetUnwrappedDeg_ - aiTurnUnwrappedHeadingDeg_
       : HeadingFusion::shortestDelta(target, headingNow);
+  if (mapTurnProfile) {
+    mapTurnFinalError_ = error;
+    if (mapTurnFirstTargetCrossMs_ != 0U &&
+        mapTurnSettleDurationMs_ == 0U) {
+      mapTurnSettleDurationMs_ = millis() - mapTurnFirstTargetCrossMs_;
+    }
+  }
   stopImmediately();
   aiTurnResult_.owner = owner;
   aiTurnResult_.code = code;
@@ -771,6 +813,22 @@ void RobotController::finishAiTurn(AiTurnResultCode code) {
   aiTurnResult_.targetDeg = target;
   aiTurnResult_.errorDeg = error;
   aiTurnResultPending_ = true;
+#if ROBOT_DEBUG
+  if (mapTurnProfile && code == AiTurnResultCode::DONE) {
+    debug_.print("MAP,TURN,DONE,TARGET=");
+    debug_.print(target, 2);
+    debug_.print(",FINAL=");
+    debug_.print(headingNow, 2);
+    debug_.print(",ERR=");
+    debug_.print(error, 2);
+    debug_.print(",PEAK_RATE=");
+    debug_.print(mapTurnMaxAbsYawRate_, 2);
+    debug_.print(",OVERSHOOT=");
+    debug_.print(mapTurnMaxOvershootDeg_, 2);
+    debug_.print(",SETTLE_MS=");
+    debug_.println(mapTurnSettleDurationMs_);
+  }
+#endif
 }
 
 bool RobotController::takeAiTurnResult(AiTurnResult& result) {
@@ -972,6 +1030,14 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     finishAiTurn(AiTurnResultCode::HEADING_LOST);
     return;
   }
+  const bool mapTurnProfile = aiTurnProfile_ == AiTurnProfile::MAP_COARSE;
+  const float settleRateLimit =
+      mapTurnProfile ? MAP_TURN_PD_SETTLE_RATE_DEG_S
+                     : TURN_SETTLE_RATE_DEG_S;
+  const float pulseZone = mapTurnProfile ? MAP_TURN_PD_PULSE_ZONE_DEG
+                                         : TURN_PULSE_ZONE_DEG;
+  const float slowZone = mapTurnProfile ? MAP_TURN_PD_SLOW_ZONE_DEG
+                                        : TURN_SLOW_ZONE_DEG;
 
   // Keep the position error coherent with the heading used by the settle
   // check even when the fusion sample sequence is temporarily unchanged.
@@ -989,7 +1055,7 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   // obstacle failure.  Every turn that still needs wheel motion continues
   // through the fail-closed ultrasonic gate below.
   if (fabsf(aiTurnErrorDeg_) <= aiTurnToleranceDeg_ &&
-      fabsf(aiTurnYawRateDegS_) <= TURN_SETTLE_RATE_DEG_S) {
+      fabsf(aiTurnYawRateDegS_) <= settleRateLimit) {
     targetLeft_ = targetRight_ = currentLeft_ = currentRight_ = 0;
     aiTurnCommandSpeed_ = 0;
     aiTurnPulseDriving_ = false;
@@ -1000,7 +1066,7 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
           ? aiTurnTargetUnwrappedDeg_ - aiTurnUnwrappedHeadingDeg_
           : HeadingFusion::shortestDelta(aiTurnTargetDeg_, currentHeadingDeg());
       if (fabsf(settleError) <= aiTurnToleranceDeg_ &&
-          fabsf(aiTurnYawRateDegS_) <= TURN_SETTLE_RATE_DEG_S) {
+          fabsf(aiTurnYawRateDegS_) <= settleRateLimit) {
         finishAiTurn(AiTurnResultCode::DONE);
       } else {
         aiTurnSettleStartMs_ = 0U;
@@ -1081,6 +1147,13 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
       overshot = true;
       aiTurnCoastUntilMs_ = nowMs + TURN_OVERSHOOT_COAST_MS;
       aiTurnPulseDriving_ = false;
+      if (mapTurnProfile) {
+        if (mapTurnFirstTargetCrossMs_ == 0U) {
+          mapTurnFirstTargetCrossMs_ = nowMs;
+        }
+        mapTurnMaxOvershootDeg_ =
+            max(mapTurnMaxOvershootDeg_, fabsf(aiTurnErrorDeg_));
+      }
     }
     aiTurnLastErrorSign_ = errorSign;
   }
@@ -1096,6 +1169,10 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   }
   const float absError = fabsf(aiTurnErrorDeg_);
   const float absYawRate = fabsf(aiTurnYawRateDegS_);
+  if (mapTurnProfile) {
+    mapTurnMaxAbsYawRate_ = max(mapTurnMaxAbsYawRate_, absYawRate);
+    mapTurnFinalError_ = aiTurnErrorDeg_;
+  }
   const float maxWheelSpeed = max(
       fabsf(odometry_.data().leftVelocityMmS),
       fabsf(odometry_.data().rightVelocityMmS));
@@ -1104,7 +1181,7 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   // encoder velocity certify that the chassis is physically settled before
   // ignoring such a stale rate estimate.
   const bool turnRateSettled =
-      absYawRate <= TURN_SETTLE_RATE_DEG_S ||
+      absYawRate <= settleRateLimit ||
       (aiTurnCommandSpeed_ == 0 &&
        maxWheelSpeed <= TURN_SETTLE_WHEEL_SPEED_MM_S);
 
@@ -1123,6 +1200,9 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
           : HeadingFusion::shortestDelta(aiTurnTargetDeg_, currentHeadingDeg());
       if (fabsf(settleError) <= aiTurnToleranceDeg_ &&
           turnRateSettled) {
+        if (mapTurnProfile && mapTurnFirstTargetCrossMs_ != 0U) {
+          mapTurnSettleDurationMs_ = nowMs - mapTurnFirstTargetCrossMs_;
+        }
         finishAiTurn(AiTurnResultCode::DONE);
       } else {
         aiTurnSettleStartMs_ = 0U;
@@ -1141,7 +1221,9 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   // Predict where the heading will be after motor response and mechanical
   // coast. If that projection reaches/crosses the target, release PWM now.
   const float projectedError =
-      aiTurnErrorDeg_ - aiTurnYawRateDegS_ * TURN_PREDICT_TIME_S;
+      aiTurnErrorDeg_ - aiTurnYawRateDegS_ *
+          (mapTurnProfile ? MAP_TURN_PD_PREDICT_TIME_S
+                          : TURN_PREDICT_TIME_S);
   const bool movingTowardTarget =
       aiTurnErrorDeg_ * aiTurnYawRateDegS_ > 0.0f;
   const bool projectedToTarget =
@@ -1151,7 +1233,7 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
 
   if (overshot || projectedToTarget ||
     (absError <= aiTurnToleranceDeg_ &&
-       absYawRate > TURN_SETTLE_RATE_DEG_S)) {
+       absYawRate > settleRateLimit)) {
     aiTurnPulseDriving_ = false;
     if (static_cast<int32_t>(nowMs - aiTurnCoastUntilMs_) >= 0) {
       aiTurnCoastUntilMs_ = nowMs + TURN_CORRECTION_COAST_MS;
@@ -1169,7 +1251,7 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   // followed by a longer observation interval lets the fused Heading measure
   // the actual response before choosing the next direction, including
   // reversal after overshoot.
-  if (absError <= TURN_PULSE_ZONE_DEG) {
+  if (absError <= pulseZone) {
     if (aiTurnPulseDriving_) {
       if (static_cast<int32_t>(nowMs - aiTurnPulseUntilMs_) < 0) return;
       aiTurnPulseDriving_ = false;
@@ -1201,23 +1283,50 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     aiTurnPulseUntilMs_ = nowMs + pulseMs;
   } else {
     aiTurnPulseDriving_ = false;
-    float ratio = absError >= TURN_SLOW_ZONE_DEG
+    if (mapTurnProfile) {
+      aiTurnCommandSpeed_ = mapTurnPdCommand(
+          aiTurnErrorDeg_, aiTurnYawRateDegS_, aiTurnMaxSpeed_);
+    } else {
+      float ratio = absError >= slowZone
                       ? 1.0f
-                      : (absError - TURN_PULSE_ZONE_DEG) /
-                            (TURN_SLOW_ZONE_DEG - TURN_PULSE_ZONE_DEG);
-    ratio = constrain(ratio, 0.0f, 1.0f);
-    const int16_t speed = static_cast<int16_t>(lroundf(
-        TURN_MIN_SPEED + ratio * (aiTurnMaxSpeed_ - TURN_MIN_SPEED)));
-    const bool startBoostActive =
-        static_cast<int32_t>(nowMs - aiTurnStartBoostUntilMs_) < 0;
-    aiTurnCommandSpeed_ = startBoostActive
-                              ? constrain(
-                                    max(TURN_START_BOOST_SPEED,
-                                        aiTurnMaxSpeed_),
-                                    TURN_MIN_SPEED, TURN_MAX_SPEED)
-                              : constrain(speed, TURN_MIN_SPEED,
-                                           aiTurnMaxSpeed_);
+                      : (absError - pulseZone) /
+                            (slowZone - pulseZone);
+      ratio = constrain(ratio, 0.0f, 1.0f);
+      const int16_t speed = static_cast<int16_t>(lroundf(
+          TURN_MIN_SPEED + ratio * (aiTurnMaxSpeed_ - TURN_MIN_SPEED)));
+      const bool startBoostActive =
+          static_cast<int32_t>(nowMs - aiTurnStartBoostUntilMs_) < 0;
+      aiTurnCommandSpeed_ = startBoostActive
+                                ? constrain(
+                                      max(TURN_START_BOOST_SPEED,
+                                          aiTurnMaxSpeed_),
+                                      TURN_MIN_SPEED, TURN_MAX_SPEED)
+                                : constrain(speed, TURN_MIN_SPEED,
+                                             aiTurnMaxSpeed_);
+    }
   }
+
+#if ROBOT_DEBUG
+  if (mapTurnProfile &&
+      (lastMapTurnTelemetryMs_ == 0U ||
+       (nowMs - lastMapTurnTelemetryMs_) >= MAP_TURN_PD_TELEMETRY_MS)) {
+    lastMapTurnTelemetryMs_ = nowMs;
+    debug_.print("MAP,TURN,PD,ERR=");
+    debug_.print(aiTurnErrorDeg_, 2);
+    debug_.print(",RATE=");
+    debug_.print(aiTurnYawRateDegS_, 2);
+    debug_.print(",P=");
+    debug_.print(MAP_TURN_PD_KP * absError, 2);
+    debug_.print(",D=");
+    debug_.print(mapTurnPdDamping(aiTurnErrorDeg_, aiTurnYawRateDegS_), 2);
+    debug_.print(",CMD=");
+    debug_.print(aiTurnCommandSpeed_);
+    debug_.print(",TARGET=");
+    debug_.print(aiTurnTargetDeg_, 2);
+    debug_.print(",HDG=");
+    debug_.println(currentHeadingDeg(), 2);
+  }
+#endif
 
   // Measured turn polarity: L=-,R=+ increases Heading (left turn),
   // while L=+,R=- decreases it (right turn).
