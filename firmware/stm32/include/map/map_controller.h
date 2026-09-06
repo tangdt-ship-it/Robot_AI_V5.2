@@ -106,7 +106,13 @@ class MapController {
   bool hasValidClosingEdge(const MapRouteData& route,
                            const char*& reason) const;
   uint32_t routeLengthMm(const MapRouteData& route) const;
+  uint32_t persistedRouteLengthMm(const MapRouteData& route,
+                                  MapRouteType persistedType) const;
+  static MapRouteType persistedRouteType(MapReplayMode mode);
+  static MapReplayMode persistedReplayMode(MapReplayMode mode);
   void updateRouteHeaderForSave(MapRouteData& route) const;
+  void normalizeRouteForRuntime(MapRouteData& route,
+                                MapReplayMode runtimeMode) const;
 
   void cycleReplayMode();
   bool prepareReplay(const char*& rejectReason);
@@ -185,7 +191,6 @@ class MapController {
   MapRouteData optimizedRoute_{};
   MapRouteData semanticRoute_{};
   bool loadedValid_ = false;
-  bool legacyCanonicalMigrationPending_ = false;
 
   Pose teachOrigin_{};
   Pose lastTeachSample_{};

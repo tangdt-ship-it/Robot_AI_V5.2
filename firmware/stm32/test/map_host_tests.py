@@ -90,37 +90,81 @@ def effective_mode(route_type, replay_mode):
     return replay_mode
 
 
-class LegacyMigrationModel:
-    """Model the explicit Settings SAVE migration without Flash access."""
+def v529_route_allowed(route_type, replay_mode):
+    """Mirror the V5.2.9 persisted route/mode validator."""
+    if route_type == "CLOSED":
+        return replay_mode in ("ONCE", "LOOP")
+    return replay_mode in ("ONCE", "RETURN", "PING_PONG")
 
-    def __init__(self, route_type, replay_mode, speed=20, lap=0):
-        self.flash = (route_type, replay_mode, speed, lap)
-        self.runtime = self.flash
-        self.pending = False
+
+def persisted_route_type(runtime_mode):
+    return "CLOSED" if runtime_mode in ("CLOSED", "LOOP") else "OPEN"
+
+
+def persisted_replay_mode(runtime_mode):
+    return "ONCE" if runtime_mode == "CLOSED" else runtime_mode
+
+
+def persisted_length(points, runtime_mode):
+    return route_length(
+        points, closed=runtime_mode in ("CLOSED", "LOOP")
+    )
+
+
+def v529_load_pass(record, points):
+    return (
+        v529_route_allowed(record["route_type"], record["replay_mode"])
+        and record["waypoint_count"] == len(points)
+        and record["payload_bytes"] == len(points) * WAYPOINT.size
+        and abs(record["route_length"] - route_length(
+            points, closed=record["route_type"] == "CLOSED"
+        )) <= 50
+    )
+
+
+class StorageCompatibilityModel:
+    """Model runtime modes and their V5.2.9-compatible Flash records."""
+
+    def __init__(self, points, runtime_mode, speed=20, lap=0):
+        self.points = points
+        self.runtime = (runtime_mode, speed, lap)
+        self.flash = self.persisted_record()
         self.write_count = 0
 
-    def load(self):
-        route_type, replay_mode, speed, lap = self.flash
-        self.pending = route_type == "CLOSED"
-        self.runtime = ("OPEN", effective_mode(route_type, replay_mode),
-                        speed, lap)
+    def persisted_record(self):
+        mode, speed, lap = self.runtime
+        return {
+            "route_type": persisted_route_type(mode),
+            "replay_mode": persisted_replay_mode(mode),
+            "route_length": persisted_length(self.points, mode),
+            "waypoint_count": len(self.points),
+            "payload_bytes": len(self.points) * WAYPOINT.size,
+            "speed": speed,
+            "lap": lap,
+        }
 
-    def save_settings(self, replay_mode=None, speed=None, lap=None,
+    def load(self):
+        self.runtime = (
+            effective_mode(self.flash["route_type"], self.flash["replay_mode"]),
+            self.flash["speed"],
+            self.flash["lap"],
+        )
+
+    def save_settings(self, runtime_mode=None, speed=None, lap=None,
                       succeed=True):
-        old = self.runtime
-        requested = (replay_mode if replay_mode is not None else old[1],
-                     speed if speed is not None else old[2],
-                     lap if lap is not None else old[3])
-        changed = requested != old[1:] or self.pending
-        if not changed:
+        old_runtime = self.runtime
+        requested = (
+            runtime_mode if runtime_mode is not None else old_runtime[0],
+            speed if speed is not None else old_runtime[1],
+            lap if lap is not None else old_runtime[2],
+        )
+        if requested == old_runtime:
             return "NO_CHANGE"
         self.write_count += 1
         if not succeed:
-            self.runtime = old
             return "FAIL"
-        self.flash = ("OPEN", requested[0], requested[1], requested[2])
-        self.runtime = self.flash
-        self.pending = False
+        self.runtime = requested
+        self.flash = self.persisted_record()
         return "OK"
 
 
@@ -837,6 +881,8 @@ class MapHostTests(unittest.TestCase):
         self.assertIn('type == MapRouteType::CLOSED', MAP_TEXT)
         self.assertIn('CLOSED = 4U', TYPES_TEXT)
         self.assertIn('header.replayMode > static_cast<uint8_t>(MapReplayMode::CLOSED)', STORE_TEXT)
+        save_block = STORE_TEXT[STORE_TEXT.index("bool MapRouteStore::save") :]
+        self.assertIn('static_cast<uint8_t>(MapReplayMode::PING_PONG)', save_block)
         self.assertNotIn('route_.header.waypointCount++', MAP_TEXT)
         self.assertNotIn('appendWaypoint(routePointWorld(0', MAP_TEXT)
         self.assertIn('MAP,CLOSE_EDGE,DONE', MAP_TEXT)
@@ -881,6 +927,17 @@ class MapHostTests(unittest.TestCase):
         self.assertEqual((current, direction, complete), (2, -1, False))
         current, direction, complete = advance(0, -1, 4, "OPEN", "RETURN")
         self.assertEqual((current, direction, complete), (None, -1, True))
+
+    def test_ping_pong_does_not_emit_return_phase_telemetry(self):
+        advance_body = MAP_TEXT.split(
+            'void MapController::advanceReplayAfterTarget', 1
+        )[1].split('void MapController::enterReplayHold', 1)[0]
+        turnaround = advance_body[advance_body.index(
+            'replayDirection_ = -1;'
+        ):]
+        self.assertIn('routeMode_ == MapReplayMode::RETURN', turnaround)
+        self.assertIn('replayReturnPhase_ = ReplayReturnPhase::NONE', turnaround)
+        self.assertIn('MAP,RETURN,TURNAROUND,WP=', turnaround)
 
     def test_one_canonical_route_supports_all_replay_modes(self):
         self.assertEqual(
@@ -1342,11 +1399,8 @@ class MapHostTests(unittest.TestCase):
         self.assertIn("result.replaySpeed", STORE_TEXT)
         self.assertIn("result.loopTarget", STORE_TEXT)
 
-    def test_return_phase_and_legacy_migration_are_runtime_only(self):
+    def test_return_phase_and_storage_encoding_are_runtime_only(self):
         for token in (
-            "legacyCanonicalMigrationPending_",
-            "legacyCanonicalMigrationPending_ = storedType == MapRouteType::CLOSED",
-            "legacyCanonicalMigrationPending_;",
             "returnPhase",
             "MAP,RETURN,START,POINTS=",
             "MAP,RETURN,PHASE=OUT",
@@ -1356,39 +1410,74 @@ class MapHostTests(unittest.TestCase):
             "MAP,RETURN,COMPLETE,WP=0",
         ):
             self.assertIn(token, MAP_TEXT + MAP_HEADER_TEXT + LCD_TEXT)
-        self.assertIn("legacyCanonicalMigrationPending_ = false", MAP_TEXT)
-        self.assertIn("legacyCanonicalMigrationPending_", MAP_TEXT[MAP_TEXT.index("void MapController::saveSettingsAndExit") :])
+        self.assertNotIn("legacyCanonicalMigrationPending_", MAP_TEXT + MAP_HEADER_TEXT)
         self.assertNotIn("returnPhase", TYPES_TEXT)
         self.assertNotIn("returnPhase", STORE_TEXT)
+        self.assertIn("persistedRouteType", MAP_TEXT)
+        self.assertIn("persistedReplayMode", MAP_TEXT)
+        self.assertIn("persistedRouteLengthMm", MAP_TEXT)
+        self.assertIn("normalizeRouteForRuntime", MAP_TEXT)
+        self.assertIn("MapReplayMode::PING_PONG", _read(SRC_ROOT / "map" / "route_store.cpp"))
 
-    def test_legacy_closed_once_migrates_on_unchanged_settings_save(self):
-        model = LegacyMigrationModel("CLOSED", "ONCE")
+    def test_legacy_closed_once_is_unchanged_on_no_change_save(self):
+        points = [(0.0, 0.0), (1000.0, 0.0), (1000.0, 1000.0)]
+        model = StorageCompatibilityModel(points, "CLOSED")
         model.load()
-        self.assertEqual(model.runtime[1], "CLOSED")
-        self.assertTrue(model.pending)
-        self.assertEqual(model.save_settings(), "OK")
-        self.assertEqual(model.write_count, 1)
-        self.assertEqual(model.flash[:2], ("OPEN", "CLOSED"))
-        self.assertFalse(model.pending)
+        old_flash = model.flash.copy()
+        self.assertEqual(model.runtime[0], "CLOSED")
+        self.assertEqual(model.save_settings(), "NO_CHANGE")
+        self.assertEqual(model.write_count, 0)
+        self.assertEqual(model.flash, old_flash)
 
-    def test_legacy_closed_loop_migration_preserves_lap(self):
-        model = LegacyMigrationModel("CLOSED", "LOOP", lap=2)
-        model.load()
-        self.assertEqual(model.save_settings(), "OK")
-        self.assertEqual(model.flash, ("OPEN", "LOOP", 20, 2))
+    def test_persisted_mode_mapping_is_v529_compatible(self):
+        points = [(0.0, 0.0), (1000.0, 0.0), (1000.0, 1000.0)]
+        for runtime_mode, route_type, replay_mode in (
+            ("ONCE", "OPEN", "ONCE"),
+            ("RETURN", "OPEN", "RETURN"),
+            ("CLOSED", "CLOSED", "ONCE"),
+            ("LOOP", "CLOSED", "LOOP"),
+        ):
+            model = StorageCompatibilityModel(points, runtime_mode, lap=2)
+            record = model.flash
+            self.assertEqual(record["route_type"], route_type)
+            self.assertEqual(record["replay_mode"], replay_mode)
+            self.assertNotEqual(record["replay_mode"], "CLOSED")
+            self.assertTrue(v529_load_pass(record, points))
 
-    def test_legacy_migration_failure_retains_runtime_and_flash(self):
-        model = LegacyMigrationModel("CLOSED", "LOOP", lap=2)
+    def test_round_trip_closed_return_loop_and_failure_rollback(self):
+        points = [(0.0, 0.0), (1000.0, 0.0), (1000.0, 1000.0)]
+        model = StorageCompatibilityModel(points, "CLOSED", lap=2)
+        self.assertTrue(v529_load_pass(model.flash, points))
         model.load()
-        old_flash = model.flash
+        self.assertEqual(model.save_settings(runtime_mode="RETURN"), "OK")
+        self.assertTrue(v529_load_pass(model.flash, points))
+        self.assertEqual((model.flash["route_type"], model.flash["replay_mode"]),
+                         ("OPEN", "RETURN"))
+        self.assertEqual(model.save_settings(runtime_mode="LOOP"), "OK")
+        self.assertTrue(v529_load_pass(model.flash, points))
+        self.assertEqual((model.flash["route_type"], model.flash["replay_mode"]),
+                         ("CLOSED", "LOOP"))
+        old_flash = model.flash.copy()
         old_runtime = model.runtime
-        self.assertEqual(model.save_settings(succeed=False), "FAIL")
+        self.assertEqual(model.save_settings(runtime_mode="RETURN", succeed=False),
+                         "FAIL")
         self.assertEqual(model.flash, old_flash)
         self.assertEqual(model.runtime, old_runtime)
-        self.assertTrue(model.pending)
+        self.assertEqual(model.write_count, 3)
+
+    def test_closed_and_loop_stored_length_includes_logical_closure(self):
+        points = [(0.0, 0.0), (1000.0, 0.0), (1000.0, 1000.0)]
+        base = route_length(points, closed=False)
+        closed = route_length(points, closed=True)
+        self.assertEqual(base, 2000)
+        self.assertEqual(closed, 3414)
+        for mode in ("CLOSED", "LOOP"):
+            model = StorageCompatibilityModel(points, mode)
+            self.assertEqual(model.flash["route_length"], closed)
 
     def test_canonical_unchanged_settings_save_does_not_write(self):
-        model = LegacyMigrationModel("OPEN", "RETURN")
+        model = StorageCompatibilityModel([(0.0, 0.0), (1000.0, 0.0)],
+                                           "RETURN")
         model.load()
         self.assertEqual(model.save_settings(), "NO_CHANGE")
         self.assertEqual(model.write_count, 0)
@@ -1685,7 +1774,7 @@ class MapHostTests(unittest.TestCase):
     def test_settings_tri_help_visible(self):
         self.assertIn('"UD/LR EDIT TRI HELP"', LCD_TEXT)
         self.assertIn('"TRI NEXT"', LCD_TEXT)
-        self.assertIn('"TRI PREV X BACK"', LCD_TEXT)
+        self.assertIn('"TRI NEXT X BACK"', LCD_TEXT)
 
     def test_help_lines_20_char(self):
         for line in (
@@ -1695,7 +1784,7 @@ class MapHostTests(unittest.TestCase):
             "CLOSED CLOSE ONCE",
             "LOOP CLOSE REPEAT",
             "X HOLD XL CANCEL",
-            "TRI PREV X BACK",
+            "TRI NEXT X BACK",
         ):
             self.assertLessEqual(len(line), 20)
         self.assertIn('"MAP%u HELP %u/3"', LCD_TEXT)

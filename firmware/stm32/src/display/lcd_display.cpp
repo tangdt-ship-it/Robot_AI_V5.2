@@ -366,7 +366,7 @@ void LcdDisplay::buildMapLines() {
     } else {
       snprintf(desired_[1], 21, "LOOP CLOSE REPEAT");
       snprintf(desired_[2], 21, "X HOLD XL CANCEL");
-      snprintf(desired_[3], 21, "TRI PREV X BACK");
+      snprintf(desired_[3], 21, "TRI NEXT X BACK");
     }
     return;
   }

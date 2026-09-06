@@ -57,7 +57,7 @@ bool IsReplayModeValueValid(MapReplayMode mode) {
 
 MapReplayMode EffectiveReplayMode(MapRouteType type, MapReplayMode mode) {
   // Old records encoded a closed route as routeType=CLOSED with ONCE/LOOP.
-  // Translate only in RAM; Flash is migrated only by an explicit save.
+  // Translate the compatibility representation into the runtime mode.
   if (type == MapRouteType::CLOSED && mode == MapReplayMode::ONCE) {
     return MapReplayMode::CLOSED;
   }
@@ -130,7 +130,6 @@ void MapController::begin() {
     return;
   }
   storageErrorReason_ = MapStorageErrorReason::NONE;
-  legacyCanonicalMigrationPending_ = false;
   const MapSlotMetadata metadata = store_.metadata(selectedSlot_);
   storeState_ = metadata.state;
   routeType_ = MapRouteType::OPEN;
@@ -251,7 +250,6 @@ void MapController::handleSlot(uint8_t slot) {
   }
   selectedSlot_ = slot == 2U ? MapSlot::MAP_2 : MapSlot::MAP_1;
   loadedValid_ = false;
-  legacyCanonicalMigrationPending_ = false;
   const MapSlotMetadata metadata = store_.metadata(selectedSlot_);
   storeState_ = metadata.state;
   routeType_ = MapRouteType::OPEN;
@@ -343,8 +341,7 @@ void MapController::saveSettingsAndExit() {
   }
   const bool settingsChanged = settingsMode_ != routeMode_ ||
                                settingsSpeed_ != replaySpeed_ ||
-                               settingsLoopTarget_ != loopTarget_ ||
-                               legacyCanonicalMigrationPending_;
+                               settingsLoopTarget_ != loopTarget_;
   if (!settingsChanged) {
     storeState_ = MapStoreState::SAVED;
     storageErrorReason_ = MapStorageErrorReason::NONE;
@@ -355,8 +352,8 @@ void MapController::saveSettingsAndExit() {
     return;
   }
   MapRouteData candidate = route_;
-  // New records always use the canonical open geometry. CLOSED is a replay
-  // mode, not a second persisted route topology.
+  // The route geometry remains canonical one-map data. Storage encoding is
+  // applied by updateRouteHeaderForSave() so V5.2.9 can read every mode.
   candidate.header.routeType = static_cast<uint8_t>(MapRouteType::OPEN);
   candidate.header.replayMode = static_cast<uint8_t>(settingsMode_);
   const MapReplayMode oldMode = routeMode_;
@@ -378,11 +375,11 @@ void MapController::saveSettingsAndExit() {
     return;
   }
   route_ = candidate;
+  normalizeRouteForRuntime(route_, settingsMode_);
   routeType_ = MapRouteType::OPEN;
   routeMode_ = settingsMode_;
   replaySpeed_ = settingsSpeed_;
   loopTarget_ = settingsLoopTarget_;
-  legacyCanonicalMigrationPending_ = false;
   loadedValid_ = true;
   storeState_ = MapStoreState::SAVED;
   storageErrorReason_ = MapStorageErrorReason::NONE;
@@ -776,7 +773,6 @@ void MapController::handleCrossLong() {
 bool MapController::loadSelected() {
   if (!store_.load(selectedSlot_, route_)) {
     loadedValid_ = false;
-    legacyCanonicalMigrationPending_ = false;
     storeState_ = MapStoreState::INVALID;
     mode_ = MapControllerMode::READY;
     return false;
@@ -784,7 +780,6 @@ bool MapController::loadSelected() {
   const char* reason = nullptr;
   if (!validateRoute(route_, reason)) {
     loadedValid_ = false;
-    legacyCanonicalMigrationPending_ = false;
     storeState_ = MapStoreState::INVALID;
     mode_ = MapControllerMode::READY;
     return false;
@@ -795,11 +790,10 @@ bool MapController::loadSelected() {
       static_cast<MapRouteType>(route_.header.routeType);
   const MapReplayMode storedMode =
       static_cast<MapReplayMode>(route_.header.replayMode);
-  legacyCanonicalMigrationPending_ = storedType == MapRouteType::CLOSED;
   routeType_ = MapRouteType::OPEN;
   routeMode_ = EffectiveReplayMode(storedType, storedMode);
-  // Legacy CLOSED records are normalized in RAM only. Flash migration occurs
-  // only when Settings or a later Teach explicitly saves the route.
+  // Normalize the compatibility representation in RAM. Flash remains in the
+  // V5.2.9-readable encoding unless a real setting change is saved.
   route_.header.routeType = static_cast<uint8_t>(MapRouteType::OPEN);
   route_.header.replayMode = static_cast<uint8_t>(routeMode_);
   route_.header.routeLengthMm = routeLengthMm(route_);
@@ -833,7 +827,6 @@ bool MapController::beginTeach() {
   route_.header.waypointCount = 0U;
   routeType_ = MapRouteType::OPEN;
   routeMode_ = MapReplayMode::ONCE;
-  legacyCanonicalMigrationPending_ = false;
   replaySpeed_ = MAP_REPLAY_SPEED_DEFAULT;
   loopTarget_ = MAP_LOOP_TARGET_INF;
   closeCandidateDistanceMm_ = 0U;
@@ -1240,22 +1233,60 @@ uint32_t MapController::routeLengthMm(const MapRouteData& route) const {
                         static_cast<float>(route.waypoints[i].xMm),
                         static_cast<float>(route.waypoints[i].yMm));
   }
-  // The persisted length is the canonical open geometry. A CLOSED/LOOP
-  // replay adds the logical Pn->P0 edge at runtime without changing storage.
+  // This is always the canonical open geometry length. Storage compatibility
+  // adds the logical Pn->P0 edge only for persisted CLOSED/LOOP records.
   return total <= 0.0f ? 0U : static_cast<uint32_t>(lroundf(total));
 }
 
+uint32_t MapController::persistedRouteLengthMm(
+    const MapRouteData& route, MapRouteType persistedType) const {
+  const uint32_t baseLength = routeLengthMm(route);
+  if (persistedType != MapRouteType::CLOSED ||
+      route.header.waypointCount < 2U) {
+    return baseLength;
+  }
+  const uint16_t last = route.header.waypointCount - 1U;
+  const float closure = distanceMm(
+      static_cast<float>(route.waypoints[last].xMm),
+      static_cast<float>(route.waypoints[last].yMm),
+      static_cast<float>(route.waypoints[0].xMm),
+      static_cast<float>(route.waypoints[0].yMm));
+  if (closure <= kClosedClosureSkipDistanceMm) return baseLength;
+  return baseLength + static_cast<uint32_t>(lroundf(closure));
+}
+
+MapRouteType MapController::persistedRouteType(MapReplayMode mode) {
+  return IsClosingMode(mode) ? MapRouteType::CLOSED : MapRouteType::OPEN;
+}
+
+MapReplayMode MapController::persistedReplayMode(MapReplayMode mode) {
+  return mode == MapReplayMode::CLOSED ? MapReplayMode::ONCE : mode;
+}
+
 void MapController::updateRouteHeaderForSave(MapRouteData& route) const {
+  const MapReplayMode runtimeMode =
+      static_cast<MapReplayMode>(route.header.replayMode);
+  const MapRouteType storedType = persistedRouteType(runtimeMode);
+  const MapReplayMode storedMode = persistedReplayMode(runtimeMode);
   route.header.slot = static_cast<uint8_t>(selectedSlot_);
   route.header.waypointCount =
       constrain(route.header.waypointCount, 0U, STM32_MAP_MAX_WAYPOINTS);
   route.header.payloadBytes = static_cast<uint16_t>(
       route.header.waypointCount * sizeof(MapWaypoint));
-  route.header.routeLengthMm = routeLengthMm(route);
+  route.header.routeType = static_cast<uint8_t>(storedType);
+  route.header.replayMode = static_cast<uint8_t>(storedMode);
+  route.header.routeLengthMm = persistedRouteLengthMm(route, storedType);
   route.header.reserved = mapReplaySpeedToReserved(
       route.header.reserved, replaySpeed_);
   route.header.reserved = mapLoopTargetToReserved(
       route.header.reserved, loopTarget_);
+}
+
+void MapController::normalizeRouteForRuntime(MapRouteData& route,
+                                             MapReplayMode runtimeMode) const {
+  route.header.routeType = static_cast<uint8_t>(MapRouteType::OPEN);
+  route.header.replayMode = static_cast<uint8_t>(runtimeMode);
+  route.header.routeLengthMm = routeLengthMm(route);
 }
 
 bool MapController::validateRoute(const MapRouteData& route,
@@ -1747,13 +1778,17 @@ void MapController::advanceReplayAfterTarget() {
     }
     replayDirection_ = -1;
     replayReturned_ = true;
-    replayReturnPhase_ = ReplayReturnPhase::INBOUND;
-    debug_.print("MAP,RETURN,TURNAROUND,WP=");
-    debug_.println(static_cast<unsigned>(replayCurrentIndex_));
-    debug_.print("MAP,RETURN,PHASE=BACK,FROM=");
-    debug_.print(static_cast<unsigned>(replayCurrentIndex_));
-    debug_.print(",TO=");
-    debug_.println(static_cast<unsigned>(count - 2U));
+    if (routeMode_ == MapReplayMode::RETURN) {
+      replayReturnPhase_ = ReplayReturnPhase::INBOUND;
+      debug_.print("MAP,RETURN,TURNAROUND,WP=");
+      debug_.println(static_cast<unsigned>(replayCurrentIndex_));
+      debug_.print("MAP,RETURN,PHASE=BACK,FROM=");
+      debug_.print(static_cast<unsigned>(replayCurrentIndex_));
+      debug_.print(",TO=");
+      debug_.println(static_cast<unsigned>(count - 2U));
+    } else {
+      replayReturnPhase_ = ReplayReturnPhase::NONE;
+    }
     replayTargetIndex_ = count - 2U;
     return;
   }
@@ -2187,7 +2222,6 @@ void MapController::serviceStorage() {
     deletePending_ = false;
     if (store_.erase(selectedSlot_)) {
       loadedValid_ = false;
-      legacyCanonicalMigrationPending_ = false;
       storeState_ = MapStoreState::EMPTY;
       storageErrorReason_ = MapStorageErrorReason::NONE;
       mode_ = MapControllerMode::READY;
@@ -2204,15 +2238,16 @@ void MapController::serviceStorage() {
   if (savePending_) {
     if (!robot_.motorsStopped() || robot_.aiMotionActive()) return;
     savePending_ = false;
+    const MapReplayMode runtimeMode = routeMode_;
     const bool saved = store_.save(selectedSlot_, route_);
     if (saved) {
       loadedValid_ = true;
       storeState_ = MapStoreState::SAVED;
       storageErrorReason_ = MapStorageErrorReason::NONE;
       teachOldRouteAvailable_ = false;
-      legacyCanonicalMigrationPending_ = false;
       routeType_ = MapRouteType::OPEN;
-      routeMode_ = static_cast<MapReplayMode>(route_.header.replayMode);
+      routeMode_ = runtimeMode;
+      normalizeRouteForRuntime(route_, runtimeMode);
       mode_ = MapControllerMode::SAVED;
       log("TEACH_SAVE=OK");
     } else {
@@ -2244,7 +2279,7 @@ void MapController::serviceStorage() {
     updateRouteHeaderForSave(route_);
     if (!store_.save(selectedSlot_, route_)) {
       routeMode_ = modeBeforeSave_;
-      route_.header.replayMode = static_cast<uint8_t>(routeMode_);
+      normalizeRouteForRuntime(route_, routeMode_);
       storeState_ = MapStoreState::STORAGE_ERROR;
       storageErrorReason_ = MapStorageErrorReason::MODE_SAVE;
       mode_ = MapControllerMode::SAVED;
@@ -2252,7 +2287,7 @@ void MapController::serviceStorage() {
     } else {
       storeState_ = MapStoreState::SAVED;
       storageErrorReason_ = MapStorageErrorReason::NONE;
-      legacyCanonicalMigrationPending_ = false;
+      normalizeRouteForRuntime(route_, routeMode_);
       log("REPLAY_MODE_SAVE=OK");
     }
     statusDirty_ = true;

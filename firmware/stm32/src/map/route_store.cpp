@@ -110,6 +110,8 @@ bool MapRouteStore::headerFieldsValid(const MapRouteHeader& header,
       header.payloadBytes > sizeof(MapRouteData) - sizeof(MapRouteHeader)) {
     return false;
   }
+  // Read compatibility accepts the previous V5.2.10 runtime-only CLOSED=4
+  // record so an existing device can recover it; save() below never writes 4.
   if (header.routeType > static_cast<uint8_t>(MapRouteType::CLOSED) ||
       header.replayMode > static_cast<uint8_t>(MapReplayMode::CLOSED)) {
     return false;
@@ -222,7 +224,7 @@ bool MapRouteStore::save(MapSlot slot, MapRouteData& route) {
       route.header.waypointCount > STM32_MAP_MAX_WAYPOINTS ||
       route.header.routeType > static_cast<uint8_t>(MapRouteType::CLOSED) ||
       route.header.replayMode >
-          static_cast<uint8_t>(MapReplayMode::CLOSED)) {
+          static_cast<uint8_t>(MapReplayMode::PING_PONG)) {
     return false;
   }
   MapRouteHeader previous{};
