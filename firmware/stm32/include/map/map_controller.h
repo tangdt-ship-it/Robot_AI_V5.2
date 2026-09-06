@@ -118,6 +118,7 @@ class MapController {
   void stagePostTeachBackSnapshot();
   void armPostTeachBackAfterSave();
   void invalidatePostTeachBack(const char* reason);
+  bool postTeachBackRejectShouldInvalidate(const char* reason) const;
   bool postTeachBackAvailable(const char*& reason) const;
   bool startPostTeachBack(const char*& reason);
   bool validateRoute(const MapRouteData& route, const char*& reason) const;

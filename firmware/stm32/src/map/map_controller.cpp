@@ -660,16 +660,28 @@ void MapController::handleStart() {
     const char* backReason = nullptr;
     if (!postTeachBackAvailable(backReason)) {
       const char* reason = backReason != nullptr ? backReason : "UNAVAILABLE";
+      robot_.stopImmediately(true);
       debug_.print("MAP,BACK_P0,REJECT,REASON=");
-      debug_.println(reason);
-      invalidatePostTeachBack(reason);
+      if (postTeachBackRejectShouldInvalidate(reason)) {
+        debug_.println(reason);
+        invalidatePostTeachBack(reason);
+      } else {
+        debug_.print(reason);
+        debug_.println(",RETRY=1");
+      }
       return;
     }
     if (!startPostTeachBack(backReason)) {
       const char* reason = backReason != nullptr ? backReason : "START";
+      robot_.stopImmediately(true);
       debug_.print("MAP,BACK_P0,REJECT,REASON=");
-      debug_.println(reason);
-      invalidatePostTeachBack(reason);
+      if (postTeachBackRejectShouldInvalidate(reason)) {
+        debug_.println(reason);
+        invalidatePostTeachBack(reason);
+      } else {
+        debug_.print(reason);
+        debug_.println(",RETRY=1");
+      }
     }
     return;
   }
@@ -1055,8 +1067,27 @@ void MapController::invalidatePostTeachBack(const char* reason) {
   statusDirty_ = true;
 }
 
+bool MapController::postTeachBackRejectShouldInvalidate(
+    const char* reason) const {
+  if (reason == nullptr) return true;
+  // These failures describe a temporary runtime precondition. Keep the
+  // Teach snapshot so the user can correct the condition and press START
+  // again; nothing is retried automatically.
+  const char* transientReasons[] = {
+      "NOT_MAP_PAGE", "PS2_NOT_NEUTRAL", "BRAKE", "ODOMETRY", "HEADING",
+      "OBSTACLE_SENSOR", "OBSTACLE_NOT_CLEAR", "POSE", "MOTION_OWNER"};
+  for (const char* transient : transientReasons) {
+    if (strcmp(reason, transient) == 0) return false;
+  }
+  return true;
+}
+
 bool MapController::postTeachBackAvailable(const char*& reason) const {
   reason = nullptr;
+  if (!display_.isMapPage()) {
+    reason = "NOT_MAP_PAGE";
+    return false;
+  }
   if (!postTeachBack_.valid || postTeachBackActive_) {
     reason = "NOT_AVAILABLE";
     return false;

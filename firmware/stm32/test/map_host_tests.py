@@ -1190,6 +1190,23 @@ class MapHostTests(unittest.TestCase):
         self.assertIn('robot_.headingResetGeneration() != '
                       'postTeachBack_.headingResetGeneration', MAP_TEXT)
 
+    def test_post_teach_back_transient_rejects_keep_context(self):
+        self.assertIn('if (!display_.isMapPage())', MAP_TEXT)
+        self.assertIn('reason = "NOT_MAP_PAGE"', MAP_TEXT)
+        self.assertIn('postTeachBackRejectShouldInvalidate', MAP_TEXT)
+        for reason in (
+            '"NOT_MAP_PAGE"', '"PS2_NOT_NEUTRAL"', '"BRAKE"',
+            '"ODOMETRY"', '"HEADING"', '"OBSTACLE_SENSOR"',
+            '"OBSTACLE_NOT_CLEAR"', '"POSE"', '"MOTION_OWNER"'):
+            self.assertIn(reason, MAP_TEXT)
+        self.assertIn('debug_.println(",RETRY=1")', MAP_TEXT)
+        start_block = MAP_TEXT.split(
+            'void MapController::handleStart()', 1
+        )[1].split('void MapController::handleTriangle()', 1)[0]
+        self.assertIn('robot_.stopImmediately(true)', start_block)
+        self.assertIn('postTeachBackRejectShouldInvalidate(reason)', start_block)
+        self.assertIn('postTeachBack_.valid && !postTeachBackActive_', MAP_TEXT)
+
     def test_post_teach_back_lcd_is_bounded_and_preserves_user_mode(self):
         lines = (
             "MAP1 BACK P0 READY",
