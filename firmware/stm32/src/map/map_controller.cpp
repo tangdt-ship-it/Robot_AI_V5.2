@@ -49,12 +49,33 @@ const char* ActionName(Ps2MapAction action) {
   return "UNKNOWN";
 }
 
+bool IsReplayModeValueValid(MapReplayMode mode) {
+  return mode == MapReplayMode::ONCE || mode == MapReplayMode::LOOP ||
+         mode == MapReplayMode::RETURN || mode == MapReplayMode::PING_PONG ||
+         mode == MapReplayMode::CLOSED;
+}
+
+MapReplayMode EffectiveReplayMode(MapRouteType type, MapReplayMode mode) {
+  // Old records encoded a closed route as routeType=CLOSED with ONCE/LOOP.
+  // Translate only in RAM; Flash is migrated only by an explicit save.
+  if (type == MapRouteType::CLOSED && mode == MapReplayMode::ONCE) {
+    return MapReplayMode::CLOSED;
+  }
+  return mode;
+}
+
 bool IsReplayModeAllowed(MapRouteType type, MapReplayMode mode) {
+  if (!IsReplayModeValueValid(mode)) return false;
   if (type == MapRouteType::CLOSED) {
     return mode == MapReplayMode::ONCE || mode == MapReplayMode::LOOP;
   }
   return mode == MapReplayMode::ONCE || mode == MapReplayMode::RETURN ||
-         mode == MapReplayMode::PING_PONG;
+         mode == MapReplayMode::PING_PONG || mode == MapReplayMode::CLOSED ||
+         mode == MapReplayMode::LOOP;
+}
+
+bool IsClosingMode(MapReplayMode mode) {
+  return mode == MapReplayMode::CLOSED || mode == MapReplayMode::LOOP;
 }
 
 const char* HoldReasonName(MapHoldReason reason) {
@@ -102,9 +123,9 @@ void MapController::begin() {
   storageErrorReason_ = MapStorageErrorReason::NONE;
   const MapSlotMetadata metadata = store_.metadata(selectedSlot_);
   storeState_ = metadata.state;
-  routeType_ = metadata.routeType;
-  routeMode_ = IsReplayModeAllowed(routeType_, metadata.replayMode)
-                   ? metadata.replayMode
+  routeType_ = MapRouteType::OPEN;
+  routeMode_ = IsReplayModeAllowed(metadata.routeType, metadata.replayMode)
+                   ? EffectiveReplayMode(metadata.routeType, metadata.replayMode)
                    : MapReplayMode::ONCE;
   replaySpeed_ = metadata.replaySpeed;
   loopTarget_ = metadata.loopTarget;
@@ -222,9 +243,9 @@ void MapController::handleSlot(uint8_t slot) {
   loadedValid_ = false;
   const MapSlotMetadata metadata = store_.metadata(selectedSlot_);
   storeState_ = metadata.state;
-  routeType_ = metadata.routeType;
-  routeMode_ = IsReplayModeAllowed(routeType_, metadata.replayMode)
-                   ? metadata.replayMode
+  routeType_ = MapRouteType::OPEN;
+  routeMode_ = IsReplayModeAllowed(metadata.routeType, metadata.replayMode)
+                   ? EffectiveReplayMode(metadata.routeType, metadata.replayMode)
                    : MapReplayMode::ONCE;
   replaySpeed_ = metadata.replaySpeed;
   loopTarget_ = metadata.loopTarget;
@@ -277,7 +298,9 @@ bool MapController::enterSettings(const char*& reason) {
     return false;
   }
   settingsItem_ = MapSettingsItem::MODE;
-  settingsMode_ = routeMode_;
+  settingsMode_ = routeMode_ == MapReplayMode::PING_PONG
+                      ? MapReplayMode::ONCE
+                      : routeMode_;
   settingsSpeed_ = replaySpeed_;
   settingsLoopTarget_ = loopTarget_;
   helpPage_ = 0U;
@@ -300,7 +323,10 @@ void MapController::leaveMapUiCapture() {
 
 void MapController::saveSettingsAndExit() {
   if (mode_ != MapControllerMode::SETTINGS) return;
-  if (!IsReplayModeAllowed(routeType_, settingsMode_)) {
+  const char* modeReason = nullptr;
+  if (!IsReplayModeAllowed(MapRouteType::OPEN, settingsMode_) ||
+      (IsClosingMode(settingsMode_) &&
+       !hasValidClosingEdge(route_, modeReason))) {
     debug_.println("MAP,SETTINGS,SAVE,REJECT=MODE");
     return;
   }
@@ -317,6 +343,9 @@ void MapController::saveSettingsAndExit() {
     return;
   }
   MapRouteData candidate = route_;
+  // New records always use the canonical open geometry. CLOSED is a replay
+  // mode, not a second persisted route topology.
+  candidate.header.routeType = static_cast<uint8_t>(MapRouteType::OPEN);
   candidate.header.replayMode = static_cast<uint8_t>(settingsMode_);
   const MapReplayMode oldMode = routeMode_;
   const int16_t oldSpeed = replaySpeed_;
@@ -337,6 +366,7 @@ void MapController::saveSettingsAndExit() {
     return;
   }
   route_ = candidate;
+  routeType_ = MapRouteType::OPEN;
   routeMode_ = settingsMode_;
   replaySpeed_ = settingsSpeed_;
   loopTarget_ = settingsLoopTarget_;
@@ -391,28 +421,34 @@ void MapController::enterHelp() {
 
 void MapController::cycleSettingsMode(int8_t direction) {
   if (direction == 0) return;
-  if (routeType_ == MapRouteType::CLOSED) {
-    settingsMode_ = settingsMode_ == MapReplayMode::LOOP
-                        ? MapReplayMode::ONCE
-                        : MapReplayMode::LOOP;
-    return;
-  }
-  if (direction > 0) {
-    settingsMode_ = settingsMode_ == MapReplayMode::ONCE
-                        ? MapReplayMode::RETURN
-                        : settingsMode_ == MapReplayMode::RETURN
-                            ? MapReplayMode::PING_PONG
-                            : MapReplayMode::ONCE;
-  } else {
-    settingsMode_ = settingsMode_ == MapReplayMode::ONCE
-                        ? MapReplayMode::PING_PONG
-                        : settingsMode_ == MapReplayMode::PING_PONG
-                            ? MapReplayMode::RETURN
-                            : MapReplayMode::ONCE;
-  }
-  if (!IsReplayModeAllowed(routeType_, settingsMode_)) {
+  const char* closeReason = nullptr;
+  const bool closeAvailable = hasValidClosingEdge(route_, closeReason);
+  if (settingsMode_ == MapReplayMode::PING_PONG) {
     settingsMode_ = MapReplayMode::ONCE;
   }
+  if (closeAvailable) {
+    constexpr MapReplayMode kModes[] = {
+        MapReplayMode::ONCE, MapReplayMode::RETURN, MapReplayMode::CLOSED,
+        MapReplayMode::LOOP};
+    int index = 0;
+    for (int i = 0; i < 4; ++i) {
+      if (kModes[i] == settingsMode_) {
+        index = i;
+        break;
+      }
+    }
+    index = (index + (direction > 0 ? 1 : 3)) % 4;
+    settingsMode_ = kModes[index];
+    return;
+  }
+  if ((direction > 0 && settingsMode_ == MapReplayMode::RETURN) ||
+      (direction < 0 && settingsMode_ == MapReplayMode::ONCE)) {
+    debug_.print("MAP,MODE,CLOSE_UNAVAILABLE,REASON=");
+    debug_.println(closeReason != nullptr ? closeReason : "CLOSURE");
+  }
+  settingsMode_ = settingsMode_ == MapReplayMode::ONCE
+                      ? MapReplayMode::RETURN
+                      : MapReplayMode::ONCE;
 }
 
 void MapController::cycleSettingsSpeed(int8_t direction) {
@@ -543,8 +579,7 @@ void MapController::handleStart() {
       debug_.print(static_cast<unsigned>(replayTargetIndex_));
       debug_.print(",GEN=");
       debug_.println(replayGeneration_);
-      if (routeType_ == MapRouteType::CLOSED &&
-          routeMode_ == MapReplayMode::LOOP) {
+      if (routeMode_ == MapReplayMode::LOOP) {
         debug_.print("MAP,LOOP,RESUME,LAP=");
         debug_.print(replayLapCounter_);
         debug_.print(",WP=");
@@ -564,8 +599,7 @@ void MapController::handleStart() {
   if (prepareReplay(reason)) {
     debug_.print("MAP,START,ACCEPT,GEN=");
     debug_.println(replayGeneration_);
-    if (routeType_ == MapRouteType::CLOSED &&
-        routeMode_ == MapReplayMode::LOOP) {
+    if (routeMode_ == MapReplayMode::LOOP) {
       debug_.println("MAP,LOOP,START");
     }
   } else {
@@ -621,17 +655,6 @@ void MapController::handleCircle() {
     requestTeachFinish();
     return;
   }
-  if (mode_ == MapControllerMode::CLOSED_CONFIRM) {
-    debug_.println("MAP,CIRCLE,ACTION=CONFIRM_CLOSED");
-    const uint32_t closeDistance = closeCandidateDistanceMm_;
-    debug_.print("MAP,TYPE_SELECT,TYPE=CLOSED,CLOSE_DIST=");
-    debug_.println(closeDistance);
-    if (queueTeachSave(MapRouteType::CLOSED,
-                       MapControllerMode::CLOSED_CONFIRM)) {
-      debug_.println("MAP,CLOSE_CONFIRM,RESULT=CLOSED");
-    }
-    return;
-  }
   if (mode_ == MapControllerMode::DELETE_CONFIRM) {
     if (!loadedValid_ || replayActive_ || teachFinishPending_ ||
         robot_.aiMotionActive() || !robot_.motorsStopped() ||
@@ -684,12 +707,6 @@ void MapController::handleCross() {
   } else if (mode_ == MapControllerMode::SETTINGS ||
              mode_ == MapControllerMode::DELETE_CONFIRM) {
     cancelSettings();
-  } else if (mode_ == MapControllerMode::CLOSED_CONFIRM) {
-    debug_.println("MAP,TYPE_SELECT,TYPE=OPEN");
-    if (queueTeachSave(MapRouteType::OPEN,
-                       MapControllerMode::CLOSED_CONFIRM)) {
-      debug_.println("MAP,CLOSE_CONFIRM,RESULT=OPEN");
-    }
   } else if (storageErrorReason_ != MapStorageErrorReason::NONE &&
              storageErrorReason_ != MapStorageErrorReason::STORAGE_INIT &&
              loadedValid_) {
@@ -724,14 +741,6 @@ void MapController::handleCrossLong() {
     cancelSettings();
     return;
   }
-  if (mode_ == MapControllerMode::CLOSED_CONFIRM) {
-    debug_.println("MAP,TYPE_SELECT,TYPE=OPEN");
-    if (queueTeachSave(MapRouteType::OPEN,
-                       MapControllerMode::CLOSED_CONFIRM)) {
-      debug_.println("MAP,CLOSE_CONFIRM,RESULT=OPEN");
-    }
-    return;
-  }
   if (replayActive_) {
     // Be robust if the short event was delayed behind another input: safety
     // still stops first, then the same physical press escalates to CANCEL.
@@ -758,8 +767,17 @@ bool MapController::loadSelected() {
   }
   loadedValid_ = true;
   storeState_ = MapStoreState::SAVED;
-  routeType_ = static_cast<MapRouteType>(route_.header.routeType);
-  routeMode_ = static_cast<MapReplayMode>(route_.header.replayMode);
+  const MapRouteType storedType =
+      static_cast<MapRouteType>(route_.header.routeType);
+  const MapReplayMode storedMode =
+      static_cast<MapReplayMode>(route_.header.replayMode);
+  routeType_ = MapRouteType::OPEN;
+  routeMode_ = EffectiveReplayMode(storedType, storedMode);
+  // Legacy CLOSED records are normalized in RAM only. Flash migration occurs
+  // only when Settings or a later Teach explicitly saves the route.
+  route_.header.routeType = static_cast<uint8_t>(MapRouteType::OPEN);
+  route_.header.replayMode = static_cast<uint8_t>(routeMode_);
+  route_.header.routeLengthMm = routeLengthMm(route_);
   replaySpeed_ = mapReplaySpeedFromReserved(route_.header.reserved);
   loopTarget_ = mapLoopTargetFromReserved(route_.header.reserved);
   storageErrorReason_ = MapStorageErrorReason::NONE;
@@ -1058,9 +1076,8 @@ bool MapController::finalizeTeach() {
   debug_.print(closeHeading, 1);
 
   if (teachMode_ == MapTeachMode::MANUAL_KEYFRAME) {
-    // Manual keyframes are authoritative. Do not infer OPEN/CLOSED from the
-    // endpoint pose: the operator explicitly chooses the route type after
-    // Teach, including routes whose final point is far from P0.
+    // Manual keyframes are authoritative. The saved record is always the
+    // canonical open geometry; CLOSED/LOOP is selected later in Settings.
     optimizedRoute_ = route_;
     semanticRoute_ = route_;
     debug_.println();
@@ -1078,7 +1095,7 @@ bool MapController::finalizeTeach() {
     debug_.print(static_cast<unsigned>(manualCount));
     debug_.print(",LENGTH=");
     debug_.print(routeLengthMm(route_));
-    debug_.println(",TYPE=USER_CONFIRM");
+    debug_.println(",TYPE=OPEN_CANONICAL");
     closeCandidateDistanceMm_ = static_cast<uint32_t>(lroundf(closeDistance));
     closeCandidateHeadingDeg_ = static_cast<int16_t>(lroundf(closeHeading));
     routeType_ = MapRouteType::OPEN;
@@ -1090,13 +1107,11 @@ bool MapController::finalizeTeach() {
     loadedValid_ = false;
     teachOriginValid_ = false;
     teachFinishPending_ = false;
-    mode_ = MapControllerMode::CLOSED_CONFIRM;
-    debug_.print("MAP,TYPE_CONFIRM,POINTS=");
+    mode_ = MapControllerMode::READY;
+    debug_.print("MAP,TEACH,SAVED_PENDING,POINTS=");
     debug_.print(static_cast<unsigned>(count));
-    debug_.print(",CLOSE_DIST=");
-    debug_.print(closeDistance, 1);
-    debug_.print(",CLOSE_HEADING=");
-    debug_.println(closeHeading, 1);
+    debug_.println(",MODE=ONCE");
+    savePending_ = true;
     statusDirty_ = true;
     return true;
   } else {
@@ -1117,6 +1132,8 @@ bool MapController::finalizeTeach() {
     const MapRouteType detectedType = (autoClosed || closedCandidate)
                                           ? MapRouteType::CLOSED
                                           : MapRouteType::OPEN;
+    // Optimizers may still use the compatibility route type while cleaning,
+    // but the persisted route is normalized below to OPEN geometry.
     route_.header.routeType = static_cast<uint8_t>(detectedType);
     route_.header.replayMode = static_cast<uint8_t>(routeMode_);
     RouteCleanerMetrics optimizeMetrics;
@@ -1140,25 +1157,9 @@ bool MapController::finalizeTeach() {
     }
     route_ = semanticRoute_;
     logSemanticSummary(semanticMetrics);
-    if (autoClosed) {
-      return queueTeachSave(MapRouteType::CLOSED,
-                            MapControllerMode::TEACHING);
-    }
-    if (closedCandidate) {
+    if (autoClosed || closedCandidate) {
       closeCandidateDistanceMm_ = static_cast<uint32_t>(lroundf(closeDistance));
       closeCandidateHeadingDeg_ = static_cast<int16_t>(lroundf(closeHeading));
-      routeType_ = MapRouteType::CLOSED;
-      routeMode_ = MapReplayMode::ONCE;
-      route_.header.routeType = static_cast<uint8_t>(routeType_);
-      route_.header.replayMode = static_cast<uint8_t>(routeMode_);
-      updateRouteHeaderForSave(route_);
-      storeState_ = MapStoreState::EMPTY;
-      loadedValid_ = false;
-      teachOriginValid_ = false;
-      teachFinishPending_ = false;
-      mode_ = MapControllerMode::CLOSED_CONFIRM;
-      statusDirty_ = true;
-      return true;
     }
     return queueTeachSave(MapRouteType::OPEN, MapControllerMode::TEACHING);
   }
@@ -1166,9 +1167,10 @@ bool MapController::finalizeTeach() {
 
 bool MapController::queueTeachSave(MapRouteType type,
                                    MapControllerMode failureMode) {
+  (void)type;
   const MapRouteType previousType = routeType_;
   const MapReplayMode previousMode = routeMode_;
-  routeType_ = type;
+  routeType_ = MapRouteType::OPEN;
   if (!IsReplayModeAllowed(routeType_, routeMode_)) {
     routeMode_ = MapReplayMode::ONCE;
   }
@@ -1212,14 +1214,8 @@ uint32_t MapController::routeLengthMm(const MapRouteData& route) const {
                         static_cast<float>(route.waypoints[i].xMm),
                         static_cast<float>(route.waypoints[i].yMm));
   }
-  if (static_cast<MapRouteType>(route.header.routeType) == MapRouteType::CLOSED) {
-    const float closure = distanceMm(
-        static_cast<float>(route.waypoints[count - 1U].xMm),
-        static_cast<float>(route.waypoints[count - 1U].yMm),
-        static_cast<float>(route.waypoints[0].xMm),
-        static_cast<float>(route.waypoints[0].yMm));
-    if (closure > kClosedClosureSkipDistanceMm) total += closure;
-  }
+  // The persisted length is the canonical open geometry. A CLOSED/LOOP
+  // replay adds the logical Pn->P0 edge at runtime without changing storage.
   return total <= 0.0f ? 0U : static_cast<uint32_t>(lroundf(total));
 }
 
@@ -1252,8 +1248,7 @@ bool MapController::validateRoute(const MapRouteData& route,
   const MapReplayMode mode = static_cast<MapReplayMode>(route.header.replayMode);
   if (static_cast<uint8_t>(type) >
           static_cast<uint8_t>(MapRouteType::CLOSED) ||
-      static_cast<uint8_t>(mode) >
-          static_cast<uint8_t>(MapReplayMode::PING_PONG) ||
+      !IsReplayModeValueValid(mode) ||
       !IsReplayModeAllowed(type, mode)) {
     reason = "TYPE_MODE";
     return false;
@@ -1269,7 +1264,8 @@ bool MapController::validateRoute(const MapRouteData& route,
       return false;
     }
   }
-  if (type == MapRouteType::CLOSED) {
+  const MapReplayMode effectiveMode = EffectiveReplayMode(type, mode);
+  if (type == MapRouteType::CLOSED || IsClosingMode(effectiveMode)) {
     if (count < 3U) {
       reason = "CLOSED_POINTS";
       return false;
@@ -1291,11 +1287,50 @@ bool MapController::validateRoute(const MapRouteData& route,
     }
   }
   const uint32_t computed = routeLengthMm(route);
-  if (computed == 0U ||
-      !approximatelyEqual(static_cast<float>(computed),
-                          static_cast<float>(route.header.routeLengthMm),
-                          50.0f)) {
+  bool lengthValid = approximatelyEqual(
+      static_cast<float>(computed), static_cast<float>(route.header.routeLengthMm),
+      50.0f);
+  // Accept the old CLOSED record length (which included Pn->P0) during load.
+  // No new save writes that representation.
+  if (!lengthValid && type == MapRouteType::CLOSED) {
+    const float closure = distanceMm(
+        static_cast<float>(route.waypoints[count - 1U].xMm),
+        static_cast<float>(route.waypoints[count - 1U].yMm),
+        static_cast<float>(route.waypoints[0].xMm),
+        static_cast<float>(route.waypoints[0].yMm));
+    const uint32_t legacyLength = static_cast<uint32_t>(lroundf(
+        static_cast<float>(computed) +
+        (closure > kClosedClosureSkipDistanceMm ? closure : 0.0f)));
+    lengthValid = approximatelyEqual(
+        static_cast<float>(legacyLength),
+        static_cast<float>(route.header.routeLengthMm), 50.0f);
+  }
+  if (computed == 0U || !lengthValid) {
     reason = "LENGTH";
+    return false;
+  }
+  reason = "OK";
+  return true;
+}
+
+bool MapController::hasValidClosingEdge(const MapRouteData& route,
+                                        const char*& reason) const {
+  const uint16_t count = route.header.waypointCount;
+  if (count < 3U) {
+    reason = "CLOSED_POINTS";
+    return false;
+  }
+  const float closure = distanceMm(
+      static_cast<float>(route.waypoints[count - 1U].xMm),
+      static_cast<float>(route.waypoints[count - 1U].yMm),
+      static_cast<float>(route.waypoints[0].xMm),
+      static_cast<float>(route.waypoints[0].yMm));
+  if (closure > kMaximumSegmentMm) {
+    reason = "CLOSURE_TOO_LONG";
+    return false;
+  }
+  if (closure > kClosedClosureSkipDistanceMm && closure < kMinimumSegmentMm) {
+    reason = "CLOSURE_TOO_SHORT";
     return false;
   }
   reason = "OK";
@@ -1343,6 +1378,7 @@ bool MapController::prepareReplay(const char*& rejectReason) {
   replayTargetIndex_ = 1U;
   replayDirection_ = 1;
   replayReturned_ = false;
+  replayReturnPhase_ = ReplayReturnPhase::OUTBOUND;
   replayLapCounter_ = 0U;
   replayOriginRouteGeneration_ = route_.header.generation;
   replayTargetDistanceMm_ = 0U;
@@ -1449,7 +1485,7 @@ bool MapController::startNextReplaySegment() {
   }
   const uint16_t count = route_.header.waypointCount;
   const bool logicalClosingEdge =
-      routeType_ == MapRouteType::CLOSED && replayDirection_ > 0 &&
+      IsClosingMode(routeMode_) && replayDirection_ > 0 &&
       replayCurrentIndex_ == count - 1U && replayTargetIndex_ == 0U;
   if (logicalClosingEdge) {
     // A closure that is already effectively at P0 is a logical edge, not a
@@ -1637,17 +1673,17 @@ void MapController::advanceReplayAfterTarget() {
   const uint16_t targetIndex = replayTargetIndex_;
   const uint16_t count = route_.header.waypointCount;
   const bool logicalClosingEdge =
-      routeType_ == MapRouteType::CLOSED && replayDirection_ > 0 &&
+      IsClosingMode(routeMode_) && replayDirection_ > 0 &&
       fromIndex == count - 1U && targetIndex == 0U;
   replayCurrentIndex_ = targetIndex;
   if (logicalClosingEdge) {
     debug_.println("MAP,CLOSE_EDGE,DONE");
   }
   if (replayDirection_ > 0) {
-    if (routeType_ == MapRouteType::CLOSED &&
+    if (IsClosingMode(routeMode_) &&
         fromIndex == count - 1U && targetIndex == 0U) {
       // The segment from the final waypoint back to P0 is a real closing
-      // edge for CLOSED ONCE and LOOP. A LOOP lap completes only after this
+      // edge for CLOSED and LOOP. A LOOP lap completes only after this
       // edge reaches P0; P0 is never treated as a terminal completion.
       if (routeMode_ == MapReplayMode::LOOP) {
         if (replayLapCounter_ != 0xFFFFFFFFUL) ++replayLapCounter_;
@@ -1663,7 +1699,7 @@ void MapController::advanceReplayAfterTarget() {
         replayTargetIndex_ = count > 1U ? 1U : 0U;
         return;
       }
-      if (routeMode_ == MapReplayMode::ONCE) {
+      if (routeMode_ == MapReplayMode::CLOSED) {
         completeReplay();
         return;
       }
@@ -1672,9 +1708,7 @@ void MapController::advanceReplayAfterTarget() {
       replayTargetIndex_ = replayCurrentIndex_ + 1U;
       return;
     }
-    if (routeType_ == MapRouteType::CLOSED &&
-        (routeMode_ == MapReplayMode::ONCE ||
-         routeMode_ == MapReplayMode::LOOP) &&
+    if (IsClosingMode(routeMode_) &&
         replayCurrentIndex_ == count - 1U) {
       replayTargetIndex_ = 0U;
       return;
@@ -1685,6 +1719,7 @@ void MapController::advanceReplayAfterTarget() {
     }
     replayDirection_ = -1;
     replayReturned_ = true;
+    replayReturnPhase_ = ReplayReturnPhase::INBOUND;
     replayTargetIndex_ = count - 2U;
     return;
   }
@@ -1724,8 +1759,7 @@ void MapController::enterReplayHold(MapHoldReason reason, bool allowResume) {
   debug_.print(static_cast<unsigned>(replayTargetIndex_));
   debug_.print(",GEN=");
   debug_.println(replayGeneration_);
-  if (routeType_ == MapRouteType::CLOSED &&
-      routeMode_ == MapReplayMode::LOOP) {
+  if (routeMode_ == MapReplayMode::LOOP) {
     debug_.print("MAP,LOOP,HOLD,LAP=");
     debug_.print(replayLapCounter_);
     debug_.print(",WP=");
@@ -1758,8 +1792,7 @@ void MapController::completeReplay() {
 }
 
 void MapController::cancelReplay(const char* reason) {
-  const bool wasClosedLoop = routeType_ == MapRouteType::CLOSED &&
-                             routeMode_ == MapReplayMode::LOOP;
+  const bool wasClosedLoop = routeMode_ == MapReplayMode::LOOP;
   const uint32_t cancelledLap = replayLapCounter_;
   robot_.stopImmediately(true);
   nextReplayGeneration();
@@ -1792,6 +1825,7 @@ void MapController::clearReplayResumeContext() {
   replayTargetIndex_ = 1U;
   replayDirection_ = 1;
   replayReturned_ = false;
+  replayReturnPhase_ = ReplayReturnPhase::OUTBOUND;
   replayOrigin_ = {};
   replayHoldPose_ = {};
   replayOriginRouteGeneration_ = 0U;
@@ -1820,7 +1854,7 @@ bool MapController::canResumeReplay(const char*& rejectReason) const {
     return false;
   }
   if (!replayOriginValid_ ||
-      !IsReplayModeAllowed(routeType_, routeMode_)) {
+      !IsReplayModeAllowed(MapRouteType::OPEN, routeMode_)) {
     rejectReason = "REPLAY_CONTEXT";
     return false;
   }
@@ -2126,7 +2160,7 @@ void MapController::serviceStorage() {
       storeState_ = MapStoreState::SAVED;
       storageErrorReason_ = MapStorageErrorReason::NONE;
       teachOldRouteAvailable_ = false;
-      routeType_ = static_cast<MapRouteType>(route_.header.routeType);
+      routeType_ = MapRouteType::OPEN;
       routeMode_ = static_cast<MapReplayMode>(route_.header.replayMode);
       mode_ = MapControllerMode::SAVED;
       log("TEACH_SAVE=OK");

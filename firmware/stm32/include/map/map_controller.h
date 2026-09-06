@@ -43,6 +43,7 @@ class MapController {
 
  private:
   enum class ReplayRealignReason : uint8_t { NONE, PATH, ARRIVAL };
+  enum class ReplayReturnPhase : uint8_t { OUTBOUND, INBOUND };
   enum class MapStorageErrorReason : uint8_t {
     NONE = 0U,
     SETTINGS_SAVE = 1U,
@@ -98,6 +99,8 @@ class MapController {
   bool finalizeTeach();
   bool queueTeachSave(MapRouteType type, MapControllerMode failureMode);
   bool validateRoute(const MapRouteData& route, const char*& reason) const;
+  bool hasValidClosingEdge(const MapRouteData& route,
+                           const char*& reason) const;
   uint32_t routeLengthMm(const MapRouteData& route) const;
   void updateRouteHeaderForSave(MapRouteData& route) const;
 
@@ -204,6 +207,7 @@ class MapController {
   uint16_t replayTargetIndex_ = 0U;
   int8_t replayDirection_ = 1;
   bool replayReturned_ = false;
+  ReplayReturnPhase replayReturnPhase_ = ReplayReturnPhase::OUTBOUND;
   uint32_t replayOriginRouteGeneration_ = 0U;
   uint32_t replayOriginResetGeneration_ = 0U;
   uint32_t replayOriginHeadingResetGeneration_ = 0U;

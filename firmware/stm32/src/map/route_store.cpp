@@ -58,6 +58,7 @@ const char* MapRouteStore::replayModeName(MapReplayMode mode) {
     case MapReplayMode::LOOP: return "LOOP";
     case MapReplayMode::RETURN: return "RETURN";
     case MapReplayMode::PING_PONG: return "PING_PONG";
+    case MapReplayMode::CLOSED: return "CLOSED";
   }
   return "ONCE";
 }
@@ -110,7 +111,7 @@ bool MapRouteStore::headerFieldsValid(const MapRouteHeader& header,
     return false;
   }
   if (header.routeType > static_cast<uint8_t>(MapRouteType::CLOSED) ||
-      header.replayMode > static_cast<uint8_t>(MapReplayMode::PING_PONG)) {
+      header.replayMode > static_cast<uint8_t>(MapReplayMode::CLOSED)) {
     return false;
   }
   return true;
@@ -221,7 +222,7 @@ bool MapRouteStore::save(MapSlot slot, MapRouteData& route) {
       route.header.waypointCount > STM32_MAP_MAX_WAYPOINTS ||
       route.header.routeType > static_cast<uint8_t>(MapRouteType::CLOSED) ||
       route.header.replayMode >
-          static_cast<uint8_t>(MapReplayMode::PING_PONG)) {
+          static_cast<uint8_t>(MapReplayMode::CLOSED)) {
     return false;
   }
   MapRouteHeader previous{};

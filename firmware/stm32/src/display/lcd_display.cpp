@@ -161,7 +161,7 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
   status.replayOperation = replayOperation;
   status.holdReason = holdReason;
   status.routeType = routeType <= 1U ? routeType : 0U;
-  status.replayMode = replayMode <= 3U ? replayMode : 0U;
+  status.replayMode = replayMode <= 4U ? replayMode : 0U;
   status.replayTargetDeg = replayTargetDeg;
   status.replayLapCounter = replayLapCounter;
   status.closeCandidateDistanceMm = closeCandidateDistanceMm;
@@ -238,6 +238,7 @@ void LcdDisplay::buildMapLines() {
   const char* replayMode = status.replayMode == 1U ? "LOOP" :
                            status.replayMode == 2U ? "RETURN" :
                            status.replayMode == 3U ? "PING" : "ONCE";
+  if (status.replayMode == 4U) replayMode = "CLOSED";
   // Keep the 20-column LCD bounded even if an infinite loop has been running
   // for a very long time. Finite loop targets remain exact (1..20).
   const uint32_t completedLapDisplay =
@@ -296,15 +297,6 @@ void LcdDisplay::buildMapLines() {
       snprintf(desired_[2], 21, "NO VALID ROUTE");
       snprintf(desired_[3], 21, "CHECK STORAGE");
     }
-    return;
-  }
-  if (status.mode == 9U) {
-    snprintf(desired_[0], 21, "MAP%u FINISH", mapSlot_);
-    snprintf(desired_[1], 21, "PTS:%03u C:%lumm",
-             static_cast<unsigned>(status.points),
-             static_cast<unsigned long>(status.closeCandidateDistanceMm));
-    snprintf(desired_[2], 21, "X=OPEN");
-    snprintf(desired_[3], 21, "O=CLOSED");
     return;
   }
   if (status.mode == 4U) {
@@ -491,7 +483,10 @@ void LcdDisplay::buildMapLines() {
     snprintf(desired_[3], 21, "X NO");
     return;
   } else {
-    snprintf(desired_[0], 21, "MAP%u %s %s", mapSlot_, title, routeType);
+    // The route is stored once as canonical open geometry. The selected
+    // replay mode, rather than the legacy route type byte, is the user-facing
+    // topology.
+    snprintf(desired_[0], 21, "MAP%u %s", mapSlot_, title);
   }
   snprintf(desired_[1], 21, "PTS:%03u/%03u L:%lu.%lum",
            static_cast<unsigned>(status.points),

@@ -80,15 +80,23 @@ def crc_for(header_fields, waypoints):
 def route_allowed(route_type, replay_mode):
     if route_type == "CLOSED":
         return replay_mode in ("ONCE", "LOOP")
-    return replay_mode in ("ONCE", "RETURN", "PING_PONG")
+    return replay_mode in ("ONCE", "RETURN", "CLOSED", "LOOP",
+                           "PING_PONG")
+
+
+def effective_mode(route_type, replay_mode):
+    if route_type == "CLOSED" and replay_mode == "ONCE":
+        return "CLOSED"
+    return replay_mode
 
 
 def advance(current, direction, count, route_type, replay_mode):
     """Mirror MapController::advanceReplayAfterTarget for planner testing."""
+    replay_mode = effective_mode(route_type, replay_mode)
     if direction > 0:
         if current < count - 1:
             return current + 1, direction, False
-        if route_type == "CLOSED" and replay_mode == "LOOP":
+        if replay_mode in ("CLOSED", "LOOP"):
             return 0, direction, False
         if replay_mode == "ONCE":
             return None, direction, True
@@ -112,41 +120,29 @@ def classify_close(distance_mm, heading_deg, count):
 
 
 def manual_finish_confirmation(points):
-    """Model the manual finish boundary before the user chooses a type."""
+    """Manual Teach saves one canonical open route without X/O confirmation."""
     if not points:
         return {"state": "INVALID", "points": 0, "close_distance": 0.0}
     return {
-        "state": "CLOSED_CONFIRM",
+        "state": "SAVED",
         "points": len(points),
         "close_distance": math.dist(points[-1], points[0]),
+        "type": "OPEN",
+        "mode": "ONCE",
     }
 
 
 def manual_select_route(points, route_type, max_segment=5000.0,
                         minimum_segment=20.0, closure_skip=20.0):
-    """Model explicit OPEN/CLOSED selection and logical closure validation."""
+    """Model the canonical Teach save; replay topology is a later mode."""
     confirmation = manual_finish_confirmation(points)
-    if confirmation["state"] != "CLOSED_CONFIRM":
+    if confirmation["state"] != "SAVED":
         return {"accepted": False, "state": confirmation["state"]}
-    if route_type == "OPEN":
-        if len(points) < 2:
-            return {"accepted": False, "state": "CLOSED_CONFIRM",
-                    "reason": "POINTS"}
-        return {"accepted": True, "state": "SAVED", "type": "OPEN",
-                "points": len(points),
-                "length": route_length(points, closed=False)}
-    if len(points) < 3:
-        return {"accepted": False, "state": "CLOSED_CONFIRM",
-                "reason": "CLOSED_POINTS"}
-    closure = confirmation["close_distance"]
-    if closure > max_segment:
-        return {"accepted": False, "state": "CLOSED_CONFIRM",
-                "reason": "CLOSURE_TOO_LONG"}
-    if closure > closure_skip and closure < minimum_segment:
-        return {"accepted": False, "state": "CLOSED_CONFIRM",
-                "reason": "CLOSURE_TOO_SHORT"}
-    return {"accepted": True, "state": "SAVED", "type": "CLOSED",
-            "points": len(points), "length": route_length(points, closed=True)}
+    if len(points) < 2:
+        return {"accepted": False, "state": "SAVED", "reason": "POINTS"}
+    return {"accepted": True, "state": "SAVED", "type": "OPEN",
+            "mode": "ONCE", "points": len(points),
+            "length": route_length(points, closed=False)}
 
 
 class ClosedReplayModel:
@@ -211,6 +207,79 @@ class ClosedReplayModel:
     def cancel(self):
         self.cancelled = True
         self.held = False
+
+
+class MultiModeReplayModel:
+    """State-machine model for one canonical route and four replay modes."""
+
+    def __init__(self, count, mode, loop_target=0):
+        self.count = count
+        self.mode = mode
+        self.loop_target = loop_target
+        self.current = 0
+        self.target = 1
+        self.direction = 1
+        self.lap = 0
+        self.complete = False
+        self.held = False
+        self.cancelled = False
+        self.generation = 0
+        self.edges = []
+
+    def start_segment(self):
+        self.generation += 1
+        return (self.current, self.target), self.generation
+
+    def finish_segment(self, generation):
+        if (self.complete or self.cancelled or self.held or
+                generation != self.generation):
+            return False
+        source, target = self.current, self.target
+        self.edges.append((source, target))
+        self.current = target
+        if self.direction > 0:
+            if self.current < self.count - 1:
+                self.target = self.current + 1
+            elif self.mode in ("CLOSED", "LOOP"):
+                self.target = 0
+            elif self.mode == "ONCE":
+                self.complete = True
+            else:  # RETURN
+                self.direction = -1
+                self.target = self.count - 2
+        else:
+            if self.current > 0:
+                self.target = self.current - 1
+            else:
+                self.complete = True
+        if (self.mode == "LOOP" and source == self.count - 1 and
+                target == 0):
+            self.lap += 1
+            if self.loop_target and self.lap >= self.loop_target:
+                self.complete = True
+            else:
+                self.target = 1
+        elif (self.mode == "CLOSED" and source == self.count - 1 and
+              target == 0):
+            self.complete = True
+        return True
+
+    def hold(self):
+        self.held = True
+
+    def resume(self):
+        self.held = False
+
+    def cancel(self):
+        self.cancelled = True
+        self.held = False
+
+
+def run_mode(model):
+    while not model.complete and not model.cancelled:
+        _, generation = model.start_segment()
+        model.finish_segment(generation)
+    return model.edges
 
 
 def closed_route_edges(count, laps=1):
@@ -415,7 +484,7 @@ class MapHostTests(unittest.TestCase):
         self.assertIn('debug_.println(",CLASS=AUTO_CLOSED")', MAP_TEXT)
         self.assertIn('debug_.println(",CLASS=CANDIDATE")', MAP_TEXT)
 
-    def test_manual_finish_always_enters_user_type_confirmation(self):
+    def test_manual_finish_saves_canonical_open_route(self):
         finish = MAP_TEXT.index("bool MapController::finalizeTeach()")
         manual = MAP_TEXT.index(
             "if (teachMode_ == MapTeachMode::MANUAL_KEYFRAME)", finish
@@ -424,21 +493,19 @@ class MapHostTests(unittest.TestCase):
         manual_block = MAP_TEXT[manual:auto]
         self.assertNotIn("autoClosed", manual_block)
         self.assertNotIn("closedCandidate", manual_block)
-        self.assertIn("mode_ = MapControllerMode::CLOSED_CONFIRM", manual_block)
-        self.assertIn("MAP,TYPE_CONFIRM,POINTS=", manual_block)
-        self.assertIn("TYPE=USER_CONFIRM", manual_block)
+        self.assertIn("routeType_ = MapRouteType::OPEN", manual_block)
+        self.assertIn("routeMode_ = MapReplayMode::ONCE", manual_block)
+        self.assertIn("TYPE=OPEN_CANONICAL", manual_block)
+        self.assertIn("savePending_ = true", manual_block)
 
     def test_manual_far_route_does_not_auto_classify_and_keeps_points(self):
         points = [(0.0, 0.0), (1000.0, 0.0), (1500.0, 800.0)]
         confirmation = manual_finish_confirmation(points)
-        self.assertEqual(confirmation["state"], "CLOSED_CONFIRM")
+        self.assertEqual(confirmation["state"], "SAVED")
         self.assertEqual(confirmation["points"], 3)
-        self.assertEqual(
-            manual_select_route(points, "OPEN")["type"], "OPEN"
-        )
-        self.assertEqual(
-            manual_select_route(points, "CLOSED")["type"], "CLOSED"
-        )
+        self.assertEqual(manual_select_route(points, "OPEN")["type"], "OPEN")
+        self.assertEqual(manual_select_route(points, "CLOSED")["type"], "OPEN")
+        self.assertEqual(manual_select_route(points, "CLOSED")["mode"], "ONCE")
         self.assertEqual(manual_select_route(points, "OPEN")["points"], 3)
         self.assertEqual(manual_select_route(points, "CLOSED")["points"], 3)
 
@@ -503,10 +570,11 @@ class MapHostTests(unittest.TestCase):
     def test_open_closed_route_detection_and_modes(self):
         self.assertTrue(route_allowed("OPEN", "ONCE"))
         self.assertTrue(route_allowed("OPEN", "RETURN"))
+        self.assertTrue(route_allowed("OPEN", "CLOSED"))
+        self.assertTrue(route_allowed("OPEN", "LOOP"))
         self.assertTrue(route_allowed("OPEN", "PING_PONG"))
         self.assertTrue(route_allowed("CLOSED", "ONCE"))
         self.assertTrue(route_allowed("CLOSED", "LOOP"))
-        self.assertFalse(route_allowed("OPEN", "LOOP"))
         self.assertFalse(route_allowed("CLOSED", "RETURN"))
         self.assertIn("kClosedAutoDistanceMm", MAP_TEXT)
         self.assertIn("kClosedAutoHeadingDeg", MAP_TEXT)
@@ -524,18 +592,14 @@ class MapHostTests(unittest.TestCase):
         self.assertIn('CLASS=CANDIDATE', MAP_TEXT)
         self.assertIn('CLASS=OPEN', MAP_TEXT)
 
-    def test_closed_candidate_requires_user_confirmation(self):
-        self.assertIn('mode_ = MapControllerMode::CLOSED_CONFIRM', MAP_TEXT)
-        self.assertIn('MAP,TYPE_CONFIRM,POINTS=', MAP_TEXT)
-        self.assertIn('MAP,TYPE_SELECT,TYPE=CLOSED,CLOSE_DIST=', MAP_TEXT)
-        self.assertIn('MAP,TYPE_SELECT,TYPE=OPEN', MAP_TEXT)
-        self.assertIn('MAP,CLOSE_CONFIRM,RESULT=CLOSED', MAP_TEXT)
-        self.assertIn('MAP,CLOSE_CONFIRM,RESULT=OPEN', MAP_TEXT)
-        self.assertIn('snprintf(desired_[0], 21, "MAP%u FINISH"', LCD_TEXT)
-        self.assertIn('snprintf(desired_[1], 21, "PTS:%03u C:%lumm"', LCD_TEXT)
-        self.assertIn('snprintf(desired_[2], 21, "X=OPEN")', LCD_TEXT)
-        self.assertIn('snprintf(desired_[3], 21, "O=CLOSED")', LCD_TEXT)
-        self.assertIn('savePending_ = true', MAP_TEXT)
+    def test_teach_does_not_ask_open_closed_confirmation(self):
+        self.assertIn('TYPE=OPEN_CANONICAL', MAP_TEXT)
+        self.assertNotIn('MAP,TYPE_CONFIRM,POINTS=', MAP_TEXT)
+        self.assertNotIn('MAP,TYPE_SELECT,TYPE=CLOSED,CLOSE_DIST=', MAP_TEXT)
+        self.assertNotIn('MAP,CLOSE_CONFIRM,RESULT=CLOSED', MAP_TEXT)
+        self.assertNotIn('snprintf(desired_[2], 21, "X=OPEN")', LCD_TEXT)
+        self.assertNotIn('snprintf(desired_[3], 21, "O=CLOSED")', LCD_TEXT)
+        self.assertIn('candidate.header.routeType = static_cast<uint8_t>(MapRouteType::OPEN)', MAP_TEXT)
 
     def test_manual_open_and_closed_selection_model(self):
         points = [(0.0, 0.0), (1000.0, 0.0), (1500.0, 800.0)]
@@ -544,31 +608,26 @@ class MapHostTests(unittest.TestCase):
         self.assertTrue(opened["accepted"])
         self.assertTrue(closed["accepted"])
         self.assertEqual(opened["length"], route_length(points))
-        self.assertEqual(closed["length"], route_length(points, closed=True))
+        self.assertEqual(closed["length"], route_length(points))
         self.assertEqual(opened["points"], closed["points"])
 
     def test_manual_closed_rejects_too_long_or_too_few_without_losing_route(self):
         two_points = [(0.0, 0.0), (1000.0, 0.0)]
         too_few = manual_select_route(two_points, "CLOSED")
-        self.assertFalse(too_few["accepted"])
-        self.assertEqual(too_few["state"], "CLOSED_CONFIRM")
-        self.assertEqual(too_few["reason"], "CLOSED_POINTS")
+        self.assertTrue(too_few["accepted"])
 
         far_closure = [(0.0, 0.0), (1000.0, 0.0), (6000.0, 0.0)]
         too_long = manual_select_route(far_closure, "CLOSED")
-        self.assertFalse(too_long["accepted"])
-        self.assertEqual(too_long["state"], "CLOSED_CONFIRM")
-        self.assertEqual(too_long["reason"], "CLOSURE_TOO_LONG")
+        self.assertTrue(too_long["accepted"])
         self.assertTrue(manual_select_route(far_closure, "OPEN")["accepted"])
         self.assertIn('reason = closure > kMaximumSegmentMm ? "CLOSURE_TOO_LONG"', MAP_TEXT)
-        self.assertIn('MAP,CLOSE,REJECT,REASON=', MAP_TEXT)
 
-    def test_closed_candidate_is_locked_until_confirmed(self):
+    def test_closed_mode_is_selected_in_settings(self):
         for token in (
-            'mode_ == MapControllerMode::CLOSED_CONFIRM',
-            'logStartReject',
-            'queueTeachSave(MapRouteType::CLOSED',
-            'queueTeachSave(MapRouteType::OPEN',
+            'MapReplayMode::CLOSED',
+            'hasValidClosingEdge',
+            'MAP,MODE,CLOSE_UNAVAILABLE,REASON=',
+            'candidate.header.routeType = static_cast<uint8_t>(MapRouteType::OPEN)',
         ):
             self.assertIn(token, MAP_TEXT)
         self.assertIn('status.mode != 8U', _read(INCLUDE_ROOT / 'display' / 'lcd_display.h'))
@@ -578,7 +637,7 @@ class MapHostTests(unittest.TestCase):
             closed_route_edges(4), [(0, 1), (1, 2), (2, 3), (3, 0)]
         )
         self.assertIn('fromIndex == count - 1U && targetIndex == 0U', MAP_TEXT)
-        self.assertIn('routeMode_ == MapReplayMode::ONCE', MAP_TEXT)
+        self.assertIn('routeMode_ == MapReplayMode::CLOSED', MAP_TEXT)
         self.assertIn('MAP,CLOSE_EDGE,PLAN,FROM=', MAP_TEXT)
         self.assertIn('startReplayGuidedWaypoint', MAP_TEXT)
         self.assertIn('completeReplay();', MAP_TEXT)
@@ -724,7 +783,7 @@ class MapHostTests(unittest.TestCase):
         self.assertEqual(route_length([(0, 0), (100, 0), (100, 100)], True), 341)
         self.assertEqual(route_length([(0, 0), (100, 0), (100, 100), (0, 0)], True), 341)
         self.assertIn('kClosedClosureSkipDistanceMm', MAP_TEXT)
-        self.assertIn('if (closure > kClosedClosureSkipDistanceMm) total += closure', MAP_TEXT)
+        self.assertIn('canonical open geometry', MAP_TEXT)
         self.assertIn('closure > kClosedClosureSkipDistanceMm &&', MAP_TEXT)
         self.assertIn('reason = closure > kMaximumSegmentMm ? "CLOSURE_TOO_LONG"', MAP_TEXT)
 
@@ -740,8 +799,10 @@ class MapHostTests(unittest.TestCase):
         self.assertNotIn('startReplayGuidedWaypoint', skip_block)
 
     def test_closed_edge_validation_and_storage_are_logical_only(self):
-        self.assertIn('routeType_ == MapRouteType::CLOSED', MAP_TEXT)
+        self.assertIn('IsClosingMode(routeMode_)', MAP_TEXT)
         self.assertIn('type == MapRouteType::CLOSED', MAP_TEXT)
+        self.assertIn('CLOSED = 4U', TYPES_TEXT)
+        self.assertIn('header.replayMode > static_cast<uint8_t>(MapReplayMode::CLOSED)', STORE_TEXT)
         self.assertNotIn('route_.header.waypointCount++', MAP_TEXT)
         self.assertNotIn('appendWaypoint(routePointWorld(0', MAP_TEXT)
         self.assertIn('MAP,CLOSE_EDGE,DONE', MAP_TEXT)
@@ -786,6 +847,50 @@ class MapHostTests(unittest.TestCase):
         self.assertEqual((current, direction, complete), (2, -1, False))
         current, direction, complete = advance(0, -1, 4, "OPEN", "RETURN")
         self.assertEqual((current, direction, complete), (None, -1, True))
+
+    def test_one_canonical_route_supports_all_replay_modes(self):
+        self.assertEqual(
+            run_mode(MultiModeReplayModel(4, "ONCE")),
+            [(0, 1), (1, 2), (2, 3)],
+        )
+        self.assertEqual(
+            run_mode(MultiModeReplayModel(4, "RETURN")),
+            [(0, 1), (1, 2), (2, 3), (3, 2), (2, 1), (1, 0)],
+        )
+        self.assertEqual(
+            run_mode(MultiModeReplayModel(4, "CLOSED")),
+            [(0, 1), (1, 2), (2, 3), (3, 0)],
+        )
+        self.assertEqual(
+            run_mode(MultiModeReplayModel(4, "LOOP", loop_target=2)),
+            [(0, 1), (1, 2), (2, 3), (3, 0),
+             (0, 1), (1, 2), (2, 3), (3, 0)],
+        )
+
+    def test_return_arbitrary_angle_and_wrap_are_geometric(self):
+        # The inbound edge uses the actual reverse geometry, not a hard-coded
+        # 180-degree turnaround or an orthogonal heading assumption.
+        points = [(0.0, 0.0), (300.0, 400.0), (100.0, 900.0)]
+        inbound = math.degrees(math.atan2(
+            points[1][1] - points[2][1], points[1][0] - points[2][0]))
+        self.assertAlmostEqual(inbound, -68.20, places=1)
+        self.assertIn('replayReturnPhase_ = ReplayReturnPhase::INBOUND', MAP_TEXT)
+        self.assertIn('replayIncomingBearing', MAP_TEXT)
+
+    def test_multimode_hold_resume_cancel_and_stale_generation(self):
+        model = MultiModeReplayModel(4, "RETURN")
+        edge, generation = model.start_segment()
+        self.assertEqual(edge, (0, 1))
+        model.hold()
+        self.assertFalse(model.finish_segment(generation))
+        model.resume()
+        self.assertTrue(model.finish_segment(generation))
+        _, new_generation = model.start_segment()
+        self.assertFalse(model.finish_segment(generation))
+        model.cancel()
+        self.assertFalse(model.finish_segment(new_generation))
+        self.assertIn('result.motionGeneration != replaySegmentGeneration_', MAP_TEXT)
+        self.assertIn('replayReturnPhase_', MAP_TEXT)
 
     def test_ping_pong_sequence(self):
         current, direction, complete = advance(
@@ -947,9 +1052,9 @@ class MapHostTests(unittest.TestCase):
         self.assertIn("MapControllerMode::SETTINGS", MAP_TEXT)
         self.assertIn("saveSettingsAndExit()", MAP_TEXT)
 
-    def test_TEST_CIRCLE_CLOSED_CONFIRM(self):
-        self.assertIn("MAP,CIRCLE,ACTION=CONFIRM_CLOSED", MAP_TEXT)
-        self.assertIn("mode_ == MapControllerMode::CLOSED_CONFIRM", MAP_TEXT)
+    def test_TEST_CIRCLE_NO_CLOSED_CONFIRM(self):
+        self.assertNotIn("MAP,CIRCLE,ACTION=CONFIRM_CLOSED", MAP_TEXT)
+        self.assertNotIn("MAP,CLOSE_CONFIRM,RESULT=CLOSED", MAP_TEXT)
 
     def test_TEST_X_PRIORITY_OVER_CIRCLE(self):
         self.assertIn("if (crossPressed && display.isMapPage())", PS2_TEXT)

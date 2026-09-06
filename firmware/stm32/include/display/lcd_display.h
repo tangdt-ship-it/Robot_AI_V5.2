@@ -54,8 +54,8 @@ struct LcdMapStatus {
   // STM32-local MAP modes: READY, TEACH, SAVED, DELETE, CHECK, CHECKED,
   // RUNNING, HOLD, COMPLETE and CLOSED_CONFIRM.
   uint8_t mode = 0;
-  uint8_t routeType = 0;   // 0 OPEN, 1 CLOSED.
-  uint8_t replayMode = 0;  // 0 ONCE, 1 LOOP, 2 RETURN, 3 PING_PONG.
+  uint8_t routeType = 0;   // Compatibility: 0 OPEN, 1 legacy CLOSED.
+  uint8_t replayMode = 0;  // 0 ONCE, 1 LOOP, 2 RETURN, 3 PING, 4 CLOSED.
   uint16_t points = 0;
   uint16_t maxPoints = 128;
   uint32_t lengthMm = 0;

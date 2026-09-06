@@ -74,6 +74,9 @@ enum class MapReplayMode : uint8_t {
   LOOP = 1U,
   RETURN = 2U,
   PING_PONG = 3U,
+  // Runtime mode for one canonical open route. The value is appended to
+  // preserve all previously persisted mode values.
+  CLOSED = 4U,
 };
 // Teach acquisition is intentionally explicit by default. AUTO_SEMANTIC is
 // retained as a future extension point, but must never be selected by the
