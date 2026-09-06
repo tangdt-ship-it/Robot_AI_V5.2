@@ -1075,7 +1075,7 @@ bool MapController::postTeachBackRejectShouldInvalidate(
   // again; nothing is retried automatically.
   const char* transientReasons[] = {
       "NOT_MAP_PAGE", "PS2_NOT_NEUTRAL", "BRAKE", "ODOMETRY", "HEADING",
-      "OBSTACLE_SENSOR", "OBSTACLE_NOT_CLEAR", "POSE", "MOTION_OWNER"};
+      "OBSTACLE_SENSOR", "OBSTACLE_NOT_CLEAR", "POSE"};
   for (const char* transient : transientReasons) {
     if (strcmp(reason, transient) == 0) return false;
   }

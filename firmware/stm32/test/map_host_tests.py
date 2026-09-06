@@ -1197,7 +1197,7 @@ class MapHostTests(unittest.TestCase):
         for reason in (
             '"NOT_MAP_PAGE"', '"PS2_NOT_NEUTRAL"', '"BRAKE"',
             '"ODOMETRY"', '"HEADING"', '"OBSTACLE_SENSOR"',
-            '"OBSTACLE_NOT_CLEAR"', '"POSE"', '"MOTION_OWNER"'):
+            '"OBSTACLE_NOT_CLEAR"', '"POSE"'):
             self.assertIn(reason, MAP_TEXT)
         self.assertIn('debug_.println(",RETRY=1")', MAP_TEXT)
         start_block = MAP_TEXT.split(
@@ -1206,6 +1206,28 @@ class MapHostTests(unittest.TestCase):
         self.assertIn('robot_.stopImmediately(true)', start_block)
         self.assertIn('postTeachBackRejectShouldInvalidate(reason)', start_block)
         self.assertIn('postTeachBack_.valid && !postTeachBackActive_', MAP_TEXT)
+
+    def test_post_teach_back_motion_owner_is_hard_invalidated(self):
+        helper = MAP_TEXT.split(
+            'bool MapController::postTeachBackRejectShouldInvalidate', 1
+        )[1].split('bool MapController::postTeachBackAvailable', 1)[0]
+        transient = helper.split('const char* transientReasons[]', 1)[1]
+        transient = transient.split('};', 1)[0]
+        self.assertNotIn('"MOTION_OWNER"', transient)
+        start_block = MAP_TEXT.split(
+            'void MapController::handleStart()', 1
+        )[1].split('void MapController::handleTriangle()', 1)[0]
+        self.assertIn('invalidatePostTeachBack(reason)', start_block)
+
+        for owner in ("REPLAY", "MCP", "MISSION", "PS2"):
+            model = PostTeachBackModel(4)
+            self.assertTrue(model.start(), owner)
+            # START rejection still performs the fail-safe stop; ownership
+            # invalidates the saved post-Teach BACK context before retry.
+            model.cancel()
+            self.assertFalse(model.active, owner)
+            self.assertFalse(model.available(), owner)
+            self.assertFalse(model.start(), owner)
 
     def test_post_teach_back_lcd_is_bounded_and_preserves_user_mode(self):
         lines = (
