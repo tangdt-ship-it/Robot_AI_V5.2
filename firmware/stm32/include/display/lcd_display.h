@@ -79,6 +79,9 @@ struct LcdMapStatus {
   uint8_t helpPage = 0;
   uint8_t storageErrorReason = 0;  // NONE/SETTINGS/TEACH/MODE/INIT/GENERIC.
   bool oldRouteAvailable = false;
+  bool postTeachBackAvailable = false;
+  bool postTeachBackActive = false;
+  bool postTeachBackComplete = false;
 };
 
 class LcdDisplay {
@@ -127,7 +130,10 @@ class LcdDisplay {
                     uint8_t storageErrorReason = 0,
                     bool oldRouteAvailable = false,
                     uint8_t userMode = 0,
-                    uint32_t replayCycleCounter = 0);
+                    uint32_t replayCycleCounter = 0,
+                    bool postTeachBackAvailable = false,
+                    bool postTeachBackActive = false,
+                    bool postTeachBackComplete = false);
 
  private:
   class SoftI2C {

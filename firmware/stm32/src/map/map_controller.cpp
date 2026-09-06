@@ -250,6 +250,20 @@ void MapController::update() {
     }
   }
 
+  if (postTeachBack_.valid && !postTeachBackActive_) {
+    const bool resetChanged =
+        odometry_.resetGeneration() != postTeachBack_.odometryResetGeneration ||
+        robot_.headingResetGeneration() != postTeachBack_.headingResetGeneration;
+    const bool motionStarted =
+        ps2_.motionCommandActive() || robot_.aiMotionActive() ||
+        robot_.motionOwner() != MotionOwner::NONE || !robot_.motorsStopped();
+    if (resetChanged) {
+      invalidatePostTeachBack("RESET_BOUNDARY");
+    } else if (motionStarted) {
+      invalidatePostTeachBack("MOTION_AFTER_SAVE");
+    }
+  }
+
   if (replayActive_) {
     if (odometry_.resetGeneration() != replayOriginResetGeneration_ ||
         robot_.headingResetGeneration() != replayOriginHeadingResetGeneration_ ||
@@ -320,6 +334,7 @@ void MapController::handleSlot(uint8_t slot) {
       mode_ == MapControllerMode::HELP) {
     return;
   }
+  invalidatePostTeachBack("SLOT_CHANGED");
   selectedSlot_ = slot == 2U ? MapSlot::MAP_2 : MapSlot::MAP_1;
   loadedValid_ = false;
   const MapSlotMetadata metadata = store_.metadata(selectedSlot_);
@@ -382,6 +397,7 @@ bool MapController::enterSettings(const char*& reason) {
     reason = "LOAD";
     return false;
   }
+  invalidatePostTeachBack("SETTINGS");
   settingsItem_ = MapSettingsItem::MODE;
   settingsUserMode_ = userMode_;
   settingsSpeed_ = replaySpeed_;
@@ -406,6 +422,7 @@ void MapController::leaveMapUiCapture() {
 
 void MapController::saveSettingsAndExit() {
   if (mode_ != MapControllerMode::SETTINGS) return;
+  invalidatePostTeachBack("SETTINGS_SAVE");
   const char* modeReason = nullptr;
   if (userModeNeedsClosingEdge(settingsUserMode_) &&
       !hasValidClosingEdge(route_, modeReason)) {
@@ -639,6 +656,23 @@ void MapController::handleStart() {
                            : "CLOSED_CONFIRM");
     return;
   }
+  if (postTeachBack_.valid && !postTeachBackActive_) {
+    const char* backReason = nullptr;
+    if (!postTeachBackAvailable(backReason)) {
+      const char* reason = backReason != nullptr ? backReason : "UNAVAILABLE";
+      debug_.print("MAP,BACK_P0,REJECT,REASON=");
+      debug_.println(reason);
+      invalidatePostTeachBack(reason);
+      return;
+    }
+    if (!startPostTeachBack(backReason)) {
+      const char* reason = backReason != nullptr ? backReason : "START";
+      debug_.print("MAP,BACK_P0,REJECT,REASON=");
+      debug_.println(reason);
+      invalidatePostTeachBack(reason);
+    }
+    return;
+  }
   if (replayActive_) {
     logStartReject("REPLAY_ACTIVE");
     return;
@@ -666,6 +700,10 @@ void MapController::handleStart() {
       debug_.print(static_cast<unsigned>(replayTargetIndex_));
       debug_.print(",GEN=");
       debug_.println(replayGeneration_);
+      if (postTeachBackActive_) {
+        debug_.print("MAP,BACK_P0,RESUME,WP=");
+        debug_.println(static_cast<unsigned>(replayTargetIndex_));
+      }
       if (routeMode_ == MapReplayMode::LOOP) {
         debug_.print("MAP,LOOP,RESUME,LAP=");
         debug_.print(replayLapCounter_);
@@ -741,6 +779,7 @@ void MapController::handleTriangle() {
     markManualWaypoint();
     return;
   }
+  invalidatePostTeachBack("NEW_TEACH");
   (void)beginTeach();
 }
 
@@ -813,6 +852,9 @@ void MapController::handleSquare(bool longPress) {
 void MapController::handleCross() {
   if (mode_ == MapControllerMode::TEACHING) {
     cancelTeach();
+  } else if (postTeachBack_.valid && !postTeachBackActive_) {
+    debug_.println("MAP,BACK_P0,DISMISS");
+    invalidatePostTeachBack("DISMISS");
   } else if (mode_ == MapControllerMode::HELP) {
     leaveHelp();
   } else if (mode_ == MapControllerMode::SETTINGS ||
@@ -852,6 +894,11 @@ void MapController::handleCrossLong() {
     cancelSettings();
     return;
   }
+  if (postTeachBack_.valid && !postTeachBackActive_) {
+    debug_.println("MAP,BACK_P0,DISMISS_LONG");
+    invalidatePostTeachBack("DISMISS_LONG");
+    return;
+  }
   if (replayActive_) {
     // Be robust if the short event was delayed behind another input: safety
     // still stops first, then the same physical press escalates to CANCEL.
@@ -863,6 +910,7 @@ void MapController::handleCrossLong() {
 }
 
 bool MapController::loadSelected() {
+  invalidatePostTeachBack("ROUTE_LOAD");
   if (!store_.load(selectedSlot_, route_)) {
     loadedValid_ = false;
     storeState_ = MapStoreState::INVALID;
@@ -909,6 +957,7 @@ bool MapController::beginTeach() {
       robot_.brakeEnabled() || ps2_.motionCommandActive()) {
     return false;
   }
+  invalidatePostTeachBack("NEW_TEACH");
   teachOldRouteAvailable_ = storeState_ == MapStoreState::SAVED &&
                             (loadedValid_ ||
                              store_.metadata(selectedSlot_).state ==
@@ -917,6 +966,8 @@ bool MapController::beginTeach() {
   if (!readPose(origin)) return false;
   teachOrigin_ = origin;
   teachOriginValid_ = true;
+  teachOriginResetGeneration_ = odometry_.resetGeneration();
+  teachOriginHeadingResetGeneration_ = robot_.headingResetGeneration();
   teachMode_ = MapTeachMode::MANUAL_KEYFRAME;
   route_ = {};
   route_.header.waypointCount = 0U;
@@ -947,10 +998,173 @@ bool MapController::beginTeach() {
 void MapController::cancelTeach() {
   route_ = {};
   teachOriginValid_ = false;
+  pendingTeachBackValid_ = false;
   teachFinishPending_ = false;
   teachOldRouteAvailable_ = false;
   mode_ = storeState_ == MapStoreState::SAVED ? MapControllerMode::SAVED
                                               : MapControllerMode::READY;
+}
+
+void MapController::stagePostTeachBackSnapshot() {
+  if (!teachOriginValid_ || teachMode_ != MapTeachMode::MANUAL_KEYFRAME) {
+    pendingTeachBackValid_ = false;
+    return;
+  }
+  pendingTeachBackOrigin_ = teachOrigin_;
+  pendingTeachBackResetGeneration_ = teachOriginResetGeneration_;
+  pendingTeachBackHeadingResetGeneration_ = teachOriginHeadingResetGeneration_;
+  pendingTeachBackValid_ = true;
+}
+
+void MapController::armPostTeachBackAfterSave() {
+  if (!pendingTeachBackValid_ || route_.header.waypointCount < 2U) {
+    pendingTeachBackValid_ = false;
+    return;
+  }
+  postTeachBack_ = {};
+  postTeachBack_.valid = true;
+  postTeachBack_.slot = selectedSlot_;
+  postTeachBack_.endpointIndex = route_.header.waypointCount - 1U;
+  postTeachBack_.routeGeneration = route_.header.generation;
+  postTeachBack_.odometryResetGeneration = pendingTeachBackResetGeneration_;
+  postTeachBack_.headingResetGeneration =
+      pendingTeachBackHeadingResetGeneration_;
+  postTeachBack_.teachOrigin = pendingTeachBackOrigin_;
+  pendingTeachBackValid_ = false;
+  postTeachBackActive_ = false;
+  debug_.print("MAP,BACK_P0,AVAILABLE,SLOT=");
+  debug_.print(static_cast<unsigned>(selectedSlot_));
+  debug_.print(",FROM=");
+  debug_.print(static_cast<unsigned>(postTeachBack_.endpointIndex));
+  debug_.print(",GEN=");
+  debug_.println(postTeachBack_.routeGeneration);
+  statusDirty_ = true;
+}
+
+void MapController::invalidatePostTeachBack(const char* reason) {
+  const bool hadContext = postTeachBack_.valid || postTeachBackActive_ ||
+                          pendingTeachBackValid_;
+  postTeachBack_ = {};
+  postTeachBackActive_ = false;
+  postTeachBackComplete_ = false;
+  pendingTeachBackValid_ = false;
+  if (hadContext) {
+    debug_.print("MAP,BACK_P0,INVALIDATE,REASON=");
+    debug_.println(reason != nullptr ? reason : "UNKNOWN");
+  }
+  statusDirty_ = true;
+}
+
+bool MapController::postTeachBackAvailable(const char*& reason) const {
+  reason = nullptr;
+  if (!postTeachBack_.valid || postTeachBackActive_) {
+    reason = "NOT_AVAILABLE";
+    return false;
+  }
+  if (mode_ != MapControllerMode::SAVED || !loadedValid_ ||
+      storeState_ != MapStoreState::SAVED) {
+    reason = "STATE";
+    return false;
+  }
+  if (selectedSlot_ != postTeachBack_.slot) {
+    reason = "SLOT_CHANGED";
+    return false;
+  }
+  if (route_.header.waypointCount < 2U ||
+      postTeachBack_.endpointIndex != route_.header.waypointCount - 1U) {
+    reason = "ROUTE_POINTS";
+    return false;
+  }
+  if (route_.header.generation != postTeachBack_.routeGeneration) {
+    reason = "ROUTE_CHANGED";
+    return false;
+  }
+  if (odometry_.resetGeneration() != postTeachBack_.odometryResetGeneration) {
+    reason = "RESET_BOUNDARY";
+    return false;
+  }
+  if (robot_.headingResetGeneration() != postTeachBack_.headingResetGeneration) {
+    reason = "HEADING_RESET_BOUNDARY";
+    return false;
+  }
+  if (!robot_.motorsStopped() || robot_.aiMotionActive() ||
+      robot_.motionOwner() != MotionOwner::NONE) {
+    reason = "MOTION_OWNER";
+    return false;
+  }
+  if (robot_.brakeEnabled()) {
+    reason = "BRAKE";
+    return false;
+  }
+  const uint32_t now = millis();
+  if (!ps2_.state().frameFresh || ps2_.frameTimedOut(now) ||
+      ps2_.motionCommandActive()) {
+    reason = "PS2_NOT_NEUTRAL";
+    return false;
+  }
+  if (!odometry_.ready() || !odometry_.healthy()) {
+    reason = "ODOMETRY";
+    return false;
+  }
+  if (!fusion_.ready() || fusion_.health() == FusionHealth::NO_SOURCE) {
+    reason = "HEADING";
+    return false;
+  }
+  Pose current;
+  if (!readPose(current)) {
+    reason = "POSE";
+    return false;
+  }
+  const Pose endpoint = routePointWorldFromOrigin(
+      postTeachBack_.teachOrigin, postTeachBack_.endpointIndex);
+  if (distanceMm(current.xMm, current.yMm, endpoint.xMm, endpoint.yMm) >
+      kReplayPoseHoldToleranceMm) {
+    reason = "NOT_AT_ENDPOINT";
+    return false;
+  }
+  reason = "OK";
+  return true;
+}
+
+bool MapController::startPostTeachBack(const char*& reason) {
+  if (!postTeachBackAvailable(reason)) return false;
+  if (!replayPrecheck(route_, reason)) return false;
+
+  replayOrigin_ = postTeachBack_.teachOrigin;
+  replayOriginValid_ = true;
+  replayRealignReason_ = ReplayRealignReason::NONE;
+  replayContextSlot_ = postTeachBack_.slot;
+  replayOriginResetGeneration_ = postTeachBack_.odometryResetGeneration;
+  replayOriginHeadingResetGeneration_ = postTeachBack_.headingResetGeneration;
+  replayOriginRouteGeneration_ = postTeachBack_.routeGeneration;
+  replayCurrentIndex_ = postTeachBack_.endpointIndex;
+  replayTargetIndex_ = postTeachBack_.endpointIndex - 1U;
+  replayDirection_ = -1;
+  replayReturned_ = true;
+  replayReturnPhase_ = ReplayReturnPhase::INBOUND;
+  replayLapCounter_ = 0U;
+  replayCycleCounter_ = 0U;
+  replayTargetDistanceMm_ = 0U;
+  replayTargetDeg_ = 0;
+  replayGuideBearingDeg_ = 0.0f;
+  replayTravelMm_ = 0U;
+  replayErrorMm_ = 0U;
+  nextReplayGeneration();
+  replaySegmentGeneration_ = 0U;
+  replayReason_ = "BACK_P0";
+  replayResumeAllowed_ = false;
+  replayHoldPoseValid_ = false;
+  holdReason_ = MapHoldReason::NONE;
+  postTeachBackActive_ = true;
+  replayActive_ = true;
+  replayOperation_ = MapReplayOperation::NONE;
+  mode_ = MapControllerMode::REPLAY_CHECKED;
+  statusDirty_ = true;
+  debug_.print("MAP,BACK_P0,START,FROM=");
+  debug_.print(static_cast<unsigned>(replayCurrentIndex_));
+  debug_.print(",TO=");
+  debug_.println(static_cast<unsigned>(replayTargetIndex_));
+  return true;
 }
 
 void MapController::markManualWaypoint() {
@@ -1221,6 +1435,7 @@ bool MapController::finalizeTeach() {
     updateRouteHeaderForSave(route_);
     storeState_ = MapStoreState::EMPTY;
     loadedValid_ = false;
+    stagePostTeachBackSnapshot();
     teachOriginValid_ = false;
     teachFinishPending_ = false;
     mode_ = MapControllerMode::READY;
@@ -1306,10 +1521,12 @@ bool MapController::queueTeachSave(MapRouteType type,
       debug_.print("MAP,CLOSE,REJECT,REASON=");
       debug_.println(reason != nullptr ? reason : "INVALID");
     }
+    pendingTeachBackValid_ = false;
     mode_ = failureMode;
     statusDirty_ = true;
     return false;
   }
+  stagePostTeachBackSnapshot();
   savePending_ = true;
   mode_ = MapControllerMode::READY;
   teachOriginValid_ = false;
@@ -1522,6 +1739,7 @@ uint32_t MapController::nextReplayGeneration() {
 
 bool MapController::prepareReplay(const char*& rejectReason) {
   rejectReason = nullptr;
+  invalidatePostTeachBack("NORMAL_REPLAY");
   if (!loadSelected()) {
     rejectReason = "NOT_SAVED";
     return false;
@@ -1629,17 +1847,25 @@ void MapController::updateReplay() {
 }
 
 MapController::Pose MapController::routePointWorld(uint16_t index) const {
-  if (index >= route_.header.waypointCount) return replayOrigin_;
+  return routePointWorldFromOrigin(replayOrigin_, index);
+}
+
+MapController::Pose MapController::routePointWorldFromOrigin(
+    const Pose& origin, uint16_t index) const {
+  if (index >= route_.header.waypointCount) return origin;
   const MapWaypoint& local = route_.waypoints[index];
-  const float c = cosf(replayOrigin_.headingDeg * kDegToRad);
-  const float s = sinf(replayOrigin_.headingDeg * kDegToRad);
+  // This is the same transform previously expressed directly with
+  // replayOrigin_.headingDeg; the explicit origin parameter is what lets the
+  // post-Teach action use the saved Teach origin without recapturing Pn.
+  const float c = cosf(origin.headingDeg * kDegToRad);
+  const float s = sinf(origin.headingDeg * kDegToRad);
   Pose world;
-  world.xMm = replayOrigin_.xMm + static_cast<float>(local.xMm) * c -
+  world.xMm = origin.xMm + static_cast<float>(local.xMm) * c -
               static_cast<float>(local.yMm) * s;
-  world.yMm = replayOrigin_.yMm + static_cast<float>(local.xMm) * s +
+  world.yMm = origin.yMm + static_cast<float>(local.xMm) * s +
               static_cast<float>(local.yMm) * c;
   world.headingDeg = normalizeDeg(
-      replayOrigin_.headingDeg + static_cast<float>(local.headingCdeg) / 100.0f);
+      origin.headingDeg + static_cast<float>(local.headingCdeg) / 100.0f);
   return world;
 }
 
@@ -1925,6 +2151,11 @@ void MapController::advanceReplayAfterTarget() {
     replayTargetIndex_ = replayCurrentIndex_ - 1U;
     return;
   }
+  if (postTeachBackActive_) {
+    debug_.println("MAP,BACK_P0,COMPLETE,WP=0");
+    completeReplay();
+    return;
+  }
   if (routeMode_ == MapReplayMode::RETURN) {
     completeReplay();
     return;
@@ -1975,6 +2206,10 @@ void MapController::enterReplayHold(MapHoldReason reason, bool allowResume) {
   debug_.print(static_cast<unsigned>(replayTargetIndex_));
   debug_.print(",GEN=");
   debug_.println(replayGeneration_);
+  if (postTeachBackActive_) {
+    debug_.print("MAP,BACK_P0,HOLD,WP=");
+    debug_.println(static_cast<unsigned>(replayTargetIndex_));
+  }
   if (routeMode_ == MapReplayMode::LOOP) {
     debug_.print("MAP,LOOP,HOLD,LAP=");
     debug_.print(replayLapCounter_);
@@ -1996,11 +2231,15 @@ void MapController::enterReplayHold(MapHoldReason reason, bool allowResume) {
 }
 
 void MapController::abortReplay(const char* reason) {
+  const bool wasPostTeachBack = postTeachBackActive_;
   robot_.stopImmediately(true);
   nextReplayGeneration();
   clearReplayResumeContext();
   replayActive_ = false;
   replayReason_ = reason != nullptr ? reason : "ERROR";
+  if (wasPostTeachBack) {
+    invalidatePostTeachBack(reason != nullptr ? reason : "ERROR");
+  }
   mode_ = MapControllerMode::SAVED;
   statusDirty_ = true;
   debug_.print("MAP,REPLAY=ABORT,REASON=");
@@ -2008,6 +2247,7 @@ void MapController::abortReplay(const char* reason) {
 }
 
 void MapController::completeReplay() {
+  const bool wasPostTeachBack = postTeachBackActive_;
   const uint32_t completedLap = replayLapCounter_;
   const uint32_t completedCycle = replayCycleCounter_;
   const bool wasReturn = routeMode_ == MapReplayMode::RETURN;
@@ -2018,9 +2258,17 @@ void MapController::completeReplay() {
   replayCycleCounter_ = completedCycle;
   replayActive_ = false;
   replayReason_ = "DONE";
+  if (wasPostTeachBack) {
+    invalidatePostTeachBack("COMPLETE");
+    replayReason_ = "BACK_COMPLETE";
+    replayCurrentIndex_ = 0U;
+    replayTargetIndex_ = 0U;
+    postTeachBackComplete_ = true;
+  }
   mode_ = MapControllerMode::REPLAY_COMPLETE;
   statusDirty_ = true;
   debug_.println("MAP,REPLAY_COMPLETE");
+  if (wasPostTeachBack) debug_.println("MAP,BACK_P0,COMPLETE");
   if (wasReturn) {
     debug_.println("MAP,RETURN,COMPLETE,WP=0");
     debug_.println("MAP,RETURN,PHASE=NONE");
@@ -2031,6 +2279,7 @@ void MapController::completeReplay() {
 }
 
 void MapController::cancelReplay(const char* reason) {
+  const bool wasPostTeachBack = postTeachBackActive_;
   const bool wasClosedLoop = routeMode_ == MapReplayMode::LOOP;
   const bool wasReturn = routeMode_ == MapReplayMode::RETURN;
   const bool wasPing = routeMode_ == MapReplayMode::PING_PONG;
@@ -2041,6 +2290,11 @@ void MapController::cancelReplay(const char* reason) {
   clearReplayResumeContext();
   replayActive_ = false;
   replayReason_ = reason != nullptr ? reason : "CANCELLED";
+  if (wasPostTeachBack) {
+    invalidatePostTeachBack(reason != nullptr ? reason : "CANCELLED");
+    debug_.print("MAP,BACK_P0,CANCEL,REASON=");
+    debug_.println(replayReason_);
+  }
   mode_ = storeState_ == MapStoreState::SAVED ? MapControllerMode::SAVED
                                               : MapControllerMode::READY;
   statusDirty_ = true;
@@ -2388,6 +2642,7 @@ void MapController::serviceStorage() {
     if (!robot_.motorsStopped() || robot_.aiMotionActive()) return;
     deletePending_ = false;
     if (store_.erase(selectedSlot_)) {
+      invalidatePostTeachBack("DELETE");
       loadedValid_ = false;
       storeState_ = MapStoreState::EMPTY;
       storageErrorReason_ = MapStorageErrorReason::NONE;
@@ -2417,10 +2672,12 @@ void MapController::serviceStorage() {
       normalizeRouteForRuntime(route_, runtimeMode);
       mode_ = MapControllerMode::SAVED;
       log("TEACH_SAVE=OK");
+      armPostTeachBackAfterSave();
     } else {
       // The previous active A/B record remains untouched on a failed erase,
       // program or read-back. Restore it into RAM when this Teach session
       // started from a valid route; otherwise discard the failed new route.
+      invalidatePostTeachBack("STORAGE_ERROR");
       const bool restored = teachOldRouteAvailable_ && loadSelected();
       teachOldRouteAvailable_ = false;
       storageErrorReason_ = MapStorageErrorReason::TEACH_SAVE;
@@ -2505,7 +2762,9 @@ void MapController::publishStatus() {
       closeCandidateDistanceMm_, closeCandidateHeadingDeg_,
       static_cast<uint8_t>(settingsItem_), displaySpeed, displayLoopTarget,
       helpPage_, static_cast<uint8_t>(storageErrorReason_), loadedValid_,
-      static_cast<uint8_t>(displayUserMode), replayCycleCounter_);
+      static_cast<uint8_t>(displayUserMode), replayCycleCounter_,
+      postTeachBack_.valid && !postTeachBackActive_, postTeachBackActive_,
+      postTeachBackComplete_);
   const uint32_t now = millis();
   if (replayActive_ && replayOperation_ == MapReplayOperation::MOVE &&
       robot_.guidedWaypointActive() &&

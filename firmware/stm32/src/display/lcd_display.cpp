@@ -146,7 +146,10 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
                               uint8_t settingsLoopTarget, uint8_t helpPage,
                               uint8_t storageErrorReason,
                               bool oldRouteAvailable, uint8_t userMode,
-                              uint32_t replayCycleCounter) {
+                              uint32_t replayCycleCounter,
+                              bool postTeachBackAvailable,
+                              bool postTeachBackActive,
+                              bool postTeachBackComplete) {
   const uint8_t normalized = slot == 2U ? 2U : 1U;
   LcdMapStatus& status = mapStatus_[normalized - 1U];
   status.valid = true;
@@ -179,6 +182,9 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
   status.helpPage = helpPage <= 2U ? helpPage : 0U;
   status.storageErrorReason = storageErrorReason;
   status.oldRouteAvailable = oldRouteAvailable;
+  status.postTeachBackAvailable = postTeachBackAvailable;
+  status.postTeachBackActive = postTeachBackActive;
+  status.postTeachBackComplete = postTeachBackComplete;
   if (mapSlot_ == normalized) forceRefresh();
 }
 
@@ -304,6 +310,24 @@ void LcdDisplay::buildMapLines() {
   const unsigned long wholeM = static_cast<unsigned long>(lengthTenthsM / 10U);
   const unsigned long tenthM = static_cast<unsigned long>(lengthTenthsM % 10U);
 
+  if (status.postTeachBackAvailable) {
+    snprintf(desired_[0], 21, "MAP%u BACK P0 READY", mapSlot_);
+    snprintf(desired_[1], 21, "PTS:%03u/%03u L:%lu.%lum",
+             static_cast<unsigned>(status.points),
+             static_cast<unsigned>(status.maxPoints), wholeM, tenthM);
+    snprintf(desired_[2], 21, "BACK TO P0");
+    snprintf(desired_[3], 21, "START BACK X EXIT");
+    return;
+  }
+
+  if (status.postTeachBackComplete && status.mode == 8U) {
+    snprintf(desired_[0], 21, "MAP%u BACK COMPLETE", mapSlot_);
+    snprintf(desired_[1], 21, "P0 STOPPED");
+    writeSavedMode(desired_[2]);
+    snprintf(desired_[3], 21, "START RUN SEL-L SET");
+    return;
+  }
+
   if (status.storeState == 3U || status.storageErrorReason != 0U) {
     if (status.storageErrorReason == 4U) {
       snprintf(desired_[0], 21, "MAP STORAGE ERR");
@@ -418,7 +442,9 @@ void LcdDisplay::buildMapLines() {
     return;
   }
   if (status.mode == 6U) {
-    snprintf(desired_[0], 21, "MAP%u RUN WP:%02u/%02u", mapSlot_,
+    snprintf(desired_[0], 21, status.postTeachBackActive
+                          ? "MAP%u BACK WP:%02u/%02u"
+                          : "MAP%u RUN WP:%02u/%02u", mapSlot_,
              static_cast<unsigned>(status.replayWp),
              static_cast<unsigned>(status.replayTotal));
     if (status.replayOperation == 1U) {
@@ -428,7 +454,11 @@ void LcdDisplay::buildMapLines() {
     } else {
       snprintf(desired_[1], 21, "TURN %+ddeg", status.replayTargetDeg);
     }
-    writeRunMode(desired_[2]);
+    if (status.postTeachBackActive) {
+      snprintf(desired_[2], 21, "BACK TO P0");
+    } else {
+      writeRunMode(desired_[2]);
+    }
     snprintf(desired_[3], 21, "X HOLD XL CANCEL");
     return;
   }
@@ -439,7 +469,11 @@ void LcdDisplay::buildMapLines() {
     snprintf(desired_[1], 21, "TGT:%lu TRV:%lu",
              static_cast<unsigned long>(status.replayTargetMm),
              static_cast<unsigned long>(status.replayTravelMm));
-    writeRunMode(desired_[2]);
+    if (status.postTeachBackActive) {
+      snprintf(desired_[2], 21, "BACK TO P0");
+    } else {
+      writeRunMode(desired_[2]);
+    }
     snprintf(desired_[3], 21, "START RES XL CANCEL");
     return;
   }

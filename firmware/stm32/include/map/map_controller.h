@@ -66,6 +66,18 @@ class MapController {
     float headingDeg = 0.0f;
   };
 
+  // Transient post-Teach action. This is deliberately not part of
+  // MapRouteData: it must never be persisted or become a user replay mode.
+  struct PostTeachBackContext {
+    bool valid = false;
+    MapSlot slot = MapSlot::MAP_1;
+    uint16_t endpointIndex = 0U;
+    uint32_t routeGeneration = 0U;
+    uint32_t odometryResetGeneration = 0U;
+    uint32_t headingResetGeneration = 0U;
+    Pose teachOrigin{};
+  };
+
   void handleEvent(const Ps2MapEvent& event);
   void handleStart();
   void handleTriangle();
@@ -103,6 +115,11 @@ class MapController {
   void requestTeachFinish();
   bool finalizeTeach();
   bool queueTeachSave(MapRouteType type, MapControllerMode failureMode);
+  void stagePostTeachBackSnapshot();
+  void armPostTeachBackAfterSave();
+  void invalidatePostTeachBack(const char* reason);
+  bool postTeachBackAvailable(const char*& reason) const;
+  bool startPostTeachBack(const char*& reason);
   bool validateRoute(const MapRouteData& route, const char*& reason) const;
   bool hasValidClosingEdge(const MapRouteData& route,
                            const char*& reason) const;
@@ -133,6 +150,7 @@ class MapController {
   bool startNextReplaySegment();
   bool currentReplayPose(Pose& pose) const;
   Pose routePointWorld(uint16_t index) const;
+  Pose routePointWorldFromOrigin(const Pose& origin, uint16_t index) const;
   float replayIncomingBearing(uint16_t fromIndex, uint16_t toIndex) const;
   void advanceReplayAfterTarget();
   void enterReplayHold(MapHoldReason reason, bool allowResume);
@@ -206,6 +224,15 @@ class MapController {
   bool loadedValid_ = false;
 
   Pose teachOrigin_{};
+  uint32_t teachOriginResetGeneration_ = 0U;
+  uint32_t teachOriginHeadingResetGeneration_ = 0U;
+  Pose pendingTeachBackOrigin_{};
+  uint32_t pendingTeachBackResetGeneration_ = 0U;
+  uint32_t pendingTeachBackHeadingResetGeneration_ = 0U;
+  bool pendingTeachBackValid_ = false;
+  PostTeachBackContext postTeachBack_{};
+  bool postTeachBackActive_ = false;
+  bool postTeachBackComplete_ = false;
   Pose lastTeachSample_{};
   bool teachOriginValid_ = false;
   bool lastTeachSampleValid_ = false;

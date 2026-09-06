@@ -390,6 +390,73 @@ class MultiModeReplayModel:
         self.held = False
 
 
+class PostTeachBackModel:
+    """Model the transient Pn -> ... -> P0 action without a user mode."""
+
+    def __init__(self, count, route_generation=7, origin=(0.0, 0.0, 0.0)):
+        self.count = count
+        self.route_generation = route_generation
+        self.origin = origin
+        self.available_flag = True
+        self.active = False
+        self.current = None
+        self.target = None
+        self.edges = []
+        self.generation = 0
+        self.held = False
+        self.cancelled = False
+        self.complete = False
+
+    def available(self, route_generation=None, current_endpoint_error=0.0,
+                  reset_changed=False, heading_reset_changed=False,
+                  slot_changed=False, motion=False):
+        if not self.available_flag or self.active:
+            return False
+        if route_generation is not None and route_generation != self.route_generation:
+            return False
+        if current_endpoint_error > 100.0:
+            return False
+        if reset_changed or heading_reset_changed or slot_changed or motion:
+            return False
+        return self.count >= 2
+
+    def start(self):
+        if not self.available():
+            return False
+        self.active = True
+        self.current = self.count - 1
+        self.target = self.count - 2
+        self.generation += 1
+        return True
+
+    def finish_segment(self, generation=None):
+        if (not self.active or self.held or self.cancelled or self.complete or
+                (generation is not None and generation != self.generation)):
+            return False
+        self.edges.append((self.current, self.target))
+        self.current = self.target
+        if self.current == 0:
+            self.complete = True
+            self.active = False
+        else:
+            self.target = self.current - 1
+            self.generation += 1
+        return True
+
+    def hold(self):
+        self.held = True
+
+    def resume(self):
+        self.held = False
+        self.generation += 1
+
+    def cancel(self):
+        self.cancelled = True
+        self.active = False
+        self.available_flag = False
+        self.held = False
+
+
 def run_mode(model):
     while not model.complete and not model.cancelled:
         _, generation = model.start_segment()
@@ -1044,6 +1111,112 @@ class MapHostTests(unittest.TestCase):
         self.assertAlmostEqual(world_y, 950.0, places=4)
         self.assertIn("replayOrigin_.headingDeg", MAP_TEXT)
         self.assertIn("toTeachLocal", MAP_TEXT)
+
+    def test_post_teach_back_is_transient_and_uses_saved_origin(self):
+        self.assertIn("PostTeachBackContext", MAP_HEADER_TEXT)
+        self.assertIn("postTeachBackActive_", MAP_HEADER_TEXT)
+        self.assertIn("stagePostTeachBackSnapshot", MAP_TEXT)
+        self.assertIn("armPostTeachBackAfterSave", MAP_TEXT)
+        self.assertIn("routePointWorldFromOrigin(\n      postTeachBack_.teachOrigin",
+                      MAP_TEXT)
+        self.assertNotIn("MapUserMode::BACK", TYPES_TEXT)
+        start_body = MAP_TEXT.split(
+            "bool MapController::startPostTeachBack", 1
+        )[1].split("bool MapController::validateRoute", 1)[0]
+        self.assertNotIn("store_.save", start_body)
+
+    def test_post_teach_back_sequences_never_drive_pn(self):
+        for count in (2, 4):
+            model = PostTeachBackModel(count)
+            self.assertTrue(model.start())
+            expected = [(index, index - 1)
+                        for index in range(count - 1, 0, -1)]
+            while model.active:
+                generation = model.generation
+                self.assertTrue(model.finish_segment(generation))
+            self.assertEqual(model.edges, expected)
+            self.assertEqual(model.edges[0][0], count - 1)
+            self.assertEqual(model.edges[-1][1], 0)
+            self.assertNotIn((0, 1), model.edges)
+
+    def test_post_teach_back_endpoint_and_heading_gates(self):
+        model = PostTeachBackModel(4, origin=(100.0, -50.0, 90.0))
+        self.assertTrue(model.available(current_endpoint_error=100.0))
+        self.assertFalse(model.available(current_endpoint_error=100.1))
+        # A 90-degree Teach heading is valid; availability has no hard-coded
+        # orthogonal or 180-degree heading requirement.
+        self.assertEqual(model.origin[2], 90.0)
+        self.assertIn("replayOrigin_ = postTeachBack_.teachOrigin", MAP_TEXT)
+
+    def test_post_teach_back_hold_resume_cancel_and_stale(self):
+        model = PostTeachBackModel(4)
+        self.assertTrue(model.start())
+        generation = model.generation
+        model.hold()
+        self.assertFalse(model.finish_segment(generation))
+        model.resume()
+        self.assertTrue(model.finish_segment(model.generation))
+        stale = model.generation - 1
+        self.assertFalse(model.finish_segment(stale))
+        model.cancel()
+        self.assertFalse(model.active)
+        self.assertFalse(model.available())
+        for token in (
+            'enterReplayHold(MapHoldReason::OBSTACLE, true)',
+            'cancelReplay("PS2_TAKEOVER")',
+            'MAP,BACK_P0,HOLD,WP=',
+            'MAP,BACK_P0,RESUME,WP=',
+            'MAP,BACK_P0,CANCEL,REASON=',
+            'MAP,BACK_P0,COMPLETE',
+        ):
+            self.assertIn(token, MAP_TEXT)
+
+    def test_post_teach_back_invalidation_fences(self):
+        for token in (
+            'invalidatePostTeachBack("NEW_TEACH")',
+            'invalidatePostTeachBack("SLOT_CHANGED")',
+            'invalidatePostTeachBack("SETTINGS")',
+            'invalidatePostTeachBack("SETTINGS_SAVE")',
+            'invalidatePostTeachBack("ROUTE_LOAD")',
+            'invalidatePostTeachBack("MOTION_AFTER_SAVE")',
+            'invalidatePostTeachBack("RESET_BOUNDARY")',
+            'invalidatePostTeachBack("STORAGE_ERROR")',
+            'MAP,BACK_P0,INVALIDATE,REASON=',
+            'MAP,BACK_P0,REJECT,REASON=',
+        ):
+            self.assertIn(token, MAP_TEXT)
+        self.assertIn('route_.header.generation != postTeachBack_.routeGeneration',
+                      MAP_TEXT)
+        self.assertIn('robot_.headingResetGeneration() != '
+                      'postTeachBack_.headingResetGeneration', MAP_TEXT)
+
+    def test_post_teach_back_lcd_is_bounded_and_preserves_user_mode(self):
+        lines = (
+            "MAP1 BACK P0 READY",
+            "BACK TO P0",
+            "START BACK X EXIT",
+            "MAP1 BACK WP:02/04",
+            "MAP1 BACK COMPLETE",
+            "X HOLD XL CANCEL",
+        )
+        self.assertTrue(all(len(line) <= 20 for line in lines))
+        self.assertIn("postTeachBackAvailable", LCD_TEXT)
+        self.assertIn("postTeachBackActive", LCD_TEXT)
+        self.assertIn("postTeachBackComplete", LCD_TEXT)
+        self.assertIn('snprintf(desired_[2], 21, "BACK TO P0")', LCD_TEXT)
+        self.assertIn('snprintf(desired_[3], 21, "START BACK X EXIT")',
+                      LCD_TEXT)
+        self.assertIn('snprintf(desired_[2], 21, "MODE:ONCE")', LCD_TEXT)
+
+    def test_post_teach_back_does_not_change_storage_or_motion_tuning(self):
+        self.assertNotIn("MapRouteHeader", MAP_HEADER_TEXT.split(
+            "PostTeachBackContext", 1)[1])
+        self.assertNotIn("store_.save", MAP_TEXT.split(
+            "bool MapController::startPostTeachBack", 1)[1].split(
+                "bool MapController::validateRoute", 1)[0])
+        self.assertNotIn("TURN_MAX_SPEED", MAP_TEXT.split(
+            "bool MapController::startPostTeachBack", 1)[1].split(
+                "bool MapController::validateRoute", 1)[0])
 
     def test_start_activity_is_not_replay_reject_or_takeover(self):
         control = CTRL_TEXT[CTRL_TEXT.index("void RobotController::updateControl"):]
