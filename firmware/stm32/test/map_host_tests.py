@@ -90,6 +90,40 @@ def effective_mode(route_type, replay_mode):
     return replay_mode
 
 
+class LegacyMigrationModel:
+    """Model the explicit Settings SAVE migration without Flash access."""
+
+    def __init__(self, route_type, replay_mode, speed=20, lap=0):
+        self.flash = (route_type, replay_mode, speed, lap)
+        self.runtime = self.flash
+        self.pending = False
+        self.write_count = 0
+
+    def load(self):
+        route_type, replay_mode, speed, lap = self.flash
+        self.pending = route_type == "CLOSED"
+        self.runtime = ("OPEN", effective_mode(route_type, replay_mode),
+                        speed, lap)
+
+    def save_settings(self, replay_mode=None, speed=None, lap=None,
+                      succeed=True):
+        old = self.runtime
+        requested = (replay_mode if replay_mode is not None else old[1],
+                     speed if speed is not None else old[2],
+                     lap if lap is not None else old[3])
+        changed = requested != old[1:] or self.pending
+        if not changed:
+            return "NO_CHANGE"
+        self.write_count += 1
+        if not succeed:
+            self.runtime = old
+            return "FAIL"
+        self.flash = ("OPEN", requested[0], requested[1], requested[2])
+        self.runtime = self.flash
+        self.pending = False
+        return "OK"
+
+
 def advance(current, direction, count, route_type, replay_mode):
     """Mirror MapController::advanceReplayAfterTarget for planner testing."""
     replay_mode = effective_mode(route_type, replay_mode)
@@ -1258,6 +1292,9 @@ class MapHostTests(unittest.TestCase):
         self.assertIn("MapReplayMode::RETURN", MAP_TEXT)
         self.assertIn("replayReturned_", MAP_TEXT)
         self.assertIn("replayDirection_", MAP_TEXT)
+        self.assertIn("ReplayReturnPhase::NONE", MAP_HEADER_TEXT)
+        self.assertIn("ReplayReturnPhase::OUTBOUND", MAP_TEXT)
+        self.assertIn("ReplayReturnPhase::INBOUND", MAP_TEXT)
 
     def test_TEST_HOLD_PING_PONG_CONTEXT(self):
         self.assertIn("MapReplayMode::PING_PONG", MAP_TEXT)
@@ -1304,6 +1341,57 @@ class MapHostTests(unittest.TestCase):
         self.assertEqual(_constant(TYPES_TEXT, "MAP_LOOP_TARGET_MAX"), 20)
         self.assertIn("result.replaySpeed", STORE_TEXT)
         self.assertIn("result.loopTarget", STORE_TEXT)
+
+    def test_return_phase_and_legacy_migration_are_runtime_only(self):
+        for token in (
+            "legacyCanonicalMigrationPending_",
+            "legacyCanonicalMigrationPending_ = storedType == MapRouteType::CLOSED",
+            "legacyCanonicalMigrationPending_;",
+            "returnPhase",
+            "MAP,RETURN,START,POINTS=",
+            "MAP,RETURN,PHASE=OUT",
+            "MAP,RETURN,TURNAROUND,WP=",
+            "MAP,RETURN,PHASE=BACK,FROM=",
+            "MAP,RETURN,HOLD,PHASE=",
+            "MAP,RETURN,COMPLETE,WP=0",
+        ):
+            self.assertIn(token, MAP_TEXT + MAP_HEADER_TEXT + LCD_TEXT)
+        self.assertIn("legacyCanonicalMigrationPending_ = false", MAP_TEXT)
+        self.assertIn("legacyCanonicalMigrationPending_", MAP_TEXT[MAP_TEXT.index("void MapController::saveSettingsAndExit") :])
+        self.assertNotIn("returnPhase", TYPES_TEXT)
+        self.assertNotIn("returnPhase", STORE_TEXT)
+
+    def test_legacy_closed_once_migrates_on_unchanged_settings_save(self):
+        model = LegacyMigrationModel("CLOSED", "ONCE")
+        model.load()
+        self.assertEqual(model.runtime[1], "CLOSED")
+        self.assertTrue(model.pending)
+        self.assertEqual(model.save_settings(), "OK")
+        self.assertEqual(model.write_count, 1)
+        self.assertEqual(model.flash[:2], ("OPEN", "CLOSED"))
+        self.assertFalse(model.pending)
+
+    def test_legacy_closed_loop_migration_preserves_lap(self):
+        model = LegacyMigrationModel("CLOSED", "LOOP", lap=2)
+        model.load()
+        self.assertEqual(model.save_settings(), "OK")
+        self.assertEqual(model.flash, ("OPEN", "LOOP", 20, 2))
+
+    def test_legacy_migration_failure_retains_runtime_and_flash(self):
+        model = LegacyMigrationModel("CLOSED", "LOOP", lap=2)
+        model.load()
+        old_flash = model.flash
+        old_runtime = model.runtime
+        self.assertEqual(model.save_settings(succeed=False), "FAIL")
+        self.assertEqual(model.flash, old_flash)
+        self.assertEqual(model.runtime, old_runtime)
+        self.assertTrue(model.pending)
+
+    def test_canonical_unchanged_settings_save_does_not_write(self):
+        model = LegacyMigrationModel("OPEN", "RETURN")
+        model.load()
+        self.assertEqual(model.save_settings(), "NO_CHANGE")
+        self.assertEqual(model.write_count, 0)
 
     def test_map_settings_speed_and_lap_bounds(self):
         self.assertIn("MAP_REPLAY_SPEED_MIN", MAP_TEXT)
@@ -1550,13 +1638,16 @@ class MapHostTests(unittest.TestCase):
             '"MODE:LOOP LAP:%lu/%u"',
             '"MAP%u RUN WP:%02u/%02u"',
             '"UD/LR EDIT TRI HELP"',
-            '"RUN:X HOLD XL CANCEL"',
             '"START RES XL CANCEL"',
             '"DELETE MAP%u ?"',
             '"ALL ROUTE DATA"',
             '"O YES"',
             '"X NO"',
-            '"MAP%u HELP %u/2"',
+            '"MAP%u HELP %u/3"',
+            '"RETURN GO + BACK"',
+            '"CLOSED CLOSE ONCE"',
+            '"LOOP CLOSE REPEAT"',
+            'helpPage <= 2U ? helpPage : 0U',
         ):
             self.assertIn(token, LCD_TEXT)
         self.assertNotIn('"SEL MAP SQH DEL L3"', LCD_TEXT)
@@ -1588,7 +1679,7 @@ class MapHostTests(unittest.TestCase):
         turn_start = LCD_TEXT.index("status.replayOperation == 2U")
         turn_end = LCD_TEXT.index("if (status.mode == 7U)", turn_start)
         turn_block = LCD_TEXT[turn_start:turn_end]
-        self.assertIn('"MODE:%s", replayMode', turn_block)
+        self.assertIn('"MODE:%s", activeMode', turn_block)
         self.assertNotIn('"MODE:ONCE LAP:', turn_block)
 
     def test_settings_tri_help_visible(self):
@@ -1599,12 +1690,15 @@ class MapHostTests(unittest.TestCase):
     def test_help_lines_20_char(self):
         for line in (
             "UD/LR EDIT TRI HELP",
-            "RUN:X HOLD XL CANCEL",
-            "SEL-L SETTINGS",
+            "ONCE ONE WAY",
+            "RETURN GO + BACK",
+            "CLOSED CLOSE ONCE",
+            "LOOP CLOSE REPEAT",
+            "X HOLD XL CANCEL",
             "TRI PREV X BACK",
         ):
             self.assertLessEqual(len(line), 20)
-        self.assertIn('"MAP%u HELP %u/2"', LCD_TEXT)
+        self.assertIn('"MAP%u HELP %u/3"', LCD_TEXT)
 
     def test_long_press_and_destructive_delete_policy(self):
         self.assertIn("MAP_LONG_PRESS_MS = 1300U", CONFIG_TEXT)

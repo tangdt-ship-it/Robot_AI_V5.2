@@ -110,6 +110,15 @@ const char* MapController::storageErrorReasonName(
   return "GENERIC";
 }
 
+const char* MapController::returnPhaseName(ReplayReturnPhase phase) {
+  switch (phase) {
+    case ReplayReturnPhase::OUTBOUND: return "OUT";
+    case ReplayReturnPhase::INBOUND: return "BACK";
+    case ReplayReturnPhase::NONE: return "NONE";
+  }
+  return "NONE";
+}
+
 void MapController::begin() {
   ps2_.setMapUiCapture(false);
   if (!store_.begin()) {
@@ -121,6 +130,7 @@ void MapController::begin() {
     return;
   }
   storageErrorReason_ = MapStorageErrorReason::NONE;
+  legacyCanonicalMigrationPending_ = false;
   const MapSlotMetadata metadata = store_.metadata(selectedSlot_);
   storeState_ = metadata.state;
   routeType_ = MapRouteType::OPEN;
@@ -241,6 +251,7 @@ void MapController::handleSlot(uint8_t slot) {
   }
   selectedSlot_ = slot == 2U ? MapSlot::MAP_2 : MapSlot::MAP_1;
   loadedValid_ = false;
+  legacyCanonicalMigrationPending_ = false;
   const MapSlotMetadata metadata = store_.metadata(selectedSlot_);
   storeState_ = metadata.state;
   routeType_ = MapRouteType::OPEN;
@@ -332,7 +343,8 @@ void MapController::saveSettingsAndExit() {
   }
   const bool settingsChanged = settingsMode_ != routeMode_ ||
                                settingsSpeed_ != replaySpeed_ ||
-                               settingsLoopTarget_ != loopTarget_;
+                               settingsLoopTarget_ != loopTarget_ ||
+                               legacyCanonicalMigrationPending_;
   if (!settingsChanged) {
     storeState_ = MapStoreState::SAVED;
     storageErrorReason_ = MapStorageErrorReason::NONE;
@@ -370,6 +382,7 @@ void MapController::saveSettingsAndExit() {
   routeMode_ = settingsMode_;
   replaySpeed_ = settingsSpeed_;
   loopTarget_ = settingsLoopTarget_;
+  legacyCanonicalMigrationPending_ = false;
   loadedValid_ = true;
   storeState_ = MapStoreState::SAVED;
   storageErrorReason_ = MapStorageErrorReason::NONE;
@@ -584,6 +597,11 @@ void MapController::handleStart() {
         debug_.print(replayLapCounter_);
         debug_.print(",WP=");
         debug_.println(static_cast<unsigned>(replayTargetIndex_));
+      } else if (routeMode_ == MapReplayMode::RETURN) {
+        debug_.print("MAP,RETURN,RESUME,PHASE=");
+        debug_.print(returnPhaseName(replayReturnPhase_));
+        debug_.print(",WP=");
+        debug_.println(static_cast<unsigned>(replayTargetIndex_));
       }
     } else {
       const char* reason = rejectReason != nullptr ? rejectReason
@@ -601,6 +619,10 @@ void MapController::handleStart() {
     debug_.println(replayGeneration_);
     if (routeMode_ == MapReplayMode::LOOP) {
       debug_.println("MAP,LOOP,START");
+    } else if (routeMode_ == MapReplayMode::RETURN) {
+      debug_.print("MAP,RETURN,START,POINTS=");
+      debug_.println(static_cast<unsigned>(route_.header.waypointCount));
+      debug_.println("MAP,RETURN,PHASE=OUT");
     }
   } else {
     logStartReject(reason != nullptr ? reason : "PRECHECK");
@@ -616,7 +638,7 @@ void MapController::handleTriangle() {
   if (mode_ == MapControllerMode::SETTINGS ||
       mode_ == MapControllerMode::HELP) {
     if (mode_ == MapControllerMode::HELP) {
-      helpPage_ = helpPage_ == 0U ? 1U : 0U;
+      helpPage_ = static_cast<uint8_t>((helpPage_ + 1U) % 3U);
     }
     enterHelp();
     return;
@@ -754,6 +776,7 @@ void MapController::handleCrossLong() {
 bool MapController::loadSelected() {
   if (!store_.load(selectedSlot_, route_)) {
     loadedValid_ = false;
+    legacyCanonicalMigrationPending_ = false;
     storeState_ = MapStoreState::INVALID;
     mode_ = MapControllerMode::READY;
     return false;
@@ -761,6 +784,7 @@ bool MapController::loadSelected() {
   const char* reason = nullptr;
   if (!validateRoute(route_, reason)) {
     loadedValid_ = false;
+    legacyCanonicalMigrationPending_ = false;
     storeState_ = MapStoreState::INVALID;
     mode_ = MapControllerMode::READY;
     return false;
@@ -771,6 +795,7 @@ bool MapController::loadSelected() {
       static_cast<MapRouteType>(route_.header.routeType);
   const MapReplayMode storedMode =
       static_cast<MapReplayMode>(route_.header.replayMode);
+  legacyCanonicalMigrationPending_ = storedType == MapRouteType::CLOSED;
   routeType_ = MapRouteType::OPEN;
   routeMode_ = EffectiveReplayMode(storedType, storedMode);
   // Legacy CLOSED records are normalized in RAM only. Flash migration occurs
@@ -808,6 +833,7 @@ bool MapController::beginTeach() {
   route_.header.waypointCount = 0U;
   routeType_ = MapRouteType::OPEN;
   routeMode_ = MapReplayMode::ONCE;
+  legacyCanonicalMigrationPending_ = false;
   replaySpeed_ = MAP_REPLAY_SPEED_DEFAULT;
   loopTarget_ = MAP_LOOP_TARGET_INF;
   closeCandidateDistanceMm_ = 0U;
@@ -1378,7 +1404,9 @@ bool MapController::prepareReplay(const char*& rejectReason) {
   replayTargetIndex_ = 1U;
   replayDirection_ = 1;
   replayReturned_ = false;
-  replayReturnPhase_ = ReplayReturnPhase::OUTBOUND;
+  replayReturnPhase_ = routeMode_ == MapReplayMode::RETURN
+                           ? ReplayReturnPhase::OUTBOUND
+                           : ReplayReturnPhase::NONE;
   replayLapCounter_ = 0U;
   replayOriginRouteGeneration_ = route_.header.generation;
   replayTargetDistanceMm_ = 0U;
@@ -1720,6 +1748,12 @@ void MapController::advanceReplayAfterTarget() {
     replayDirection_ = -1;
     replayReturned_ = true;
     replayReturnPhase_ = ReplayReturnPhase::INBOUND;
+    debug_.print("MAP,RETURN,TURNAROUND,WP=");
+    debug_.println(static_cast<unsigned>(replayCurrentIndex_));
+    debug_.print("MAP,RETURN,PHASE=BACK,FROM=");
+    debug_.print(static_cast<unsigned>(replayCurrentIndex_));
+    debug_.print(",TO=");
+    debug_.println(static_cast<unsigned>(count - 2U));
     replayTargetIndex_ = count - 2U;
     return;
   }
@@ -1764,6 +1798,11 @@ void MapController::enterReplayHold(MapHoldReason reason, bool allowResume) {
     debug_.print(replayLapCounter_);
     debug_.print(",WP=");
     debug_.println(static_cast<unsigned>(replayTargetIndex_));
+  } else if (routeMode_ == MapReplayMode::RETURN) {
+    debug_.print("MAP,RETURN,HOLD,PHASE=");
+    debug_.print(returnPhaseName(replayReturnPhase_));
+    debug_.print(",WP=");
+    debug_.println(static_cast<unsigned>(replayTargetIndex_));
   }
 }
 
@@ -1781,6 +1820,7 @@ void MapController::abortReplay(const char* reason) {
 
 void MapController::completeReplay() {
   const uint32_t completedLap = replayLapCounter_;
+  const bool wasReturn = routeMode_ == MapReplayMode::RETURN;
   nextReplayGeneration();
   clearReplayResumeContext();
   replayLapCounter_ = completedLap;
@@ -1789,10 +1829,16 @@ void MapController::completeReplay() {
   mode_ = MapControllerMode::REPLAY_COMPLETE;
   statusDirty_ = true;
   debug_.println("MAP,REPLAY_COMPLETE");
+  if (wasReturn) {
+    debug_.println("MAP,RETURN,COMPLETE,WP=0");
+    debug_.println("MAP,RETURN,PHASE=NONE");
+  }
 }
 
 void MapController::cancelReplay(const char* reason) {
   const bool wasClosedLoop = routeMode_ == MapReplayMode::LOOP;
+  const bool wasReturn = routeMode_ == MapReplayMode::RETURN;
+  const ReplayReturnPhase cancelledReturnPhase = replayReturnPhase_;
   const uint32_t cancelledLap = replayLapCounter_;
   robot_.stopImmediately(true);
   nextReplayGeneration();
@@ -1808,6 +1854,9 @@ void MapController::cancelReplay(const char* reason) {
   if (wasClosedLoop) {
     debug_.print("MAP,LOOP,CANCEL,LAP=");
     debug_.println(cancelledLap);
+  } else if (wasReturn) {
+    debug_.print("MAP,RETURN,CANCEL,PHASE=");
+    debug_.println(returnPhaseName(cancelledReturnPhase));
   }
   debug_.println("MAP,REPLAY_CANCEL");
   beginCancelTrace();
@@ -1825,7 +1874,7 @@ void MapController::clearReplayResumeContext() {
   replayTargetIndex_ = 1U;
   replayDirection_ = 1;
   replayReturned_ = false;
-  replayReturnPhase_ = ReplayReturnPhase::OUTBOUND;
+  replayReturnPhase_ = ReplayReturnPhase::NONE;
   replayOrigin_ = {};
   replayHoldPose_ = {};
   replayOriginRouteGeneration_ = 0U;
@@ -2138,6 +2187,7 @@ void MapController::serviceStorage() {
     deletePending_ = false;
     if (store_.erase(selectedSlot_)) {
       loadedValid_ = false;
+      legacyCanonicalMigrationPending_ = false;
       storeState_ = MapStoreState::EMPTY;
       storageErrorReason_ = MapStorageErrorReason::NONE;
       mode_ = MapControllerMode::READY;
@@ -2160,6 +2210,7 @@ void MapController::serviceStorage() {
       storeState_ = MapStoreState::SAVED;
       storageErrorReason_ = MapStorageErrorReason::NONE;
       teachOldRouteAvailable_ = false;
+      legacyCanonicalMigrationPending_ = false;
       routeType_ = MapRouteType::OPEN;
       routeMode_ = static_cast<MapReplayMode>(route_.header.replayMode);
       mode_ = MapControllerMode::SAVED;
@@ -2188,6 +2239,7 @@ void MapController::serviceStorage() {
   if (modeSavePending_) {
     if (!loadedValid_ || !robot_.motorsStopped() || robot_.aiMotionActive()) return;
     modeSavePending_ = false;
+    route_.header.routeType = static_cast<uint8_t>(MapRouteType::OPEN);
     route_.header.replayMode = static_cast<uint8_t>(routeMode_);
     updateRouteHeaderForSave(route_);
     if (!store_.save(selectedSlot_, route_)) {
@@ -2200,6 +2252,7 @@ void MapController::serviceStorage() {
     } else {
       storeState_ = MapStoreState::SAVED;
       storageErrorReason_ = MapStorageErrorReason::NONE;
+      legacyCanonicalMigrationPending_ = false;
       log("REPLAY_MODE_SAVE=OK");
     }
     statusDirty_ = true;
@@ -2242,6 +2295,7 @@ void MapController::publishStatus() {
       static_cast<uint8_t>(replayOperation_),
       static_cast<uint8_t>(metadata.routeType),
       static_cast<uint8_t>(displayMode),
+      static_cast<uint8_t>(replayReturnPhase_),
       static_cast<uint8_t>(holdReason_), replayTargetDeg_, replayLapCounter_,
       closeCandidateDistanceMm_, closeCandidateHeadingDeg_,
       static_cast<uint8_t>(settingsItem_), displaySpeed, displayLoopTarget,

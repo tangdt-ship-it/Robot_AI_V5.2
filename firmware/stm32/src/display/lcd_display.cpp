@@ -136,7 +136,8 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
                               uint32_t replayTravelMm,
                               uint32_t replayErrorMm,
                               uint8_t replayOperation, uint8_t routeType,
-                              uint8_t replayMode, uint8_t holdReason,
+                              uint8_t replayMode, uint8_t returnPhase,
+                              uint8_t holdReason,
                               int16_t replayTargetDeg,
                               uint32_t replayLapCounter,
                               uint32_t closeCandidateDistanceMm,
@@ -162,6 +163,7 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
   status.holdReason = holdReason;
   status.routeType = routeType <= 1U ? routeType : 0U;
   status.replayMode = replayMode <= 4U ? replayMode : 0U;
+  status.returnPhase = returnPhase <= 2U ? returnPhase : 0U;
   status.replayTargetDeg = replayTargetDeg;
   status.replayLapCounter = replayLapCounter;
   status.closeCandidateDistanceMm = closeCandidateDistanceMm;
@@ -171,7 +173,7 @@ void LcdDisplay::setMapStatus(uint8_t slot, uint8_t storeState, uint8_t mode,
   status.settingsLoopTarget = settingsLoopTarget <= 20U
                                   ? settingsLoopTarget
                                   : 0U;
-  status.helpPage = helpPage <= 1U ? helpPage : 0U;
+  status.helpPage = helpPage <= 2U ? helpPage : 0U;
   status.storageErrorReason = storageErrorReason;
   status.oldRouteAvailable = oldRouteAvailable;
   if (mapSlot_ == normalized) forceRefresh();
@@ -239,6 +241,13 @@ void LcdDisplay::buildMapLines() {
                            status.replayMode == 2U ? "RETURN" :
                            status.replayMode == 3U ? "PING" : "ONCE";
   if (status.replayMode == 4U) replayMode = "CLOSED";
+  const bool returnPhaseActive =
+      status.replayMode == 2U && status.returnPhase != 0U &&
+      (status.mode == 6U || status.mode == 7U);
+  const char* activeMode = replayMode;
+  if (returnPhaseActive) {
+    activeMode = status.returnPhase == 2U ? "RETURN BACK" : "RETURN OUT";
+  }
   // Keep the 20-column LCD bounded even if an infinite loop has been running
   // for a very long time. Finite loop targets remain exact (1..20).
   const uint32_t completedLapDisplay =
@@ -344,15 +353,19 @@ void LcdDisplay::buildMapLines() {
     return;
   }
   if (status.mode == 11U) {
-    snprintf(desired_[0], 21, "MAP%u HELP %u/2", mapSlot_,
+    snprintf(desired_[0], 21, "MAP%u HELP %u/3", mapSlot_,
              static_cast<unsigned>(status.helpPage) + 1U);
     if (status.helpPage == 0U) {
       snprintf(desired_[1], 21, "UD ITEM LR VALUE");
       snprintf(desired_[2], 21, "START SAVE X BACK");
       snprintf(desired_[3], 21, "TRI NEXT");
+    } else if (status.helpPage == 1U) {
+      snprintf(desired_[1], 21, "ONCE ONE WAY");
+      snprintf(desired_[2], 21, "RETURN GO + BACK");
+      snprintf(desired_[3], 21, "CLOSED CLOSE ONCE");
     } else {
-      snprintf(desired_[1], 21, "SEL-L SETTINGS");
-      snprintf(desired_[2], 21, "RUN:X HOLD XL CANCEL");
+      snprintf(desired_[1], 21, "LOOP CLOSE REPEAT");
+      snprintf(desired_[2], 21, "X HOLD XL CANCEL");
       snprintf(desired_[3], 21, "TRI PREV X BACK");
     }
     return;
@@ -375,7 +388,7 @@ void LcdDisplay::buildMapLines() {
                    static_cast<unsigned>(status.settingsLoopTarget));
         }
       } else {
-        snprintf(desired_[2], 21, "MODE:%s", replayMode);
+        snprintf(desired_[2], 21, "MODE:%s", activeMode);
       }
       snprintf(desired_[3], 21, "X HOLD XL CANCEL");
       return;
@@ -395,7 +408,7 @@ void LcdDisplay::buildMapLines() {
                    static_cast<unsigned>(status.settingsLoopTarget));
         }
       } else {
-        snprintf(desired_[2], 21, "MODE:%s", replayMode);
+        snprintf(desired_[2], 21, "MODE:%s", activeMode);
       }
       snprintf(desired_[3], 21, "X HOLD XL CANCEL");
       return;
@@ -414,7 +427,7 @@ void LcdDisplay::buildMapLines() {
                  static_cast<unsigned>(status.settingsLoopTarget));
       }
     } else {
-      snprintf(desired_[2], 21, "MODE:%s", replayMode);
+      snprintf(desired_[2], 21, "MODE:%s", activeMode);
     }
     snprintf(desired_[3], 21, "X HOLD XL CANCEL");
     return;
@@ -438,7 +451,7 @@ void LcdDisplay::buildMapLines() {
       snprintf(desired_[3], 21, "START RES XL CANCEL");
       return;
     }
-    snprintf(desired_[2], 21, "MODE:%s", replayMode);
+    snprintf(desired_[2], 21, "MODE:%s", activeMode);
     snprintf(desired_[3], 21, "START RES XL CANCEL");
     return;
   }

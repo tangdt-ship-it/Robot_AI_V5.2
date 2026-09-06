@@ -43,7 +43,11 @@ class MapController {
 
  private:
   enum class ReplayRealignReason : uint8_t { NONE, PATH, ARRIVAL };
-  enum class ReplayReturnPhase : uint8_t { OUTBOUND, INBOUND };
+  enum class ReplayReturnPhase : uint8_t {
+    NONE = 0U,
+    OUTBOUND = 1U,
+    INBOUND = 2U,
+  };
   enum class MapStorageErrorReason : uint8_t {
     NONE = 0U,
     SETTINGS_SAVE = 1U,
@@ -147,6 +151,7 @@ class MapController {
                            float headingDeg, float headingErrorDeg,
                            const char* action) const;
   static const char* realignReasonName(ReplayRealignReason reason);
+  static const char* returnPhaseName(ReplayReturnPhase phase);
 
   void serviceStorage();
   void publishStatus();
@@ -180,6 +185,7 @@ class MapController {
   MapRouteData optimizedRoute_{};
   MapRouteData semanticRoute_{};
   bool loadedValid_ = false;
+  bool legacyCanonicalMigrationPending_ = false;
 
   Pose teachOrigin_{};
   Pose lastTeachSample_{};
@@ -207,7 +213,7 @@ class MapController {
   uint16_t replayTargetIndex_ = 0U;
   int8_t replayDirection_ = 1;
   bool replayReturned_ = false;
-  ReplayReturnPhase replayReturnPhase_ = ReplayReturnPhase::OUTBOUND;
+  ReplayReturnPhase replayReturnPhase_ = ReplayReturnPhase::NONE;
   uint32_t replayOriginRouteGeneration_ = 0U;
   uint32_t replayOriginResetGeneration_ = 0U;
   uint32_t replayOriginHeadingResetGeneration_ = 0U;

@@ -56,6 +56,7 @@ struct LcdMapStatus {
   uint8_t mode = 0;
   uint8_t routeType = 0;   // Compatibility: 0 OPEN, 1 legacy CLOSED.
   uint8_t replayMode = 0;  // 0 ONCE, 1 LOOP, 2 RETURN, 3 PING, 4 CLOSED.
+  uint8_t returnPhase = 0; // 0 NONE, 1 OUTBOUND, 2 INBOUND.
   uint16_t points = 0;
   uint16_t maxPoints = 128;
   uint32_t lengthMm = 0;
@@ -111,6 +112,7 @@ class LcdDisplay {
                     uint8_t replayOperation = 0,
                     uint8_t routeType = 0,
                     uint8_t replayMode = 0,
+                    uint8_t returnPhase = 0,
                     uint8_t holdReason = 0,
                     int16_t replayTargetDeg = 0,
                     uint32_t replayLapCounter = 0,
