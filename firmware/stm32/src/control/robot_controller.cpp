@@ -1151,9 +1151,11 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
         if (mapTurnFirstTargetCrossMs_ == 0U) {
           mapTurnFirstTargetCrossMs_ = nowMs;
         }
-        mapTurnMaxOvershootDeg_ =
-            max(mapTurnMaxOvershootDeg_, fabsf(aiTurnErrorDeg_));
       }
+    }
+    if (mapTurnProfile && mapTurnFirstTargetCrossMs_ != 0U) {
+      mapTurnMaxOvershootDeg_ =
+          max(mapTurnMaxOvershootDeg_, fabsf(aiTurnErrorDeg_));
     }
     aiTurnLastErrorSign_ = errorSign;
   }

@@ -49,6 +49,15 @@ def shortest_delta(target, current):
     return delta
 
 
+def peak_after_first_cross(errors, crossing_index):
+    if crossing_index is None:
+        return 0.0
+    peak = 0.0
+    for error in errors[crossing_index:]:
+        peak = max(peak, abs(error))
+    return peak
+
+
 class MapTurnControllerHostTests(unittest.TestCase):
     def test_profile_isolated_from_precise_mcp(self):
         self.assertIn("AiTurnProfile::MAP_COARSE", CTRL)
@@ -133,6 +142,27 @@ class MapTurnControllerHostTests(unittest.TestCase):
             self.assertIn(field, CTRL)
         self.assertIn("MAP_TURN_PD_TELEMETRY_MS", CTRL)
         self.assertIn("MAP_TURN_PD_KI = 0.0f", CONFIG)
+
+    def test_peak_overshoot_tracks_every_sample_after_first_cross(self):
+        cases = (
+            ((10.0, 4.0, 1.0, -1.0, -3.0, -4.0, -2.0), 3, 4.0),
+            ((-10.0, -4.0, -1.0, 1.0, 3.0, 5.0, 2.0), 3, 5.0),
+            ((10.0, 5.0, 3.0, 1.0, 0.5), None, 0.0),
+            ((3.0, -1.0, -4.0, -2.0, 1.0, 2.0, 0.5), 1, 4.0),
+        )
+        for errors, crossing_index, expected in cases:
+            self.assertEqual(peak_after_first_cross(errors, crossing_index),
+                             expected)
+
+    def test_peak_tracking_is_after_first_cross_and_never_resets(self):
+        fresh_sample = CTRL.split(
+            "if (headingSampleUpdated) {", 1
+        )[1].split("if (!headingSampleUpdated", 1)[0]
+        self.assertIn("if (mapTurnProfile && mapTurnFirstTargetCrossMs_ != 0U)",
+                      fresh_sample)
+        self.assertIn("mapTurnMaxOvershootDeg_ =", fresh_sample)
+        self.assertEqual(CTRL.count("mapTurnFirstTargetCrossMs_ = nowMs;"), 1)
+        self.assertIn("mapTurnMaxOvershootDeg_ = 0.0f;", CTRL)
 
 
 if __name__ == "__main__":
