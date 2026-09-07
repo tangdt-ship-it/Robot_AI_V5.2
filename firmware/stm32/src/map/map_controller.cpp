@@ -1965,6 +1965,20 @@ bool MapController::startNextReplaySegment() {
   // heading or snapping to orthogonal directions.
   const float incomingBearing =
       replayIncomingBearing(replayCurrentIndex_, replayTargetIndex_);
+  // A post-Teach return must retrace the immutable saved edge.  Starting each
+  // inbound leg from the live (up-to-40 mm early) arrival pose shifts the
+  // reference line and changes the next corner bearing, so that error can
+  // accumulate all the way to P0 while live cross-track still appears small.
+  // Keep normal replay behavior unchanged; only BACK uses the canonical edge
+  // start and bearing, while live pose remains the PID feedback that pulls the
+  // chassis back onto that edge.
+  const bool canonicalBackSegment = postTeachBackActive_;
+  const float waypointToleranceMm = static_cast<float>(
+      canonicalBackSegment ? MAP_GUIDE_BACK_ARRIVAL_POSITION_TOLERANCE_MM
+                           : MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM);
+  const Pose canonicalSegmentStart = routePointWorld(replayCurrentIndex_);
+  const Pose guidedSegmentStart =
+      canonicalBackSegment ? canonicalSegmentStart : current;
   if (logicalClosingEdge) {
     debug_.print("MAP,CLOSE_EDGE,PLAN,FROM=");
     debug_.print(static_cast<unsigned>(replayCurrentIndex_));
@@ -1975,11 +1989,13 @@ bool MapController::startNextReplaySegment() {
   }
   const float arrivalHeadingError =
       shortestDeltaDeg(incomingBearing, current.headingDeg);
-  const bool inArrivalZone = targetDistance <= kWaypointToleranceMm;
+  const bool inArrivalZone = targetDistance <= waypointToleranceMm;
 
   ReplayRealignReason actionReason = replayRealignReason_;
-  float desiredBearing = targetBearing;
-  float desiredHeadingError = targetHeadingError;
+  float desiredBearing =
+      canonicalBackSegment ? incomingBearing : targetBearing;
+  float desiredHeadingError = shortestDeltaDeg(desiredBearing,
+                                                current.headingDeg);
   bool coarsePreturn = false;
   bool realignAction = actionReason != ReplayRealignReason::NONE;
 
@@ -2054,7 +2070,7 @@ bool MapController::startNextReplaySegment() {
                                   replayTargetIndex_ == 1U &&
                                   fabsf(targetHeadingError) <=
                                       kReplayStartupTurnDeadbandDeg;
-    coarsePreturn = fabsf(targetHeadingError) >
+    coarsePreturn = fabsf(desiredHeadingError) >
                         MAP_REPLAY_PRETURN_TOLERANCE_DEG &&
                     !startupNoiseTurn;
   }
@@ -2084,8 +2100,10 @@ bool MapController::startNextReplaySegment() {
     replayTargetDeg_ = static_cast<int16_t>(lroundf(desiredBearing));
     logGuidePreturn(desiredHeadingError, "SKIP");
     if (!robot_.startReplayGuidedWaypoint(
-            replayTarget_.xMm, replayTarget_.yMm, current.xMm, current.yMm,
-            replaySpeed_, incomingBearing, segmentGeneration)) {
+            replayTarget_.xMm, replayTarget_.yMm, guidedSegmentStart.xMm,
+            guidedSegmentStart.yMm,
+            replaySpeed_, incomingBearing,
+            static_cast<uint32_t>(waypointToleranceMm), segmentGeneration)) {
       replayOperation_ = MapReplayOperation::NONE;
       abortReplay("GUIDE_START");
       return false;
@@ -2519,6 +2537,9 @@ bool MapController::consumeReplayDistanceResult(const AiDistanceResult& result) 
   const uint16_t from = replayCurrentIndex_;
   const uint16_t to = replayTargetIndex_;
   const uint32_t generation = result.motionGeneration;
+  const float waypointToleranceMm = static_cast<float>(
+      postTeachBackActive_ ? MAP_GUIDE_BACK_ARRIVAL_POSITION_TOLERANCE_MM
+                           : MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM);
   replayOperation_ = MapReplayOperation::NONE;
   replayTravelMm_ = result.travelledMm < 0.0f
                         ? 0U
@@ -2540,7 +2561,7 @@ bool MapController::consumeReplayDistanceResult(const AiDistanceResult& result) 
                replayTarget_.xMm - current.xMm) * kRadToDeg;
     const float incomingBearing =
         replayIncomingBearing(replayCurrentIndex_, replayTargetIndex_);
-    const bool inArrivalZone = targetDistance <= kWaypointToleranceMm;
+    const bool inArrivalZone = targetDistance <= waypointToleranceMm;
     replayRealignReason_ = inArrivalZone ? ReplayRealignReason::ARRIVAL
                                          : ReplayRealignReason::PATH;
     const float desiredBearing = inArrivalZone ? incomingBearing : targetBearing;
@@ -2568,7 +2589,7 @@ bool MapController::consumeReplayDistanceResult(const AiDistanceResult& result) 
         shortestDeltaDeg(arrivalBearing, current.headingDeg);
     replayTargetDistanceMm_ = static_cast<uint32_t>(lroundf(positionError));
     replayErrorMm_ = replayTargetDistanceMm_;
-    if (positionError <= kWaypointToleranceMm &&
+    if (positionError <= waypointToleranceMm &&
         fabsf(arrivalHeadingError) <=
             MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG) {
       logSegmentDone(generation, from, to, MapReplayOperation::MOVE,
@@ -2578,7 +2599,7 @@ bool MapController::consumeReplayDistanceResult(const AiDistanceResult& result) 
                    arrivalHeadingError);
       replayRealignReason_ = ReplayRealignReason::NONE;
       advanceReplayAfterTarget();
-    } else if (positionError <= kWaypointToleranceMm) {
+    } else if (positionError <= waypointToleranceMm) {
       // Do not let a distance-complete result bypass the arrival heading
       // gate. The next cycle performs ARRIVAL coarse correction.
       replayRealignReason_ = ReplayRealignReason::ARRIVAL;
@@ -3037,6 +3058,14 @@ void MapController::logGuideUpdate() const {
   debug_.print(robot_.guidedHeadingErrorDeg(), 2);
   debug_.print(",XTRACK_MM=");
   debug_.print(robot_.guidedCrossTrackMm(), 1);
+  debug_.print(",ARR_BLEND=");
+  debug_.print(robot_.guidedArrivalBlend(), 2);
+  debug_.print(",PID_P=");
+  debug_.print(robot_.guidedPidP(), 2);
+  debug_.print(",PID_I=");
+  debug_.print(robot_.guidedPidI(), 2);
+  debug_.print(",PID_D=");
+  debug_.print(robot_.guidedPidD(), 2);
   debug_.print(",BASE=");
   debug_.print(robot_.guidedBaseSpeed());
   debug_.print(",STEER=");
@@ -3071,7 +3100,9 @@ void MapController::logGuideDone(uint16_t waypoint, float positionErrorMm,
   debug_.print(",ARRIVAL_HDG_ERR=");
   debug_.print(headingErrorDeg, 2);
   debug_.print(",POS_TOL_MM=");
-  debug_.print(MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM);
+  debug_.print(postTeachBackActive_
+                   ? MAP_GUIDE_BACK_ARRIVAL_POSITION_TOLERANCE_MM
+                   : MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM);
   debug_.print(",HDG_TOL=");
   debug_.println(MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG, 1);
 }

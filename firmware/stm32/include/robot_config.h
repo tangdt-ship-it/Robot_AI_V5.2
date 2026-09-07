@@ -178,10 +178,11 @@ static constexpr uint32_t TURN_PROGRESS_MS = 250;
 // command with one continuous 360-degree multiple.
 static constexpr int16_t TURN_MAX_RELATIVE_DEG = 720;
 
-// MAP replay intentionally uses a faster, moderate-accuracy pre-turn.  The
-// precise +/-0.5-degree contract above remains reserved for MCP/AI angle
-// commands and is not changed by the MAP guidance profile.
-static constexpr float MAP_REPLAY_PRETURN_TOLERANCE_DEG = 3.0f;
+// MAP prioritizes a continuous route over stationary fine-angle corrections.
+// A residual error inside 2.0 degrees is handed to guided translation PID
+// over a straight edge and is handed to guided translation PID on the next
+// edge; MCP angle commands keep their separate +/-0.5-degree gate.
+static constexpr float MAP_REPLAY_PRETURN_TOLERANCE_DEG = 2.0f;
 static constexpr uint32_t MAP_REPLAY_PRETURN_SETTLE_MS = 100U;
 // MAP coarse turns use a separate conservative PD slew law.  The minimum
 // keeps the chassis above the commissioned static-friction threshold while
@@ -192,22 +193,60 @@ static constexpr float MAP_TURN_PD_KI = 0.0f;
 static constexpr int16_t MAP_TURN_PD_MIN_COMMAND = TURN_MIN_SPEED;
 static constexpr int16_t MAP_TURN_PD_MAX_COMMAND = TURN_MAX_SPEED;
 static constexpr float MAP_TURN_PD_SLOW_ZONE_DEG = 25.0f;
-static constexpr float MAP_TURN_PD_PULSE_ZONE_DEG = 8.0f;
+// While a MAP turn is already moving, allow PD to reduce torque below the
+// static-friction start command for a smooth approach. If it stops short, the
+// bounded correction pulse remains strong enough to restart the chassis.
+static constexpr int16_t MAP_TURN_PD_MOVING_MIN_COMMAND = 8;
+static constexpr float MAP_TURN_PD_MOVING_RATE_DEG_S = 5.0f;
+// Match the pulse zone to the MAP completion gate. This keeps the fallback
+// available without entering pulse/coast for an actionable MAP error: turns
+// above the gate remain continuous PD and smaller residuals transfer to drive.
+static constexpr float MAP_TURN_PD_PULSE_ZONE_DEG = 2.0f;
+static constexpr int16_t MAP_TURN_PD_CORRECTION_COMMAND = 15;
+static constexpr uint32_t MAP_TURN_PD_PULSE_NEAR_MS = 20U;
+static constexpr uint32_t MAP_TURN_PD_CORRECTION_COAST_MS = 100U;
+static constexpr uint32_t MAP_TURN_PD_OVERSHOOT_COAST_MS = 160U;
 static constexpr float MAP_TURN_PD_SETTLE_RATE_DEG_S = 2.0f;
 static constexpr float MAP_TURN_PD_PREDICT_TIME_S = 0.25f;
 static constexpr uint32_t MAP_TURN_PD_TELEMETRY_MS = 300U;
-static constexpr float MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG = 3.0f;
-static constexpr uint32_t MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM = 60U;
+static constexpr float MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG = 2.0f;
+static constexpr uint32_t MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM = 40U;
+// Post-Teach BACK retraces every saved corner. A normal 40 mm waypoint gate
+// becomes a same-size lateral offset on the following reverse edge, which was
+// measured as roughly 4-5% on one-metre HIL segments. Keep normal replay's
+// commissioned gate unchanged and use a tighter gate only for BACK to P0.
+static constexpr uint32_t MAP_GUIDE_BACK_ARRIVAL_POSITION_TOLERANCE_MM = 10U;
+// Pure point pursuit rotates toward a few millimetres of lateral endpoint
+// error and then needs a second in-place realign. Blend to the immutable
+// incoming edge near the waypoint so the robot arrives already aligned.
+static constexpr uint32_t MAP_GUIDE_ARRIVAL_BEARING_BLEND_DISTANCE_MM = 220U;
 static constexpr float MAP_GUIDE_REALIGN_THRESHOLD_DEG = 15.0f;
 static constexpr uint32_t MAP_GUIDE_SLOW_DISTANCE_MM = 250U;
 static constexpr int16_t MAP_GUIDE_MAX_STEER_COMMAND = 6;
-static constexpr float MAP_GUIDE_HEADING_GAIN = 0.35f;
-static constexpr float MAP_GUIDE_CROSSTRACK_GAIN = 0.015f;
+// MAP translation uses a bounded heading PID plus a lateral path term.  The
+// small integral removes persistent wheel/floor bias, D damps fast heading
+// changes, and anti-windup limits keep the controller below the existing
+// forward-only steering boundary.
+static constexpr float MAP_GUIDE_HEADING_KP = 0.75f;
+static constexpr float MAP_GUIDE_HEADING_KI = 0.05f;
+static constexpr float MAP_GUIDE_HEADING_KD = 0.04f;
+static constexpr float MAP_GUIDE_HEADING_INTEGRAL_LIMIT_DEG_S = 20.0f;
+static constexpr float MAP_GUIDE_HEADING_INTEGRAL_ZONE_DEG = 6.0f;
+static constexpr float MAP_GUIDE_HEADING_INTEGRAL_DEADBAND_DEG = 0.25f;
+static constexpr float MAP_GUIDE_HEADING_DERIVATIVE_FILTER = 0.20f;
+static constexpr float MAP_GUIDE_CROSSTRACK_GAIN = 0.020f;
 static constexpr float MAP_GUIDE_MAX_CROSSTRACK_MM = 250.0f;
 static constexpr int16_t MAP_GUIDE_MIN_SPEED = 15;
 static_assert(MAP_GUIDE_SLOW_DISTANCE_MM >
                   MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM,
               "MAP guide slow distance must exceed arrival tolerance");
+static_assert(MAP_GUIDE_ARRIVAL_BEARING_BLEND_DISTANCE_MM >
+                  MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM,
+              "MAP arrival-bearing blend window must be positive");
+static_assert(MAP_GUIDE_BACK_ARRIVAL_POSITION_TOLERANCE_MM > 0U &&
+                  MAP_GUIDE_BACK_ARRIVAL_POSITION_TOLERANCE_MM <=
+                      MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM,
+              "MAP BACK arrival tolerance must be positive and bounded");
 // MAP guided translation has its own bounded start profile. Safety STOP,
 // HOLD, CANCEL and obstacle braking always bypass this ramp.
 static constexpr uint32_t MAP_GUIDE_ACCEL_RAMP_MS = 400U;

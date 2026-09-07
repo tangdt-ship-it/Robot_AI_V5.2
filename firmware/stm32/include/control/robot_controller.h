@@ -101,6 +101,7 @@ class RobotController {
                                  float segmentStartXMm,
                                  float segmentStartYMm, int16_t speed,
                                  float arrivalBearingDeg,
+                                 uint32_t arrivalPositionToleranceMm,
                                  uint32_t motionGeneration = 0U);
   bool takeAiTurnResult(AiTurnResult& result);
   bool takeAiDistanceResult(AiDistanceResult& result);
@@ -131,6 +132,16 @@ class RobotController {
   float guidedBearingDeg() const { return guidedBearingDeg_; }
   float guidedHeadingErrorDeg() const { return guidedHeadingErrorDeg_; }
   float guidedCrossTrackMm() const { return guidedCrossTrackMm_; }
+  float guidedArrivalBlend() const { return guidedArrivalBlend_; }
+  float guidedPidP() const {
+    return MAP_GUIDE_HEADING_KP * guidedHeadingErrorDeg_;
+  }
+  float guidedPidI() const {
+    return MAP_GUIDE_HEADING_KI * guidedHeadingIntegralDegS_;
+  }
+  float guidedPidD() const {
+    return MAP_GUIDE_HEADING_KD * guidedHeadingDerivativeDegS_;
+  }
   int16_t guidedBaseSpeed() const { return guidedBaseSpeed_; }
   int16_t guidedSteering() const { return guidedSteering_; }
   int16_t targetLeftCommand() const { return targetLeft_; }
@@ -170,6 +181,8 @@ class RobotController {
   void finishAiTurn(AiTurnResultCode code);
   void finishAiDistance(AiDistanceResultCode code);
   void updateAiGuidedWaypoint(uint32_t nowMs);
+  void updateGuidedPid(uint32_t nowMs, float headingErrorDeg,
+                       float remainingMm);
   int16_t guidedSteeringCommand(float headingErrorDeg,
                                 float crossTrackErrorMm) const;
   static int16_t rampToward(int16_t current, int16_t target);
@@ -257,10 +270,18 @@ class RobotController {
   float guidedSegmentStartXMm_ = 0.0f;
   float guidedSegmentStartYMm_ = 0.0f;
   float guidedArrivalBearingDeg_ = 0.0f;
+  uint32_t guidedArrivalPositionToleranceMm_ =
+      MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM;
   float guidedRemainingMm_ = 0.0f;
   float guidedBearingDeg_ = 0.0f;
   float guidedHeadingErrorDeg_ = 0.0f;
   float guidedCrossTrackMm_ = 0.0f;
+  float guidedArrivalBlend_ = 0.0f;
+  float guidedHeadingIntegralDegS_ = 0.0f;
+  float guidedHeadingDerivativeDegS_ = 0.0f;
+  float guidedPreviousHeadingErrorDeg_ = 0.0f;
+  uint32_t guidedPidLastMs_ = 0U;
+  bool guidedPidInitialized_ = false;
   int16_t guidedBaseSpeed_ = 0;
   int16_t guidedRequestedSpeed_ = 0;
   uint32_t guidedStartMs_ = 0U;

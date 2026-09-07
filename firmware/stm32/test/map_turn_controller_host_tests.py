@@ -35,9 +35,19 @@ def pd_command(error, rate, maximum=30):
     elif relation == 0:
         damping = 0.0
     command = number("MAP_TURN_PD_KP") * abs(error) - damping
-    upper = min(maximum, number("TURN_MAX_SPEED"))
-    return round(max(number("TURN_MIN_SPEED"),
-                     min(command, upper)))
+    configured_upper = min(maximum, number("TURN_MAX_SPEED"))
+    moving = abs(rate) >= number("MAP_TURN_PD_MOVING_RATE_DEG_S")
+    lower = (number("MAP_TURN_PD_MOVING_MIN_COMMAND") if moving
+             else number("TURN_MIN_SPEED"))
+    ratio = max(0.0, min(1.0,
+                (abs(error) - number("MAP_TURN_PD_PULSE_ZONE_DEG")) /
+                (number("MAP_TURN_PD_SLOW_ZONE_DEG") -
+                 number("MAP_TURN_PD_PULSE_ZONE_DEG"))))
+    scheduled_upper = (number("MAP_TURN_PD_MOVING_MIN_COMMAND") +
+                       ratio * (configured_upper -
+                                number("MAP_TURN_PD_MOVING_MIN_COMMAND")))
+    upper = max(lower, scheduled_upper)
+    return round(max(lower, min(command, upper)))
 
 
 def shortest_delta(target, current):
@@ -71,12 +81,19 @@ class MapTurnControllerHostTests(unittest.TestCase):
 
     def test_pd_constants_preserve_map_contract_and_no_integral(self):
         self.assertEqual(number("TURN_TOLERANCE_DEG"), 0.5)
-        self.assertEqual(number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"), 3.0)
-        self.assertEqual(number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"), 3.0)
+        self.assertEqual(number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"), 2.0)
+        self.assertEqual(number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"), 2.0)
         self.assertEqual(number("MAP_GUIDE_REALIGN_THRESHOLD_DEG"), 15.0)
         self.assertEqual(number("TURN_MIN_SPEED"), 15.0)
         self.assertEqual(number("TURN_MAX_SPEED"), 30.0)
         self.assertEqual(number("MAP_TURN_PD_KI"), 0.0)
+        self.assertEqual(number("MAP_TURN_PD_MOVING_MIN_COMMAND"), 8.0)
+        self.assertEqual(number("MAP_TURN_PD_MOVING_RATE_DEG_S"), 5.0)
+        self.assertEqual(number("MAP_TURN_PD_PULSE_ZONE_DEG"), 2.0)
+        self.assertEqual(number("MAP_TURN_PD_CORRECTION_COMMAND"), 15.0)
+        self.assertEqual(number("MAP_TURN_PD_PULSE_NEAR_MS"), 20.0)
+        self.assertEqual(number("MAP_TURN_PD_CORRECTION_COAST_MS"), 100.0)
+        self.assertEqual(number("MAP_TURN_PD_OVERSHOOT_COAST_MS"), 160.0)
         self.assertNotIn("mapTurnIntegral", CTRL_HEADER + CTRL)
 
     def test_pd_response_has_bounded_symmetric_shape(self):
@@ -89,7 +106,7 @@ class MapTurnControllerHostTests(unittest.TestCase):
                              pd_command(-error, 0.0))
         self.assertGreaterEqual(pd_command(20.0, 0.0),
                                 pd_command(10.0, 0.0))
-        self.assertLess(pd_command(20.0, 20.0), pd_command(20.0, 0.0))
+        self.assertLess(pd_command(15.0, 20.0), pd_command(15.0, 0.0))
 
     def test_toward_rate_damps_and_away_rate_corrects(self):
         still = pd_command(15.0, 0.0)
@@ -103,9 +120,25 @@ class MapTurnControllerHostTests(unittest.TestCase):
 
     def test_wrap_and_signed_direction_contracts_are_present(self):
         self.assertIn("HeadingFusion::shortestDelta", CTRL)
-        self.assertIn("aiTurnErrorDeg_ * aiTurnYawRateDegS_", CTRL)
+        self.assertIn("aiTurnErrorDeg_ * controlYawRateDegS", CTRL)
         self.assertIn("MAP_TURN_PD_PREDICT_TIME_S", CTRL)
         self.assertIn("MAP,TURN,PD,ERR=", CTRL)
+
+    def test_moving_turn_can_decelerate_below_static_start_command(self):
+        command = pd_command(8.0, 20.0, 20.0)
+        self.assertGreaterEqual(command,
+                                number("MAP_TURN_PD_MOVING_MIN_COMMAND"))
+        self.assertLess(command, number("TURN_MIN_SPEED"))
+        self.assertIn("const bool moving =", CTRL)
+        self.assertIn("const float scheduledUpper", CTRL)
+
+    def test_map_braking_uses_conservative_fused_or_encoder_rate(self):
+        self.assertIn("encoderYawRateDegS", CTRL)
+        self.assertIn("controlYawRateDegS", CTRL)
+        self.assertIn(
+            "fabsf(encoderYawRateDegS) > fabsf(controlYawRateDegS)", CTRL)
+        self.assertIn(",FRATE=", CTRL)
+        self.assertIn(",ERATE=", CTRL)
         self.assertIn("MAP,TURN,DONE,TARGET=", CTRL)
         self.assertAlmostEqual(shortest_delta(179.0, -179.0), -2.0)
         self.assertAlmostEqual(shortest_delta(-179.0, 179.0), 2.0)
@@ -167,14 +200,20 @@ class MapTurnControllerHostTests(unittest.TestCase):
 
     def test_map_heading_tolerance_boundaries(self):
         tolerance = number("MAP_REPLAY_PRETURN_TOLERANCE_DEG")
-        self.assertLessEqual(2.9, tolerance)
-        self.assertLessEqual(tolerance, 3.0)
-        self.assertGreater(3.1, tolerance)
+        self.assertEqual(tolerance, 2.0)
 
         arrival_tolerance = number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG")
-        self.assertLessEqual(2.9, arrival_tolerance)
-        self.assertLessEqual(arrival_tolerance, 3.0)
-        self.assertGreater(3.1, arrival_tolerance)
+        self.assertEqual(arrival_tolerance, 2.0)
+
+    def test_map_final_pulses_are_isolated_from_replay_speed(self):
+        self.assertIn(
+            "mapTurnProfile\n        ? constrain(MAP_TURN_PD_CORRECTION_COMMAND",
+            CTRL,
+        )
+        self.assertIn("MAP_TURN_PD_PULSE_NEAR_MS", CTRL)
+        self.assertIn("MAP_TURN_PD_CORRECTION_COAST_MS", CTRL)
+        self.assertIn("maxWheelSpeed > TURN_SETTLE_WHEEL_SPEED_MM_S", CTRL)
+        self.assertEqual(number("TURN_CORRECTION_SPEED"), 15.0)
 
 
 if __name__ == "__main__":

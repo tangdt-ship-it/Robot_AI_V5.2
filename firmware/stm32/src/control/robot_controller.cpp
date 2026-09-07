@@ -13,15 +13,29 @@ float mapTurnPdDamping(float errorDeg, float yawRateDegS) {
 
 int16_t mapTurnPdCommand(float errorDeg, float yawRateDegS,
                          int16_t maxSpeed) {
-  const float upper = fminf(
+  const float configuredUpper = fminf(
       static_cast<float>(constrain(maxSpeed, MAP_TURN_PD_MIN_COMMAND,
                                    MAP_TURN_PD_MAX_COMMAND)),
       static_cast<float>(MAP_TURN_PD_MAX_COMMAND));
-  const float proportional = MAP_TURN_PD_KP * fabsf(errorDeg);
+  const float absError = fabsf(errorDeg);
+  const bool moving = fabsf(yawRateDegS) >= MAP_TURN_PD_MOVING_RATE_DEG_S;
+  const float lower = static_cast<float>(
+      moving ? MAP_TURN_PD_MOVING_MIN_COMMAND
+             : MAP_TURN_PD_MIN_COMMAND);
+  const float approachRatio = constrain(
+      (absError - MAP_TURN_PD_PULSE_ZONE_DEG) /
+          (MAP_TURN_PD_SLOW_ZONE_DEG - MAP_TURN_PD_PULSE_ZONE_DEG),
+      0.0f, 1.0f);
+  const float scheduledUpper =
+      static_cast<float>(MAP_TURN_PD_MOVING_MIN_COMMAND) +
+      approachRatio *
+          (configuredUpper - MAP_TURN_PD_MOVING_MIN_COMMAND);
+  const float upper = fmaxf(lower, scheduledUpper);
+  const float proportional = MAP_TURN_PD_KP * absError;
   const float command = proportional -
                         mapTurnPdDamping(errorDeg, yawRateDegS);
   return static_cast<int16_t>(lroundf(constrain(
-      command, static_cast<float>(MAP_TURN_PD_MIN_COMMAND), upper)));
+      command, lower, upper)));
 }
 
 }  // namespace
@@ -477,8 +491,16 @@ void RobotController::stopImmediately(bool requireFreshManualCommand) {
   guidedTargetXMm_ = guidedTargetYMm_ = 0.0f;
   guidedSegmentStartXMm_ = guidedSegmentStartYMm_ = 0.0f;
   guidedArrivalBearingDeg_ = 0.0f;
+  guidedArrivalPositionToleranceMm_ =
+      MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM;
   guidedRemainingMm_ = guidedBearingDeg_ = guidedHeadingErrorDeg_ = 0.0f;
   guidedCrossTrackMm_ = 0.0f;
+  guidedArrivalBlend_ = 0.0f;
+  guidedHeadingIntegralDegS_ = 0.0f;
+  guidedHeadingDerivativeDegS_ = 0.0f;
+  guidedPreviousHeadingErrorDeg_ = 0.0f;
+  guidedPidLastMs_ = 0U;
+  guidedPidInitialized_ = false;
   guidedBaseSpeed_ = guidedRequestedSpeed_ = 0;
   guidedStartMs_ = 0U;
   guidedSteering_ = 0;
@@ -584,13 +606,15 @@ bool RobotController::startReplayDistance(bool forward, uint32_t distanceMm,
 bool RobotController::startReplayGuidedWaypoint(
     float targetXMm, float targetYMm, float segmentStartXMm,
     float segmentStartYMm, int16_t speed, float arrivalBearingDeg,
+    uint32_t arrivalPositionToleranceMm,
     uint32_t motionGeneration) {
   const uint32_t now = millis();
   if (!canStartReplayMotion(now) || !odometry_.ready() ||
       !odometry_.healthy() || !headingAvailable() ||
       !isfinite(targetXMm) || !isfinite(targetYMm) ||
       !isfinite(segmentStartXMm) || !isfinite(segmentStartYMm) ||
-      !isfinite(arrivalBearingDeg)) {
+      !isfinite(arrivalBearingDeg) || arrivalPositionToleranceMm == 0U ||
+      arrivalPositionToleranceMm > MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM) {
     return false;
   }
   const float initialDistance = hypotf(targetXMm - segmentStartXMm,
@@ -614,12 +638,19 @@ bool RobotController::startReplayGuidedWaypoint(
   guidedSegmentStartXMm_ = segmentStartXMm;
   guidedSegmentStartYMm_ = segmentStartYMm;
   guidedArrivalBearingDeg_ = HeadingFusion::normalize(arrivalBearingDeg);
+  guidedArrivalPositionToleranceMm_ = arrivalPositionToleranceMm;
   guidedRemainingMm_ = initialDistance;
   guidedBearingDeg_ = atan2f(targetYMm - segmentStartYMm,
                              targetXMm - segmentStartXMm) *
                       57.29577951308232f;
   guidedHeadingErrorDeg_ = 0.0f;
   guidedCrossTrackMm_ = 0.0f;
+  guidedArrivalBlend_ = 0.0f;
+  guidedHeadingIntegralDegS_ = 0.0f;
+  guidedHeadingDerivativeDegS_ = 0.0f;
+  guidedPreviousHeadingErrorDeg_ = 0.0f;
+  guidedPidLastMs_ = now;
+  guidedPidInitialized_ = false;
   guidedRequestedSpeed_ = constrain(speed, MAP_REPLAY_SPEED_MIN,
                                     MAP_REPLAY_SPEED_MAX);
   guidedBaseSpeed_ = MAP_GUIDE_MIN_SPEED;
@@ -856,12 +887,84 @@ void RobotController::updateAiDistance(uint32_t nowMs) {
   }
 }
 
+void RobotController::updateGuidedPid(uint32_t nowMs, float headingErrorDeg,
+                                      float remainingMm) {
+  if (!guidedPidInitialized_) {
+    guidedPreviousHeadingErrorDeg_ = headingErrorDeg;
+    guidedPidLastMs_ = nowMs;
+    guidedHeadingIntegralDegS_ = 0.0f;
+    guidedHeadingDerivativeDegS_ = 0.0f;
+    guidedPidInitialized_ = true;
+    return;
+  }
+
+  const uint32_t dtMs = nowMs - guidedPidLastMs_;
+  if (dtMs < 5U) return;
+  if (dtMs > 200U) {
+    // A scheduler gap must not become a derivative spike or integrate stale
+    // error after HOLD/obstacle handling.
+    guidedPreviousHeadingErrorDeg_ = headingErrorDeg;
+    guidedPidLastMs_ = nowMs;
+    guidedHeadingIntegralDegS_ = 0.0f;
+    guidedHeadingDerivativeDegS_ = 0.0f;
+    return;
+  }
+
+  const float dtS = static_cast<float>(dtMs) * 0.001f;
+  const float errorStep = HeadingFusion::shortestDelta(
+      headingErrorDeg, guidedPreviousHeadingErrorDeg_);
+  const float rawDerivative = errorStep / dtS;
+  guidedHeadingDerivativeDegS_ +=
+      MAP_GUIDE_HEADING_DERIVATIVE_FILTER *
+      (rawDerivative - guidedHeadingDerivativeDegS_);
+
+  const bool signChanged =
+      headingErrorDeg * guidedPreviousHeadingErrorDeg_ < 0.0f;
+  if (signChanged) guidedHeadingIntegralDegS_ = 0.0f;
+
+  const float absError = fabsf(headingErrorDeg);
+  const bool integralEnabled =
+      remainingMm > static_cast<float>(
+                        guidedArrivalPositionToleranceMm_) &&
+      absError <= MAP_GUIDE_HEADING_INTEGRAL_ZONE_DEG;
+  if (integralEnabled &&
+      absError > MAP_GUIDE_HEADING_INTEGRAL_DEADBAND_DEG) {
+    const float candidate = constrain(
+        guidedHeadingIntegralDegS_ + headingErrorDeg * dtS,
+        -MAP_GUIDE_HEADING_INTEGRAL_LIMIT_DEG_S,
+        MAP_GUIDE_HEADING_INTEGRAL_LIMIT_DEG_S);
+    const float candidatePid =
+        MAP_GUIDE_HEADING_KP * headingErrorDeg +
+        MAP_GUIDE_HEADING_KI * candidate +
+        MAP_GUIDE_HEADING_KD * guidedHeadingDerivativeDegS_;
+    // Conditional integration is the anti-windup gate. If P+D already asks
+    // for saturated steering, accumulating more same-direction I would only
+    // delay recovery when the path error reverses.
+    if (fabsf(candidatePid) <=
+        static_cast<float>(MAP_GUIDE_MAX_STEER_COMMAND)) {
+      guidedHeadingIntegralDegS_ = candidate;
+    }
+  } else if (absError <= MAP_GUIDE_HEADING_INTEGRAL_DEADBAND_DEG) {
+    const float decay = constrain(1.0f - 2.0f * dtS, 0.0f, 1.0f);
+    guidedHeadingIntegralDegS_ *= decay;
+  } else {
+    guidedHeadingIntegralDegS_ = 0.0f;
+  }
+
+  guidedPreviousHeadingErrorDeg_ = headingErrorDeg;
+  guidedPidLastMs_ = nowMs;
+}
+
 int16_t RobotController::guidedSteeringCommand(
     float headingErrorDeg, float crossTrackErrorMm) const {
   // Positive steering is a left correction on this chassis: the left wheel
   // slows and the right wheel speeds up.  Positive cross-track means the
   // robot is left of the start->target line, so its correction is subtracted.
-  const float steering = MAP_GUIDE_HEADING_GAIN * headingErrorDeg -
+  const float steering = MAP_GUIDE_HEADING_KP * headingErrorDeg +
+                         MAP_GUIDE_HEADING_KI *
+                             guidedHeadingIntegralDegS_ +
+                         MAP_GUIDE_HEADING_KD *
+                             guidedHeadingDerivativeDegS_ -
                          MAP_GUIDE_CROSSTRACK_GAIN * crossTrackErrorMm;
   return static_cast<int16_t>(lroundf(constrain(
       steering, -static_cast<float>(MAP_GUIDE_MAX_STEER_COMMAND),
@@ -897,10 +1000,25 @@ void RobotController::updateAiGuidedWaypoint(uint32_t nowMs) {
   const float segmentDx = guidedTargetXMm_ - guidedSegmentStartXMm_;
   const float segmentDy = guidedTargetYMm_ - guidedSegmentStartYMm_;
   const float segmentLength = hypotf(segmentDx, segmentDy);
-  const float targetBearing = atan2f(dy, dx) * 57.29577951308232f;
-  guidedBearingDeg_ = targetBearing;
+  const float liveTargetBearing = atan2f(dy, dx) * 57.29577951308232f;
+  const float incomingBearing = guidedArrivalBearingDeg_;
+  const float blendSpanMm = static_cast<float>(
+      MAP_GUIDE_ARRIVAL_BEARING_BLEND_DISTANCE_MM -
+      guidedArrivalPositionToleranceMm_);
+  guidedArrivalBlend_ = constrain(
+      (static_cast<float>(MAP_GUIDE_ARRIVAL_BEARING_BLEND_DISTANCE_MM) -
+       remaining) /
+          blendSpanMm,
+      0.0f, 1.0f);
+  // Far from the target, point pursuit removes accumulated position error.
+  // Near it, smoothly restore the immutable route-edge heading so a small
+  // lateral offset cannot turn into a several-degree arrival realign.
+  guidedBearingDeg_ = HeadingFusion::normalize(
+      liveTargetBearing +
+      HeadingFusion::shortestDelta(incomingBearing, liveTargetBearing) *
+          guidedArrivalBlend_);
   guidedHeadingErrorDeg_ = HeadingFusion::shortestDelta(
-      targetBearing, currentHeadingDeg());
+      guidedBearingDeg_, currentHeadingDeg());
   guidedCrossTrackMm_ = segmentLength > 1.0f
       ? constrain((segmentDx * (pose.yMm - guidedSegmentStartYMm_) -
                    segmentDy * (pose.xMm - guidedSegmentStartXMm_)) /
@@ -911,10 +1029,9 @@ void RobotController::updateAiGuidedWaypoint(uint32_t nowMs) {
   // Arrival heading is the immutable incoming route-edge bearing supplied by
   // MapController. The live target bearing above remains the PATH steering
   // direction and must not replace the arrival heading at a side offset.
-  const float incomingBearing = guidedArrivalBearingDeg_;
   const float arrivalHeadingError = HeadingFusion::shortestDelta(
       incomingBearing, currentHeadingDeg());
-  if (remaining <= MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM &&
+  if (remaining <= guidedArrivalPositionToleranceMm_ &&
       fabsf(arrivalHeadingError) <= MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG) {
 #if ROBOT_DEBUG
     debug_.print("MAP,GUIDE,ARRIVAL,POS_ERR=");
@@ -932,11 +1049,11 @@ void RobotController::updateAiGuidedWaypoint(uint32_t nowMs) {
     return;
   }
 
-  // Arrival is a position plus incoming-segment-heading gate. The 6 degree
+  // Arrival is a position plus incoming-segment-heading gate. The precise
   // arrival tolerance is intentionally stricter than the 15 degree PATH
   // realign threshold: once the chassis is close, every heading error above
   // the arrival tolerance must be corrected before the waypoint can advance.
-  if (remaining <= MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM &&
+  if (remaining <= guidedArrivalPositionToleranceMm_ &&
       fabsf(arrivalHeadingError) > MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG) {
 #if ROBOT_DEBUG
     debug_.print("MAP,GUIDE,ARRIVAL,POS_ERR=");
@@ -967,11 +1084,13 @@ void RobotController::updateAiGuidedWaypoint(uint32_t nowMs) {
     return;
   }
 
+  updateGuidedPid(nowMs, guidedHeadingErrorDeg_, remaining);
+
   const float slowNumerator =
-      remaining - static_cast<float>(MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM);
+      remaining - static_cast<float>(guidedArrivalPositionToleranceMm_);
   const float slowDenominator =
       static_cast<float>(MAP_GUIDE_SLOW_DISTANCE_MM) -
-      static_cast<float>(MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM);
+      static_cast<float>(guidedArrivalPositionToleranceMm_);
   const float slowRatio = constrain(slowNumerator / slowDenominator, 0.0f, 1.0f);
   const int16_t normalDecelSpeed = static_cast<int16_t>(lroundf(
       static_cast<float>(MAP_GUIDE_MIN_SPEED) +
@@ -1031,6 +1150,12 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     return;
   }
   const bool mapTurnProfile = aiTurnProfile_ == AiTurnProfile::MAP_COARSE;
+  const uint32_t correctionCoastMs =
+      mapTurnProfile ? MAP_TURN_PD_CORRECTION_COAST_MS
+                     : TURN_CORRECTION_COAST_MS;
+  const uint32_t overshootCoastMs =
+      mapTurnProfile ? MAP_TURN_PD_OVERSHOOT_COAST_MS
+                     : TURN_OVERSHOOT_COAST_MS;
   const float settleRateLimit =
       mapTurnProfile ? MAP_TURN_PD_SETTLE_RATE_DEG_S
                      : TURN_SETTLE_RATE_DEG_S;
@@ -1145,7 +1270,7 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     if (fabsf(aiTurnErrorDeg_) > aiTurnToleranceDeg_ &&
         aiTurnLastErrorSign_ != 0 && errorSign != aiTurnLastErrorSign_) {
       overshot = true;
-      aiTurnCoastUntilMs_ = nowMs + TURN_OVERSHOOT_COAST_MS;
+      aiTurnCoastUntilMs_ = nowMs + overshootCoastMs;
       aiTurnPulseDriving_ = false;
       if (mapTurnProfile) {
         if (mapTurnFirstTargetCrossMs_ == 0U) {
@@ -1171,8 +1296,20 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   }
   const float absError = fabsf(aiTurnErrorDeg_);
   const float absYawRate = fabsf(aiTurnYawRateDegS_);
+  const float encoderYawRateDegS =
+      odometry_.data().angularVelocityRadS * 57.29577951308232f;
+  float controlYawRateDegS = aiTurnYawRateDegS_;
+  // Encoder velocity reacts immediately to wheel acceleration/deceleration,
+  // while fused Heading remains the authoritative angle. For MAP braking
+  // only, use the larger measured rate so a filtered-rate lag cannot keep
+  // driving too far into a corner.
+  if (mapTurnProfile &&
+      fabsf(encoderYawRateDegS) > fabsf(controlYawRateDegS)) {
+    controlYawRateDegS = encoderYawRateDegS;
+  }
+  const float absControlYawRate = fabsf(controlYawRateDegS);
   if (mapTurnProfile) {
-    mapTurnMaxAbsYawRate_ = max(mapTurnMaxAbsYawRate_, absYawRate);
+    mapTurnMaxAbsYawRate_ = max(mapTurnMaxAbsYawRate_, absControlYawRate);
     mapTurnFinalError_ = aiTurnErrorDeg_;
   }
   const float maxWheelSpeed = max(
@@ -1223,11 +1360,11 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   // Predict where the heading will be after motor response and mechanical
   // coast. If that projection reaches/crosses the target, release PWM now.
   const float projectedError =
-      aiTurnErrorDeg_ - aiTurnYawRateDegS_ *
+      aiTurnErrorDeg_ - controlYawRateDegS *
           (mapTurnProfile ? MAP_TURN_PD_PREDICT_TIME_S
                           : TURN_PREDICT_TIME_S);
   const bool movingTowardTarget =
-      aiTurnErrorDeg_ * aiTurnYawRateDegS_ > 0.0f;
+      aiTurnErrorDeg_ * controlYawRateDegS > 0.0f;
   const bool projectedToTarget =
       movingTowardTarget &&
       (fabsf(projectedError) <= aiTurnToleranceDeg_ ||
@@ -1238,7 +1375,7 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
        absYawRate > settleRateLimit)) {
     aiTurnPulseDriving_ = false;
     if (static_cast<int32_t>(nowMs - aiTurnCoastUntilMs_) >= 0) {
-      aiTurnCoastUntilMs_ = nowMs + TURN_CORRECTION_COAST_MS;
+      aiTurnCoastUntilMs_ = nowMs + correctionCoastMs;
     }
     stopTurnDrive();
     return;
@@ -1257,12 +1394,14 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     if (aiTurnPulseDriving_) {
       if (static_cast<int32_t>(nowMs - aiTurnPulseUntilMs_) < 0) return;
       aiTurnPulseDriving_ = false;
-      aiTurnCoastUntilMs_ = nowMs + TURN_CORRECTION_COAST_MS;
+      aiTurnCoastUntilMs_ = nowMs + correctionCoastMs;
       stopTurnDrive();
       return;
     }
-    if (absYawRate > TURN_CORRECTION_START_RATE_DEG_S) {
-      aiTurnCoastUntilMs_ = nowMs + TURN_CORRECTION_COAST_MS;
+    if (absControlYawRate > TURN_CORRECTION_START_RATE_DEG_S ||
+        (mapTurnProfile &&
+         maxWheelSpeed > TURN_SETTLE_WHEEL_SPEED_MM_S)) {
+      aiTurnCoastUntilMs_ = nowMs + correctionCoastMs;
       stopTurnDrive();
       return;
     }
@@ -1271,23 +1410,26 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     // torque to overcome static friction; clamping this pulse to a requested
     // speed of 10 made 90/180-degree turns stall just outside the tolerance.
     // Keep the correction bounded by the global STM32 turn limit.
-    aiTurnCommandSpeed_ = constrain(
-        max(TURN_CORRECTION_SPEED, aiTurnMaxSpeed_), TURN_MIN_SPEED,
-        TURN_MAX_SPEED);
+    aiTurnCommandSpeed_ = mapTurnProfile
+        ? constrain(MAP_TURN_PD_CORRECTION_COMMAND,
+                    MAP_TURN_PD_MIN_COMMAND, MAP_TURN_PD_MAX_COMMAND)
+        : constrain(max(TURN_CORRECTION_SPEED, aiTurnMaxSpeed_),
+                    TURN_MIN_SPEED, TURN_MAX_SPEED);
     aiTurnPulseDriving_ = true;
     // Short 45 ms pulses are precise near target but do not consistently
     // overcome static friction on this chassis when 5..8 degrees remain.
     // Scale only pulse duration (never requested speed) with position error.
-    const uint32_t pulseMs =
-        absError > 5.0f ? TURN_CORRECTION_PULSE_FAR_MS
-        : absError > 3.0f ? TURN_CORRECTION_PULSE_MID_MS
-                          : TURN_CORRECTION_PULSE_NEAR_MS;
+    const uint32_t pulseMs = mapTurnProfile
+        ? MAP_TURN_PD_PULSE_NEAR_MS
+        : (absError > 5.0f ? TURN_CORRECTION_PULSE_FAR_MS
+           : absError > 3.0f ? TURN_CORRECTION_PULSE_MID_MS
+                             : TURN_CORRECTION_PULSE_NEAR_MS);
     aiTurnPulseUntilMs_ = nowMs + pulseMs;
   } else {
     aiTurnPulseDriving_ = false;
     if (mapTurnProfile) {
       aiTurnCommandSpeed_ = mapTurnPdCommand(
-          aiTurnErrorDeg_, aiTurnYawRateDegS_, aiTurnMaxSpeed_);
+          aiTurnErrorDeg_, controlYawRateDegS, aiTurnMaxSpeed_);
     } else {
       float ratio = absError >= slowZone
                       ? 1.0f
@@ -1316,11 +1458,15 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     debug_.print("MAP,TURN,PD,ERR=");
     debug_.print(aiTurnErrorDeg_, 2);
     debug_.print(",RATE=");
+    debug_.print(controlYawRateDegS, 2);
+    debug_.print(",FRATE=");
     debug_.print(aiTurnYawRateDegS_, 2);
+    debug_.print(",ERATE=");
+    debug_.print(encoderYawRateDegS, 2);
     debug_.print(",P=");
     debug_.print(MAP_TURN_PD_KP * absError, 2);
     debug_.print(",D=");
-    debug_.print(mapTurnPdDamping(aiTurnErrorDeg_, aiTurnYawRateDegS_), 2);
+    debug_.print(mapTurnPdDamping(aiTurnErrorDeg_, controlYawRateDegS), 2);
     debug_.print(",CMD=");
     debug_.print(aiTurnCommandSpeed_);
     debug_.print(",TARGET=");
