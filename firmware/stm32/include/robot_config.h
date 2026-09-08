@@ -198,10 +198,10 @@ static constexpr float MAP_TURN_PD_SLOW_ZONE_DEG = 25.0f;
 // bounded correction pulse remains strong enough to restart the chassis.
 static constexpr int16_t MAP_TURN_PD_MOVING_MIN_COMMAND = 8;
 static constexpr float MAP_TURN_PD_MOVING_RATE_DEG_S = 5.0f;
-// Match the pulse zone to the MAP completion gate. This keeps the fallback
-// available without entering pulse/coast for an actionable MAP error: turns
-// above the gate remain continuous PD and smaller residuals transfer to drive.
-static constexpr float MAP_TURN_PD_PULSE_ZONE_DEG = 2.0f;
+// Keep a bounded correction band above the MAP completion gate. Errors above
+// this band stay on continuous PD; errors between the 2-degree completion gate
+// and this zone may use one short pulse after the chassis has settled.
+static constexpr float MAP_TURN_PD_PULSE_ZONE_DEG = 4.0f;
 static constexpr int16_t MAP_TURN_PD_CORRECTION_COMMAND = 15;
 static constexpr uint32_t MAP_TURN_PD_PULSE_NEAR_MS = 20U;
 static constexpr uint32_t MAP_TURN_PD_CORRECTION_COAST_MS = 100U;

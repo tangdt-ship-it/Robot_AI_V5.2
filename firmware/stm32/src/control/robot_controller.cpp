@@ -888,7 +888,8 @@ void RobotController::updateAiDistance(uint32_t nowMs) {
 }
 
 void RobotController::updateGuidedPid(uint32_t nowMs, float headingErrorDeg,
-                                      float remainingMm) {
+                                      float remainingMm,
+                                      float crossTrackErrorMm) {
   if (!guidedPidInitialized_) {
     guidedPreviousHeadingErrorDeg_ = headingErrorDeg;
     guidedPidLastMs_ = nowMs;
@@ -936,7 +937,8 @@ void RobotController::updateGuidedPid(uint32_t nowMs, float headingErrorDeg,
     const float candidatePid =
         MAP_GUIDE_HEADING_KP * headingErrorDeg +
         MAP_GUIDE_HEADING_KI * candidate +
-        MAP_GUIDE_HEADING_KD * guidedHeadingDerivativeDegS_;
+        MAP_GUIDE_HEADING_KD * guidedHeadingDerivativeDegS_ -
+        MAP_GUIDE_CROSSTRACK_GAIN * crossTrackErrorMm;
     // Conditional integration is the anti-windup gate. If P+D already asks
     // for saturated steering, accumulating more same-direction I would only
     // delay recovery when the path error reverses.
@@ -1084,7 +1086,8 @@ void RobotController::updateAiGuidedWaypoint(uint32_t nowMs) {
     return;
   }
 
-  updateGuidedPid(nowMs, guidedHeadingErrorDeg_, remaining);
+  updateGuidedPid(nowMs, guidedHeadingErrorDeg_, remaining,
+                  guidedCrossTrackMm_);
 
   const float slowNumerator =
       remaining - static_cast<float>(guidedArrivalPositionToleranceMm_);
@@ -1296,14 +1299,24 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   }
   const float absError = fabsf(aiTurnErrorDeg_);
   const float absYawRate = fabsf(aiTurnYawRateDegS_);
+  const bool encoderRateReady = odometry_.ready();
+  const bool encoderRateHealthy = odometry_.healthy();
   const float encoderYawRateDegS =
-      odometry_.data().angularVelocityRadS * 57.29577951308232f;
+      encoderRateReady && encoderRateHealthy
+          ? odometry_.data().angularVelocityRadS * 57.29577951308232f
+          : 0.0f;
+  const bool encoderRateFinite = isfinite(encoderYawRateDegS);
+  const bool encoderRateSignCoherent =
+      encoderRateFinite &&
+      (encoderYawRateDegS == 0.0f || aiTurnYawRateDegS_ == 0.0f ||
+       aiTurnYawRateDegS_ * encoderYawRateDegS > 0.0f);
   float controlYawRateDegS = aiTurnYawRateDegS_;
   // Encoder velocity reacts immediately to wheel acceleration/deceleration,
   // while fused Heading remains the authoritative angle. For MAP braking
   // only, use the larger measured rate so a filtered-rate lag cannot keep
   // driving too far into a corner.
-  if (mapTurnProfile &&
+  if (mapTurnProfile && encoderRateReady && encoderRateHealthy &&
+      encoderRateFinite && encoderRateSignCoherent &&
       fabsf(encoderYawRateDegS) > fabsf(controlYawRateDegS)) {
     controlYawRateDegS = encoderYawRateDegS;
   }

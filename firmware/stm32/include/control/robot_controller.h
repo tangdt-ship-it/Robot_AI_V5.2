@@ -182,7 +182,7 @@ class RobotController {
   void finishAiDistance(AiDistanceResultCode code);
   void updateAiGuidedWaypoint(uint32_t nowMs);
   void updateGuidedPid(uint32_t nowMs, float headingErrorDeg,
-                       float remainingMm);
+                       float remainingMm, float crossTrackErrorMm);
   int16_t guidedSteeringCommand(float headingErrorDeg,
                                 float crossTrackErrorMm) const;
   static int16_t rampToward(int16_t current, int16_t target);
