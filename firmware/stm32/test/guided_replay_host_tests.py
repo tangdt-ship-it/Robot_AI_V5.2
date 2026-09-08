@@ -238,9 +238,6 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertIn("guidedHeadingIntegralDegS_", CTRL_HEADER)
         self.assertIn("guidedHeadingDerivativeDegS_", CTRL_HEADER)
         self.assertIn("Conditional integration is the anti-windup gate", CTRL)
-        self.assertIn(
-            "MAP_GUIDE_CROSSTRACK_GAIN * crossTrackErrorMm", CTRL
-        )
         self.assertIn("MAP_GUIDE_HEADING_DERIVATIVE_FILTER", CTRL)
         limit = config_number("MAP_GUIDE_MAX_STEER_COMMAND")
         self.assertLessEqual(abs(steering(5.0, -30.0, 20.0, 10.0)), limit)

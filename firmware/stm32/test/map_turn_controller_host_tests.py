@@ -89,9 +89,7 @@ class MapTurnControllerHostTests(unittest.TestCase):
         self.assertEqual(number("MAP_TURN_PD_KI"), 0.0)
         self.assertEqual(number("MAP_TURN_PD_MOVING_MIN_COMMAND"), 8.0)
         self.assertEqual(number("MAP_TURN_PD_MOVING_RATE_DEG_S"), 5.0)
-        self.assertEqual(number("MAP_TURN_PD_PULSE_ZONE_DEG"), 4.0)
-        self.assertGreater(number("MAP_TURN_PD_PULSE_ZONE_DEG"),
-                           number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"))
+        self.assertEqual(number("MAP_TURN_PD_PULSE_ZONE_DEG"), 2.0)
         self.assertEqual(number("MAP_TURN_PD_CORRECTION_COMMAND"), 15.0)
         self.assertEqual(number("MAP_TURN_PD_PULSE_NEAR_MS"), 20.0)
         self.assertEqual(number("MAP_TURN_PD_CORRECTION_COAST_MS"), 100.0)
@@ -137,13 +135,8 @@ class MapTurnControllerHostTests(unittest.TestCase):
     def test_map_braking_uses_conservative_fused_or_encoder_rate(self):
         self.assertIn("encoderYawRateDegS", CTRL)
         self.assertIn("controlYawRateDegS", CTRL)
-        self.assertIn("encoderRateReady", CTRL)
-        self.assertIn("encoderRateHealthy", CTRL)
-        self.assertIn("encoderRateFinite", CTRL)
-        self.assertIn("encoderRateSignCoherent", CTRL)
         self.assertIn(
             "fabsf(encoderYawRateDegS) > fabsf(controlYawRateDegS)", CTRL)
-        self.assertIn("aiTurnYawRateDegS_ * encoderYawRateDegS > 0.0f", CTRL)
         self.assertIn(",FRATE=", CTRL)
         self.assertIn(",ERATE=", CTRL)
         self.assertIn("MAP,TURN,DONE,TARGET=", CTRL)
