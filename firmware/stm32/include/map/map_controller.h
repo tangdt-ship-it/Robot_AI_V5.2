@@ -268,6 +268,7 @@ class MapController {
   MapSlot replayContextSlot_ = MapSlot::MAP_1;
   bool replayOriginValid_ = false;
   ReplayRealignReason replayRealignReason_ = ReplayRealignReason::NONE;
+  uint32_t replayArrivalHeadingViolationSinceMs_ = 0U;
   Pose replayOrigin_{};
   Pose replayTarget_{};
   Pose replayHoldPose_{};

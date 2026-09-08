@@ -12,6 +12,9 @@ CONFIG_TEXT = (STM32_ROOT / "include" / "robot_config.h").read_text(
 SENSOR_TEXT = (STM32_ROOT / "src" / "sensors" / "ultrasonic_sensor.cpp").read_text(
     encoding="utf-8"
 )
+SENSOR_HEADER_TEXT = (
+    STM32_ROOT / "include" / "sensors" / "ultrasonic_sensor.h"
+).read_text(encoding="utf-8")
 MAP_TEXT = (STM32_ROOT / "src" / "map" / "map_controller.cpp").read_text(
     encoding="utf-8"
 )
@@ -38,7 +41,8 @@ class UltrasonicHostTests(unittest.TestCase):
         self.assertIn("activeChannel_!=0xFF", SENSOR_TEXT)
 
     def test_echo_lines_must_be_quiet_before_next_trigger(self):
-        self.assertIn("if(digitalRead(c.echoPin)==HIGH) continue;", SENSOR_TEXT)
+        self.assertIn("if(digitalRead(c.echoPin)==HIGH) {", SENSOR_TEXT)
+        self.assertIn("c.displayNoEchoFar=false;", SENSOR_TEXT)
         self.assertIn("A disconnected or", SENSOR_TEXT)
         self.assertIn("floating Echo input must not globally block", SENSOR_TEXT)
         self.assertNotIn("digitalRead(channels_[LEFT_MOUNT].echoPin)==HIGH ||", SENSOR_TEXT)
@@ -81,6 +85,19 @@ class UltrasonicHostTests(unittest.TestCase):
         self.assertIn("c.displayFar && c.zone==ObstacleZone::CLEAR", SENSOR_TEXT)
         self.assertIn("hasBoundedNoEchoFar", SENSOR_TEXT)
         self.assertIn("c.health=noEcho?SensorHealth::TIMEOUT:SensorHealth::INVALID", SENSOR_TEXT)
+
+    def test_lcd_ok_after_a_known_working_sensor_loses_its_reflector(self):
+        # Display recovery is intentionally separate from safety: a close
+        # object removed from the cone becomes LCD OK after clean no-Echo
+        # samples, while zone/health still require fresh real Echo data.
+        self.assertIn("bool displayNoEchoFar=false", SENSOR_HEADER_TEXT)
+        self.assertIn("c.displayNoEchoFar=true", SENSOR_TEXT)
+        self.assertIn("c.displayNoEchoFar=false", SENSOR_TEXT)
+        self.assertIn("boundedNoEchoFar || c.displayNoEchoFar", SENSOR_TEXT)
+        self.assertIn(
+            "not\n    // used by the obstacle/motion safety model",
+            SENSOR_HEADER_TEXT,
+        )
 
 
 if __name__ == "__main__":

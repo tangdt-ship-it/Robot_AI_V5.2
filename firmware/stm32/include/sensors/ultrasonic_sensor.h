@@ -86,6 +86,13 @@ class UltrasonicSensor {
     uint32_t lastValidEchoMs=0, consecutiveTimeouts=0, invalidCount=0;
     uint8_t closerConfirmations=0, fartherConfirmations=0;
     bool displayFar=false;
+    // Presentation only: after this channel has proved it can measure a
+    // real Echo, repeated clean timeouts mean there is no reflector in its
+    // usable range.  The LCD may say OK, but this flag is deliberately not
+    // used by the obstacle/motion safety model.
+    bool displayNoEchoFar=false;
+    // Bounded, safety-qualified clear grace.  Unlike displayNoEchoFar it
+    // requires prior wide-clear evidence and expires quickly.
     bool noEchoFar=false;
   } channels_[2];
   static UltrasonicSensor* instance_;

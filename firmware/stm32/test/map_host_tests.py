@@ -614,7 +614,8 @@ class MapHostTests(unittest.TestCase):
     def test_TEST_ANGLE_60(self):
         self.assertAlmostEqual(direction_change((0, 0), (100, 0),
                                                 (150, 86.6025)), 60.0, places=2)
-        self.assertIn("atan2f(replayTarget_.yMm - current.yMm", MAP_TEXT)
+        self.assertIn("replayIncomingBearing(replayCurrentIndex_, replayTargetIndex_)",
+                      MAP_TEXT)
 
     def test_TEST_ANGLE_130(self):
         self.assertAlmostEqual(direction_change((0, 0), (100, 0),
@@ -625,7 +626,7 @@ class MapHostTests(unittest.TestCase):
         self.assertAlmostEqual(direction_change((0, 0), (100, 0),
                                                 (142.262, -90.631)), 65.0,
                                places=2)
-        self.assertIn("shortestDeltaDeg(targetBearing, current.headingDeg)", MAP_TEXT)
+        self.assertIn("shortestDeltaDeg(incomingBearing, current.headingDeg)", MAP_TEXT)
 
     def test_TEST_ANGLE_WRAP(self):
         delta = (179.0 - (-179.0) + 180.0) % 360.0 - 180.0

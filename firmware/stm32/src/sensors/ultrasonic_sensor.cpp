@@ -89,6 +89,7 @@ void UltrasonicSensor::acceptPulse(uint8_t i,uint32_t pulse,uint32_t now){
     return;
   }
   c.echoValid=true;c.health=SensorHealth::HEALTHY;c.lastValidEchoMs=now;
+  c.displayNoEchoFar=false;
   c.noEchoFar=false;
   c.consecutiveTimeouts=0;c.lastMeasurementMs=now;++c.measurementSequence;c.rawDistanceCm=d;
   // A single large jump is commonly an acoustic cross-reflection from the
@@ -142,6 +143,21 @@ void UltrasonicSensor::acceptTimeout(uint8_t i,uint32_t now,bool noEcho){
   // in filtering and unstable obstacle status.
   c.consecutiveTimeouts=static_cast<uint32_t>(min<uint32_t>(255U,c.consecutiveTimeouts+1U));
   const bool recentValid=hasRecentValidEcho(c,now);
+  // A working HC-SR04 commonly produces a timeout after a nearby target is
+  // removed because there is then no usable reflector in its acoustic cone.
+  // The old code only allowed LCD OK when the *previous* real range was
+  // already far.  Thus a valid 20 cm reading followed by open space decayed
+  // into ---- even though the same sensor immediately measured another
+  // object when one was presented.  Promote repeated clean no-Echo attempts
+  // to an LCD-only far state once this channel has supplied at least one real
+  // Echo.  Do not use this state for health, zone, or motion permission:
+  // safety remains fail-closed until real fresh Echo data returns.
+  if (noEcho && c.lastValidEchoMs != 0U &&
+      c.consecutiveTimeouts >= ULTRASONIC_DISPLAY_NO_ECHO_FAR_TIMEOUTS) {
+    c.displayNoEchoFar=true;
+  } else if (!noEcho) {
+    c.displayNoEchoFar=false;
+  }
   if(recentValid){
     // Keep the last validated obstacle zone during a transient dropout. This
     // removes UNKNOWN/CLEAR oscillation without allowing a near obstacle to
@@ -164,6 +180,7 @@ void UltrasonicSensor::acceptTimeout(uint8_t i,uint32_t now,bool noEcho){
     // the bounded budget in hasBoundedNoEchoFar() is exhausted.
     c.noEchoFar=false;
     c.displayFar=false;
+    if (!noEcho) c.displayNoEchoFar=false;
     c.zone=ObstacleZone::UNKNOWN;
   }
   // A timeout is no measurement, not a synthetic 400 cm sample. Preserve
@@ -181,8 +198,9 @@ void UltrasonicSensor::recomputeObstacleModel(uint32_t now){
     o.valid=c.filterReady;
     o.echoValid=c.echoValid;
     o.displayDistanceValid=(recentValid&&validAge<=ULTRASONIC_DISPLAY_HOLD_MS) ||
-                           boundedNoEchoFar;
-    o.displayFar=o.displayDistanceValid&&(c.displayFar||boundedNoEchoFar);
+                           boundedNoEchoFar || c.displayNoEchoFar;
+    o.displayFar=o.displayDistanceValid &&
+                 (c.displayFar || boundedNoEchoFar || c.displayNoEchoFar);
     o.fresh=c.echoValid&&recentValid&&validAge<=ULTRASONIC_FRESH_MS;
     o.lastUpdateMs=c.lastValidEchoMs;
     o.ageMs=validAge;
@@ -235,7 +253,12 @@ void UltrasonicSensor::update(){
       // both LCD fields expire to ----. The 45 ms inter-sensor guard still
       // separates acoustic bursts; a channel whose own Echo is stuck HIGH is
       // skipped and retried on a later round.
-      if(digitalRead(c.echoPin)==HIGH) continue;
+      if(digitalRead(c.echoPin)==HIGH) {
+        // An idle-high Echo is an electrical fault, not open space.  Do not
+        // allow a previous LCD-only no-Echo OK state to mask it.
+        c.displayNoEchoFar=false;
+        continue;
+      }
 
       // Clear a previous capture before selecting the channel.  TRIG and the
       // start of Echo capture are kept in one call; a delayed second loop

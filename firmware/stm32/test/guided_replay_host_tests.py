@@ -118,7 +118,10 @@ def realign_action(reason, distance_mm, incoming_heading_deg,
         return "ADVANCE" if abs(error) <= config_number(
             "MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"
         ) else "ARRIVAL_COARSE_TURN"
-    error = shortest_delta(target_bearing_deg, current_heading_deg)
+    # Replay and BACK realign remain on the immutable saved edge.  The live
+    # target bearing is deliberately not used because a lateral offset would
+    # otherwise alter the following corner angle.
+    error = shortest_delta(incoming_heading_deg, current_heading_deg)
     if distance_mm <= position_tolerance:
         arrival_error = shortest_delta(incoming_heading_deg, current_heading_deg)
         return "ADVANCE" if abs(arrival_error) <= config_number(
@@ -135,10 +138,10 @@ class GuidedReplayHostTests(unittest.TestCase):
             MAP,
         )
         self.assertIn(
-            "canonicalBackSegment ? canonicalSegmentStart : current", MAP
+            "const Pose guidedSegmentStart = canonicalSegmentStart", MAP
         )
         self.assertIn(
-            "canonicalBackSegment ? incomingBearing : targetBearing", MAP
+            "float desiredBearing = incomingBearing", MAP
         )
         self.assertIn(
             "coarsePreturn = fabsf(desiredHeadingError)", MAP
@@ -156,15 +159,15 @@ class GuidedReplayHostTests(unittest.TestCase):
         )
 
     def test_named_map_profile_constants(self):
-        self.assertEqual(config_number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"), 2.0)
+        self.assertEqual(config_number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"), 0.5)
         self.assertGreaterEqual(config_number("MAP_REPLAY_PRETURN_SETTLE_MS"), 80.0)
         self.assertLessEqual(config_number("MAP_REPLAY_PRETURN_SETTLE_MS"), 120.0)
-        self.assertEqual(config_number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"), 2.0)
-        self.assertEqual(config_number("MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM"), 40.0)
+        self.assertEqual(config_number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"), 0.5)
+        self.assertEqual(config_number("MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM"), 5.0)
         self.assertEqual(config_number(
-            "MAP_GUIDE_BACK_ARRIVAL_POSITION_TOLERANCE_MM"), 10.0)
+            "MAP_GUIDE_BACK_ARRIVAL_POSITION_TOLERANCE_MM"), 5.0)
         self.assertEqual(config_number(
-            "MAP_GUIDE_ARRIVAL_BEARING_BLEND_DISTANCE_MM"), 220.0)
+            "MAP_GUIDE_ARRIVAL_BEARING_BLEND_DISTANCE_MM"), 450.0)
         self.assertEqual(config_number("MAP_GUIDE_REALIGN_THRESHOLD_DEG"), 15.0)
         self.assertEqual(config_number("MAP_GUIDE_SLOW_DISTANCE_MM"), 250.0)
 
@@ -187,11 +190,11 @@ class GuidedReplayHostTests(unittest.TestCase):
                                                    encoding="utf-8"
                                                ))
 
-    def test_preturn_skip_at_two_degrees(self):
-        self.assertEqual(config_number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"), 2.0)
-        self.assertEqual(realign_action("PATH", 100.0, 0.0, 0.0, -1.99), "GUIDED")
-        self.assertEqual(realign_action("PATH", 100.0, 0.0, 0.0, -2.0), "GUIDED")
-        self.assertEqual(realign_action("PATH", 100.0, 0.0, 0.0, -2.01), "PATH_COARSE_TURN")
+    def test_preturn_skip_at_half_degree(self):
+        self.assertEqual(config_number("MAP_REPLAY_PRETURN_TOLERANCE_DEG"), 0.5)
+        self.assertEqual(realign_action("PATH", 100.0, 0.0, 0.0, -0.49), "GUIDED")
+        self.assertEqual(realign_action("PATH", 100.0, 0.0, 0.0, -0.5), "GUIDED")
+        self.assertEqual(realign_action("PATH", 100.0, 0.0, 0.0, -0.51), "PATH_COARSE_TURN")
         self.assertIn("bool coarsePreturn = false", MAP)
         self.assertIn("!startupNoiseTurn", MAP)
         self.assertIn("startReplayGuidedWaypoint", MAP)
@@ -332,18 +335,18 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertIn("slowNumerator", CTRL)
         self.assertIn("slowDenominator", CTRL)
 
-    def test_TEST_DECEL_40_EQUALS_MIN_SPEED(self):
-        self.assertEqual(normal_decel_speed(40.0, 50.0), 15)
-        self.assertEqual(normal_decel_speed(40.0, 20.0), 15)
+    def test_TEST_DECEL_5_EQUALS_MIN_SPEED(self):
+        self.assertEqual(normal_decel_speed(5.0, 50.0), 15)
+        self.assertEqual(normal_decel_speed(5.0, 20.0), 15)
         self.assertIn("MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM", CTRL)
 
     def test_TEST_DECEL_MONOTONIC(self):
         values = [normal_decel_speed(distance, 50.0)
-                  for distance in (250.0, 200.0, 150.0, 100.0, 40.0)]
+                  for distance in (250.0, 200.0, 150.0, 100.0, 5.0)]
         self.assertEqual(values, sorted(values, reverse=True))
 
     def test_TEST_DECEL_SPEED15_CONSTANT(self):
-        for distance in (300.0, 250.0, 155.0, 100.0, 40.0):
+        for distance in (300.0, 250.0, 155.0, 100.0, 5.0):
             self.assertEqual(normal_decel_speed(distance, 15.0), 15)
 
     def test_TEST_SAFETY_STOP_IMMEDIATE_UNCHANGED(self):
@@ -357,8 +360,8 @@ class GuidedReplayHostTests(unittest.TestCase):
 
     def test_position_arrival_and_precise_heading_are_explicit(self):
         self.assertEqual(config_number(
-            "MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM"), 40.0)
-        self.assertEqual(config_number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"), 2.0)
+            "MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM"), 5.0)
+        self.assertEqual(config_number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"), 0.5)
         self.assertIn("remaining <= guidedArrivalPositionToleranceMm_", CTRL)
         self.assertIn("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG", CTRL)
         self.assertIn(
@@ -387,32 +390,32 @@ class GuidedReplayHostTests(unittest.TestCase):
 
     def test_arrival_side_offset_uses_incoming_bearing(self):
         incoming = bearing((0.0, 0.0), (1000.0, 0.0))
-        current_to_target = bearing((1000.0, 40.0), (1000.0, 0.0))
+        current_to_target = bearing((1000.0, 5.0), (1000.0, 0.0))
         arrival_error = shortest_delta(incoming, 20.0)
         self.assertAlmostEqual(incoming, 0.0, places=4)
         self.assertAlmostEqual(current_to_target, -90.0, places=4)
         self.assertAlmostEqual(arrival_error, -20.0, places=4)
-        self.assertEqual(arrival_action(40.0, incoming, 20.0), "ARRIVAL_REALIGN")
+        self.assertEqual(arrival_action(5.0, incoming, 20.0), "ARRIVAL_REALIGN")
         self.assertIn("replayIncomingBearing(replayCurrentIndex_, replayTargetIndex_)", MAP)
         self.assertIn("desiredBearing = incomingBearing", MAP)
         self.assertIn("ReplayRealignReason::ARRIVAL", MAP)
         self.assertIn("AiTurnProfile::MAP_COARSE", MAP)
 
-    def test_arrival_40mm_0_49deg_advances_exactly_once(self):
-        self.assertEqual(arrival_action(40.0, 0.0, 0.49), "ADVANCE")
+    def test_arrival_5mm_0_49deg_advances_exactly_once(self):
+        self.assertEqual(arrival_action(5.0, 0.0, 0.49), "ADVANCE")
         self.assertIn(
-            "fabsf(arrivalHeadingError) <=\n        MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG",
+            "const bool arrivalHeadingWithinTolerance =",
             MAP,
         )
         self.assertIn("advanceReplayAfterTarget();", MAP)
 
-    def test_arrival_40mm_10deg_requires_arrival_realign(self):
-        self.assertEqual(arrival_action(40.0, 0.0, 10.0), "ARRIVAL_REALIGN")
+    def test_arrival_5mm_10deg_requires_arrival_realign(self):
+        self.assertEqual(arrival_action(5.0, 0.0, 10.0), "ARRIVAL_REALIGN")
         self.assertIn("replayRealignReason_ = actionReason", MAP)
         self.assertIn("logGuideRealign(actionReason, replayTargetIndex_", MAP)
 
-    def test_arrival_40mm_20deg_does_not_use_current_target_bearing(self):
-        self.assertEqual(arrival_action(40.0, 0.0, 20.0), "ARRIVAL_REALIGN")
+    def test_arrival_5mm_20deg_does_not_use_current_target_bearing(self):
+        self.assertEqual(arrival_action(5.0, 0.0, 20.0), "ARRIVAL_REALIGN")
         self.assertNotIn(
             "replayRealignReason_ = ReplayRealignReason::PATH;\n      logGuideRealign",
             MAP,
@@ -421,7 +424,7 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertIn("logGuideRealign(replayRealignReason_, to, targetDistance, desiredBearing", MAP)
 
     def test_arrival_turn_complete_advances_once(self):
-        self.assertEqual(realign_action("ARRIVAL", 40.0, 0.0, 0.0, 0.49), "ADVANCE")
+        self.assertEqual(realign_action("ARRIVAL", 5.0, 0.0, 0.0, 0.49), "ADVANCE")
         self.assertIn("logGuideRealignDone(actionReason, replayTargetIndex_", MAP)
         self.assertIn('"ADVANCE"', MAP)
         self.assertIn("replayRealignReason_ = ReplayRealignReason::NONE", MAP)
@@ -433,7 +436,7 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertIn("startReplayGuidedWaypoint", MAP)
         self.assertIn("replayTarget_.xMm, replayTarget_.yMm", MAP)
 
-    def test_path_realign_uses_live_target_bearing(self):
+    def test_path_realign_uses_canonical_route_bearing(self):
         incoming = bearing((0.0, 0.0), (1000.0, 0.0))
         target_bearing = bearing((500.0, 100.0), (1000.0, 0.0))
         self.assertEqual(
@@ -442,17 +445,56 @@ class GuidedReplayHostTests(unittest.TestCase):
             "PATH_COARSE_TURN",
         )
         self.assertIn("replayRealignReason_ = inArrivalZone ? ReplayRealignReason::ARRIVAL", MAP)
-        self.assertIn("shortestDeltaDeg(targetBearing, current.headingDeg)", MAP)
-        self.assertIn("PATH realign uses the live current-pose-to-target bearing", MAP)
+        self.assertIn("shortestDeltaDeg(incomingBearing, current.headingDeg)", MAP)
+        self.assertIn("PATH realign uses the canonical route-edge bearing", MAP)
 
-    def test_arrival_two_degree_boundary_is_exact(self):
-        self.assertEqual(arrival_action(40.0, 0.0, 1.99), "ADVANCE")
-        self.assertEqual(arrival_action(40.0, 0.0, 2.0), "ADVANCE")
-        self.assertEqual(arrival_action(40.0, 0.0, 2.01), "ARRIVAL_REALIGN")
+        # A 100 mm lateral displacement makes a live target bearing differ
+        # by about 11 degrees.  If the chassis is already aligned with the
+        # saved edge, neither normal replay nor BACK may create an artificial
+        # coarse turn from that displaced point-to-target direction.
+        self.assertEqual(
+            realign_action("PATH", math.hypot(500.0, 100.0), incoming,
+                           target_bearing, incoming),
+            "GUIDED",
+        )
+        realign_start = MAP.find(
+            "if (result.code == AiDistanceResultCode::REALIGN_REQUIRED)"
+        )
+        realign_end = MAP.find(
+            "} else if (result.code == AiDistanceResultCode::DONE", realign_start
+        )
+        self.assertIn("const float desiredBearing = incomingBearing;",
+                      MAP[realign_start:realign_end])
+
+    def test_lateral_offset_does_not_change_next_corner_bearing(self):
+        canonical_bearing = bearing((0.0, 0.0), (0.0, 700.0))
+        live_bearing = bearing((60.0, 0.0), (0.0, 700.0))
+        self.assertAlmostEqual(canonical_bearing, 90.0, places=4)
+        self.assertAlmostEqual(live_bearing - 90.0, 4.90, places=2)
+        self.assertIn("const float routeHeadingError", MAP)
+        self.assertIn("const Pose guidedSegmentStart = canonicalSegmentStart", MAP)
+        self.assertIn("float desiredHeadingError = routeHeadingError", MAP)
+
+    def test_arrival_half_degree_boundary_is_exact(self):
+        self.assertEqual(arrival_action(5.0, 0.0, 0.49), "ADVANCE")
+        self.assertEqual(arrival_action(5.0, 0.0, 0.5), "ADVANCE")
+        self.assertEqual(arrival_action(5.0, 0.0, 0.51), "ARRIVAL_REALIGN")
         self.assertIn(
-            "fabsf(arrivalHeadingError) <=\n               MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG",
+            "arrivalHeadingWithinTolerance",
             MAP,
         )
+
+    def test_arrival_noise_is_debounced_without_relaxing_half_degree_gate(self):
+        self.assertEqual(config_number(
+            "MAP_GUIDE_ARRIVAL_HEADING_DEBOUNCE_MS"), 100.0)
+        self.assertIn("replayArrivalHeadingViolationSinceMs_", MAP_HEADER)
+        self.assertIn("arrivalHeadingViolationStable", MAP)
+        self.assertIn("MAP_GUIDE_ARRIVAL_HEADING_DEBOUNCE_MS", MAP)
+        # Completion remains the strict +/-0.5 degree test. The debounce
+        # delays only the creation of a *new* corrective turn for a noisy
+        # sample just outside that gate.
+        self.assertIn("arrivalHeadingWithinTolerance", MAP)
+        self.assertIn("if (!arrivalHeadingViolationStable) return true;", MAP)
 
     def test_arbitrary_incoming_angles_are_not_snapped(self):
         for angle in (60.0, 70.0, 130.0, -65.0, 170.0, -170.0):
