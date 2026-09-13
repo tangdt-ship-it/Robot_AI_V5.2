@@ -1,4 +1,5 @@
 #include <encoders/wheel_odometry.h>
+#include <map/flash_layout.h>
 #include <robot_config.h>
 
 #include <math.h>
@@ -29,7 +30,6 @@ bool configureEncoder(TIM_HandleTypeDef& timer, TIM_TypeDef* instance) {
 }
 constexpr float kDegToRad = 0.017453292519943295f;
 constexpr float kPi = 3.14159265358979323846f;
-constexpr uint32_t kCalibrationFlashAddress = 0x0807F800UL;
 constexpr uint32_t kCalibrationMagic = 0x5743414CUL;  // "WCAL"
 constexpr uint16_t kCalibrationVersion = 1U;
 
@@ -204,7 +204,7 @@ bool WheelOdometry::calibrationValuesValid(float leftMmPerTick,
 
 bool WheelOdometry::loadCalibration() {
   const auto* record = reinterpret_cast<const CalibrationFlashRecord*>(
-      kCalibrationFlashAddress);
+      Stm32FlashLayout::kCalibrationPage);
   if (record->magic != kCalibrationMagic ||
       record->version != kCalibrationVersion ||
       record->size != sizeof(CalibrationFlashRecord) ||
@@ -243,7 +243,7 @@ bool WheelOdometry::saveCalibration() const {
   HAL_FLASH_Unlock();
   FLASH_EraseInitTypeDef erase = {};
   erase.TypeErase = FLASH_TYPEERASE_PAGES;
-  erase.PageAddress = kCalibrationFlashAddress;
+  erase.PageAddress = Stm32FlashLayout::kCalibrationPage;
   erase.NbPages = 1U;
   uint32_t pageError = 0U;
   bool ok = HAL_FLASHEx_Erase(&erase, &pageError) == HAL_OK;
@@ -251,7 +251,8 @@ bool WheelOdometry::saveCalibration() const {
   if (ok) {
     for (size_t i = 0; i < sizeof(record) / sizeof(uint16_t); ++i) {
       if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD,
-                            kCalibrationFlashAddress + i * sizeof(uint16_t),
+                            Stm32FlashLayout::kCalibrationPage +
+                                i * sizeof(uint16_t),
                             halfwords[i]) != HAL_OK) {
         ok = false;
         break;

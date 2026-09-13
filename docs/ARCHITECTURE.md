@@ -8,7 +8,14 @@
 
 STM32 luôn là motor authority cuối cùng. ESP32 chỉ yêu cầu chuyển động cấp cao.
 
-## 1.1 Two-stage cascade control
+## 1.1 STM32 Flash contract
+
+The physical STM32 target reports 256 KiB Flash through the F_SIZE register
+(0x0100). Firmware reserves the final 12 KiB, from 0x0803D000 through
+0x08040000, for MAP and wheel calibration storage. The application linker
+region ends before 0x0803D000.
+
+## 1.2 Two-stage cascade control
 
 **Inner loop — external hardware**
 

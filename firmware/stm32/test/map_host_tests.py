@@ -33,6 +33,7 @@ def _constant(text, name):
 
 
 FLASH_TEXT = _read(INCLUDE_ROOT / "map" / "flash_layout.h")
+PLATFORMIO_TEXT = _read(STM32_ROOT / "platformio.ini")
 TYPES_TEXT = _read(INCLUDE_ROOT / "map" / "map_types.h")
 CONFIG_TEXT = _read(INCLUDE_ROOT / "robot_config.h")
 MAP_TEXT = _read(SRC_ROOT / "map" / "map_controller.cpp")
@@ -711,6 +712,17 @@ class MapHostTests(unittest.TestCase):
         )
 
     def test_flash_ab_storage_and_calibration_are_disjoint(self):
+        self.assertEqual(_constant(FLASH_TEXT, "kFlashOrigin"), 0x08000000)
+        self.assertEqual(_constant(FLASH_TEXT, "kFlashLength"), 0x00040000)
+        self.assertEqual(FLASH_END, 0x08040000)
+        self.assertEqual(FLASH_PAGE, 0x800)
+        self.assertEqual(
+            MAP_ADDRESSES,
+            [0x0803D000, 0x0803D800, 0x0803E000, 0x0803E800],
+        )
+        self.assertEqual(CALIBRATION_PAGE, 0x0803F800)
+        self.assertEqual(CALIBRATION_PAGE + FLASH_PAGE, FLASH_END)
+        self.assertIn("board_upload.maximum_size = 249856", PLATFORMIO_TEXT)
         self.assertEqual(len(set(MAP_ADDRESSES)), 4)
         self.assertTrue(all(address % FLASH_PAGE == 0 for address in MAP_ADDRESSES))
         self.assertEqual(CALIBRATION_PAGE % FLASH_PAGE, 0)
@@ -718,6 +730,16 @@ class MapHostTests(unittest.TestCase):
             all(address + FLASH_PAGE <= CALIBRATION_PAGE for address in MAP_ADDRESSES)
         )
         self.assertLessEqual(CALIBRATION_PAGE + FLASH_PAGE, FLASH_END)
+
+    def test_flash_limit_checker_and_calibration_address_are_centralized(self):
+        checker = _read(STM32_ROOT / "tools" / "check_map_flash_layout.py")
+        self.assertIn("RESERVED_START = 0x0803D000", checker)
+        self.assertIn("RESERVED_END = 0x08040000", checker)
+        self.assertIn("PHYSICAL_END = 0x08040000", checker)
+        self.assertIn("PHYSICAL_END=0x%08X", checker)
+        odometry = _read(SRC_ROOT / "encoders" / "wheel_odometry.cpp")
+        self.assertIn("Stm32FlashLayout::kCalibrationPage", odometry)
+        self.assertNotIn("kCalibrationFlashAddress", odometry)
 
     def test_crc_valid_invalid(self):
         header = [

@@ -9,8 +9,11 @@ from pathlib import Path
 
 Import("env")
 
-RESERVED_START = 0x0807D000
-RESERVED_END = 0x08080000
+FLASH_ORIGIN = 0x08000000
+RESERVED_START = 0x0803D000
+RESERVED_END = 0x08040000
+PHYSICAL_END = 0x08040000
+FLASH_ADDRESS_SPACE_END = 0x09000000
 
 
 def _check_map_flash_layout(source, target, env):
@@ -68,6 +71,7 @@ def _check_map_flash_layout(source, target, env):
         raise RuntimeError("MAP flash layout check: no ELF sections found")
 
     conflicts = []
+    physical_conflicts = []
     flash_ends = []
     for name, size, vma, lma in sections:
         for label, address in (("VMA", vma), ("LMA", lma)):
@@ -75,8 +79,19 @@ def _check_map_flash_layout(source, target, env):
                 conflicts.append(
                     f"{name} {label}=0x{address:08X} size=0x{size:X}"
                 )
-        if RESERVED_START > lma >= 0x08000000:
-            flash_ends.append(lma + size)
+        if FLASH_ORIGIN <= lma < FLASH_ADDRESS_SPACE_END:
+            if lma + size > PHYSICAL_END:
+                physical_conflicts.append(
+                    f"{name} LMA=0x{lma:08X} size=0x{size:X}"
+                )
+            elif lma < RESERVED_START:
+                flash_ends.append(lma + size)
+
+    if physical_conflicts:
+        raise RuntimeError(
+            "MAP flash layout check: loadable section exceeds physical Flash "
+            f"end 0x{PHYSICAL_END:08X}: " + ", ".join(physical_conflicts)
+        )
 
     if conflicts:
         raise RuntimeError(
@@ -87,7 +102,8 @@ def _check_map_flash_layout(source, target, env):
     app_end = max(flash_ends) if flash_ends else 0x08000000
     print(
         "MAP_FLASH_LAYOUT,APP_END=0x%08X,RESERVED=0x%08X-0x%08X,"
-        "STATUS=PASS" % (app_end, RESERVED_START, RESERVED_END)
+        "PHYSICAL_END=0x%08X,STATUS=PASS"
+        % (app_end, RESERVED_START, RESERVED_END, PHYSICAL_END)
     )
 
 
