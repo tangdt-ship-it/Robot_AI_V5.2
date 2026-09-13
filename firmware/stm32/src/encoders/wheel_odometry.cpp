@@ -31,12 +31,14 @@ bool configureEncoder(TIM_HandleTypeDef& timer, TIM_TypeDef* instance) {
 constexpr float kDegToRad = 0.017453292519943295f;
 constexpr float kPi = 3.14159265358979323846f;
 constexpr uint32_t kCalibrationMagic = 0x5743414CUL;  // "WCAL"
-constexpr uint16_t kCalibrationVersion = 1U;
+constexpr uint16_t kCalibrationVersion = 2U;
+constexpr uint16_t kCalibrationMaxSamples = 8U;
 
 struct CalibrationFlashRecord {
   uint32_t magic = 0;
   uint16_t version = 0;
   uint16_t size = 0;
+  uint32_t generation = 0;
   float leftMmPerTick = 0.0f;
   float rightMmPerTick = 0.0f;
   float trackMm = 0.0f;
@@ -45,8 +47,32 @@ struct CalibrationFlashRecord {
   uint32_t crc = 0;
 };
 
+static_assert(sizeof(CalibrationFlashRecord) == 32U,
+              "calibration record format must remain stable");
 static_assert(sizeof(CalibrationFlashRecord) <= 2048U,
               "calibration record must fit in one STM32F1 flash page");
+
+bool calibrationValuesValidRaw(float leftMmPerTick, float rightMmPerTick,
+                               float trackMm) {
+  return isfinite(leftMmPerTick) && isfinite(rightMmPerTick) &&
+         isfinite(trackMm) && leftMmPerTick >= 0.02f &&
+         leftMmPerTick <= 0.20f && rightMmPerTick >= 0.02f &&
+         rightMmPerTick <= 0.20f && trackMm >= 100.0f &&
+         trackMm <= 500.0f;
+}
+
+bool calibrationRecordStructureValid(const CalibrationFlashRecord& record) {
+  return record.magic == kCalibrationMagic &&
+         record.version == kCalibrationVersion &&
+         record.size == sizeof(CalibrationFlashRecord) &&
+         record.straightSamples <= kCalibrationMaxSamples &&
+         record.turnSamples <= kCalibrationMaxSamples;
+}
+
+bool generationNewer(uint32_t candidate, uint32_t current) {
+  return candidate != current &&
+         static_cast<uint32_t>(candidate - current) < 0x80000000UL;
+}
 
 uint32_t CalibrationCrc(const CalibrationFlashRecord& record) {
   const auto* bytes = reinterpret_cast<const uint8_t*>(&record);
@@ -195,64 +221,95 @@ void WheelOdometry::integratePose(float headingDeg, bool externalHeadingValid) {
 bool WheelOdometry::calibrationValuesValid(float leftMmPerTick,
                                            float rightMmPerTick,
                                            float trackMm) const {
-  return isfinite(leftMmPerTick) && isfinite(rightMmPerTick) &&
-         isfinite(trackMm) && leftMmPerTick >= 0.02f &&
-         leftMmPerTick <= 0.20f && rightMmPerTick >= 0.02f &&
-         rightMmPerTick <= 0.20f && trackMm >= 100.0f &&
-         trackMm <= 500.0f;
+  return calibrationValuesValidRaw(leftMmPerTick, rightMmPerTick, trackMm);
 }
 
 bool WheelOdometry::loadCalibration() {
-  const auto* record = reinterpret_cast<const CalibrationFlashRecord*>(
-      Stm32FlashLayout::kCalibrationPage);
-  if (record->magic != kCalibrationMagic ||
-      record->version != kCalibrationVersion ||
-      record->size != sizeof(CalibrationFlashRecord) ||
-      record->crc != CalibrationCrc(*record) ||
-      !calibrationValuesValid(record->leftMmPerTick,
-                              record->rightMmPerTick, record->trackMm)) {
+  CalibrationFlashRecord recordA = {};
+  CalibrationFlashRecord recordB = {};
+  memcpy(&recordA, reinterpret_cast<const void*>(Stm32FlashLayout::kCalibrationA),
+         sizeof(recordA));
+  memcpy(&recordB, reinterpret_cast<const void*>(Stm32FlashLayout::kCalibrationB),
+         sizeof(recordB));
+  const bool validA = calibrationRecordStructureValid(recordA) &&
+                      recordA.crc == CalibrationCrc(recordA) &&
+                      calibrationValuesValid(recordA.leftMmPerTick,
+                                              recordA.rightMmPerTick,
+                                              recordA.trackMm);
+  const bool validB = calibrationRecordStructureValid(recordB) &&
+                      recordB.crc == CalibrationCrc(recordB) &&
+                      calibrationValuesValid(recordB.leftMmPerTick,
+                                              recordB.rightMmPerTick,
+                                              recordB.trackMm);
+  if (!validA && !validB) {
+    leftMmPerTick_ = ENCODER_LEFT_MM_PER_TICK;
+    rightMmPerTick_ = ENCODER_RIGHT_MM_PER_TICK;
+    trackMm_ = WHEEL_TRACK_MM;
+    calibrationCandidateLeftMmPerTick_ = leftMmPerTick_;
+    calibrationCandidateRightMmPerTick_ = rightMmPerTick_;
+    calibrationCandidateTrackMm_ = trackMm_;
+    calibrationStraightSamples_ = 0;
+    calibrationTurnSamples_ = 0;
+    committedStraightSamples_ = 0;
+    committedTurnSamples_ = 0;
+    calibrationSource_ = WheelCalibrationSource::NOMINAL;
+    calibrationGeneration_ = 0;
     calibrationPersisted_ = false;
     return false;
   }
-  leftMmPerTick_ = record->leftMmPerTick;
-  rightMmPerTick_ = record->rightMmPerTick;
-  trackMm_ = record->trackMm;
+  const CalibrationFlashRecord* selected = nullptr;
+  if (validA && validB) {
+    selected = generationNewer(recordB.generation, recordA.generation)
+                   ? &recordB
+                   : &recordA;
+  } else {
+    selected = validA ? &recordA : &recordB;
+  }
+  leftMmPerTick_ = selected->leftMmPerTick;
+  rightMmPerTick_ = selected->rightMmPerTick;
+  trackMm_ = selected->trackMm;
   calibrationCandidateLeftMmPerTick_ = leftMmPerTick_;
   calibrationCandidateRightMmPerTick_ = rightMmPerTick_;
   calibrationCandidateTrackMm_ = trackMm_;
-  calibrationStraightSamples_ = record->straightSamples;
-  calibrationTurnSamples_ = record->turnSamples;
-  committedStraightSamples_ = calibrationStraightSamples_;
-  committedTurnSamples_ = calibrationTurnSamples_;
+  calibrationStraightSamples_ = 0;
+  calibrationTurnSamples_ = 0;
+  committedStraightSamples_ = selected->straightSamples;
+  committedTurnSamples_ = selected->turnSamples;
+  calibrationSource_ = selected == &recordA ? WheelCalibrationSource::WCAL_A
+                                             : WheelCalibrationSource::WCAL_B;
+  calibrationGeneration_ = selected->generation;
   calibrationPersisted_ = true;
   return true;
 }
 
-bool WheelOdometry::saveCalibration() const {
-  CalibrationFlashRecord record;
+bool WheelOdometry::saveCalibration(uint32_t targetAddress,
+                                    uint32_t generation,
+                                    uint16_t committedStraightSamples,
+                                    uint16_t committedTurnSamples) const {
+  CalibrationFlashRecord record = {};
   record.magic = kCalibrationMagic;
   record.version = kCalibrationVersion;
   record.size = sizeof(CalibrationFlashRecord);
+  record.generation = generation;
   record.leftMmPerTick = calibrationCandidateLeftMmPerTick_;
   record.rightMmPerTick = calibrationCandidateRightMmPerTick_;
   record.trackMm = calibrationCandidateTrackMm_;
-  record.straightSamples = calibrationStraightSamples_;
-  record.turnSamples = calibrationTurnSamples_;
+  record.straightSamples = committedStraightSamples;
+  record.turnSamples = committedTurnSamples;
   record.crc = CalibrationCrc(record);
 
-  HAL_FLASH_Unlock();
+  bool ok = HAL_FLASH_Unlock() == HAL_OK;
   FLASH_EraseInitTypeDef erase = {};
   erase.TypeErase = FLASH_TYPEERASE_PAGES;
-  erase.PageAddress = Stm32FlashLayout::kCalibrationPage;
+  erase.PageAddress = targetAddress;
   erase.NbPages = 1U;
   uint32_t pageError = 0U;
-  bool ok = HAL_FLASHEx_Erase(&erase, &pageError) == HAL_OK;
+  if (ok) ok = HAL_FLASHEx_Erase(&erase, &pageError) == HAL_OK;
   const auto* halfwords = reinterpret_cast<const uint16_t*>(&record);
   if (ok) {
     for (size_t i = 0; i < sizeof(record) / sizeof(uint16_t); ++i) {
       if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD,
-                            Stm32FlashLayout::kCalibrationPage +
-                                i * sizeof(uint16_t),
+                            targetAddress + i * sizeof(uint16_t),
                             halfwords[i]) != HAL_OK) {
         ok = false;
         break;
@@ -260,7 +317,22 @@ bool WheelOdometry::saveCalibration() const {
     }
   }
   HAL_FLASH_Lock();
-  return ok;
+  if (!ok) return false;
+
+  CalibrationFlashRecord readback = {};
+  memcpy(&readback, reinterpret_cast<const void*>(targetAddress),
+         sizeof(readback));
+  return calibrationRecordStructureValid(readback) &&
+         readback.crc == CalibrationCrc(readback) &&
+         readback.generation == generation &&
+         calibrationValuesValid(readback.leftMmPerTick,
+                                readback.rightMmPerTick,
+                                readback.trackMm) &&
+         readback.leftMmPerTick == record.leftMmPerTick &&
+         readback.rightMmPerTick == record.rightMmPerTick &&
+         readback.trackMm == record.trackMm &&
+         readback.straightSamples == committedStraightSamples &&
+         readback.turnSamples == committedTurnSamples;
 }
 
 bool WheelOdometry::startCalibrationStraight() {
@@ -309,17 +381,22 @@ bool WheelOdometry::finishCalibrationStraight(float referenceMm) {
     calibrationLastError_ = "RANGE";
     return false;
   }
-  if (calibrationStraightSamples_ >= 8U) {
+  if (calibrationStraightSamples_ >= kCalibrationMaxSamples) {
     calibrationLastError_ = "LIMIT";
     return false;
   }
   const float sampleCount = static_cast<float>(calibrationStraightSamples_);
-  calibrationCandidateLeftMmPerTick_ =
-      (calibrationCandidateLeftMmPerTick_ * sampleCount + leftCandidate) /
-      (sampleCount + 1.0f);
-  calibrationCandidateRightMmPerTick_ =
-      (calibrationCandidateRightMmPerTick_ * sampleCount + rightCandidate) /
-      (sampleCount + 1.0f);
+  if (calibrationStraightSamples_ == 0U) {
+    calibrationCandidateLeftMmPerTick_ = leftCandidate;
+    calibrationCandidateRightMmPerTick_ = rightCandidate;
+  } else {
+    calibrationCandidateLeftMmPerTick_ =
+        (calibrationCandidateLeftMmPerTick_ * sampleCount + leftCandidate) /
+        (sampleCount + 1.0f);
+    calibrationCandidateRightMmPerTick_ =
+        (calibrationCandidateRightMmPerTick_ * sampleCount + rightCandidate) /
+        (sampleCount + 1.0f);
+  }
   ++calibrationStraightSamples_;
   calibrationPhase_ = WheelCalibrationPhase::NONE;
   calibrationLastError_ = "NONE";
@@ -375,14 +452,18 @@ bool WheelOdometry::finishCalibrationTurn(float referenceDeg) {
     calibrationLastError_ = "RANGE";
     return false;
   }
-  if (calibrationTurnSamples_ >= 8U) {
+  if (calibrationTurnSamples_ >= kCalibrationMaxSamples) {
     calibrationLastError_ = "LIMIT";
     return false;
   }
   const float sampleCount = static_cast<float>(calibrationTurnSamples_);
-  calibrationCandidateTrackMm_ =
-      (calibrationCandidateTrackMm_ * sampleCount + candidateTrack) /
-      (sampleCount + 1.0f);
+  if (calibrationTurnSamples_ == 0U) {
+    calibrationCandidateTrackMm_ = candidateTrack;
+  } else {
+    calibrationCandidateTrackMm_ =
+        (calibrationCandidateTrackMm_ * sampleCount + candidateTrack) /
+        (sampleCount + 1.0f);
+  }
   ++calibrationTurnSamples_;
   calibrationPhase_ = WheelCalibrationPhase::NONE;
   calibrationLastError_ = "NONE";
@@ -398,13 +479,50 @@ bool WheelOdometry::commitCalibration() {
     calibrationLastError_ = calibrationPhase_ != WheelCalibrationPhase::NONE
                                 ? "ACTIVE"
                                 : (calibrationStraightSamples_ == 0U
-                                       ? "NO_STRAIGHT"
+                                       ? "NO_STRAIGHT_THIS_SESSION"
                                        : calibrationTurnSamples_ == 0U
-                                             ? "NO_TURN"
+                                             ? "NO_TURN_THIS_SESSION"
                                              : "RANGE");
     return false;
   }
-  if (!saveCalibration()) {
+
+  CalibrationFlashRecord recordA = {};
+  CalibrationFlashRecord recordB = {};
+  memcpy(&recordA, reinterpret_cast<const void*>(Stm32FlashLayout::kCalibrationA),
+         sizeof(recordA));
+  memcpy(&recordB, reinterpret_cast<const void*>(Stm32FlashLayout::kCalibrationB),
+         sizeof(recordB));
+  const bool validA = calibrationRecordStructureValid(recordA) &&
+                      recordA.crc == CalibrationCrc(recordA) &&
+                      calibrationValuesValid(recordA.leftMmPerTick,
+                                              recordA.rightMmPerTick,
+                                              recordA.trackMm);
+  const bool validB = calibrationRecordStructureValid(recordB) &&
+                      recordB.crc == CalibrationCrc(recordB) &&
+                      calibrationValuesValid(recordB.leftMmPerTick,
+                                              recordB.rightMmPerTick,
+                                              recordB.trackMm);
+  const bool activeA = validA &&
+                       (!validB ||
+                        !generationNewer(recordB.generation, recordA.generation));
+  const bool hasActive = validA || validB;
+  const uint32_t previousGeneration =
+      hasActive ? (activeA ? recordA.generation : recordB.generation) : 0U;
+  const uint32_t nextGeneration = previousGeneration + 1U;
+  const uint32_t targetAddress =
+      hasActive ? (activeA ? Stm32FlashLayout::kCalibrationB
+                           : Stm32FlashLayout::kCalibrationA)
+                : Stm32FlashLayout::kCalibrationA;
+  const uint16_t nextCommittedStraight = static_cast<uint16_t>(
+      min<uint32_t>(kCalibrationMaxSamples,
+                    static_cast<uint32_t>(committedStraightSamples_) +
+                        calibrationStraightSamples_));
+  const uint16_t nextCommittedTurn = static_cast<uint16_t>(
+      min<uint32_t>(kCalibrationMaxSamples,
+                    static_cast<uint32_t>(committedTurnSamples_) +
+                        calibrationTurnSamples_));
+  if (!saveCalibration(targetAddress, nextGeneration,
+                       nextCommittedStraight, nextCommittedTurn)) {
     calibrationLastError_ = "FLASH";
     return false;
   }
@@ -412,8 +530,17 @@ bool WheelOdometry::commitCalibration() {
   rightMmPerTick_ = calibrationCandidateRightMmPerTick_;
   trackMm_ = calibrationCandidateTrackMm_;
   calibrationPersisted_ = true;
-  committedStraightSamples_ = calibrationStraightSamples_;
-  committedTurnSamples_ = calibrationTurnSamples_;
+  committedStraightSamples_ = nextCommittedStraight;
+  committedTurnSamples_ = nextCommittedTurn;
+  calibrationStraightSamples_ = 0;
+  calibrationTurnSamples_ = 0;
+  calibrationCandidateLeftMmPerTick_ = leftMmPerTick_;
+  calibrationCandidateRightMmPerTick_ = rightMmPerTick_;
+  calibrationCandidateTrackMm_ = trackMm_;
+  calibrationSource_ = targetAddress == Stm32FlashLayout::kCalibrationA
+                           ? WheelCalibrationSource::WCAL_A
+                           : WheelCalibrationSource::WCAL_B;
+  calibrationGeneration_ = nextGeneration;
   calibrationLastError_ = "NONE";
   return true;
 }
@@ -423,8 +550,8 @@ void WheelOdometry::abortCalibration() {
   calibrationCandidateLeftMmPerTick_ = leftMmPerTick_;
   calibrationCandidateRightMmPerTick_ = rightMmPerTick_;
   calibrationCandidateTrackMm_ = trackMm_;
-  calibrationStraightSamples_ = committedStraightSamples_;
-  calibrationTurnSamples_ = committedTurnSamples_;
+  calibrationStraightSamples_ = 0;
+  calibrationTurnSamples_ = 0;
   calibrationLastError_ = "NONE";
 }
 
@@ -438,11 +565,18 @@ WheelCalibrationStatus WheelOdometry::calibrationStatus() const {
   status.valid = calibrationValuesValid(leftMmPerTick_, rightMmPerTick_,
                                         trackMm_);
   status.persisted = calibrationPersisted_;
+  status.source = calibrationSource_;
+  status.generation = calibrationGeneration_;
+  status.activeLeftMmPerTick = leftMmPerTick_;
+  status.activeRightMmPerTick = rightMmPerTick_;
+  status.activeTrackMm = trackMm_;
   status.leftMmPerTick = calibrationCandidateLeftMmPerTick_;
   status.rightMmPerTick = calibrationCandidateRightMmPerTick_;
   status.trackMm = calibrationCandidateTrackMm_;
   status.straightSamples = calibrationStraightSamples_;
   status.turnSamples = calibrationTurnSamples_;
+  status.committedStraightSamples = committedStraightSamples_;
+  status.committedTurnSamples = committedTurnSamples_;
   return status;
 }
 

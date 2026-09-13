@@ -11,16 +11,15 @@ constexpr uint32_t kFlashLength = 0x00040000UL;
 constexpr uint32_t kFlashPageSize = 0x00000800UL;
 constexpr uint32_t kFlashEnd = kFlashOrigin + kFlashLength;
 
-// Existing wheel calibration record. Do not move without a migration plan.
-constexpr uint32_t kCalibrationPage = 0x0803F800UL;
+// Wheel calibration uses the two final pages as an A/B record store.
+constexpr uint32_t kCalibrationA = 0x0803F000UL;
+constexpr uint32_t kCalibrationB = 0x0803F800UL;
 
 // Four inactive/active pages provide A/B storage for MAP 1 and MAP 2.
 constexpr uint32_t kMap1A = 0x0803D000UL;
 constexpr uint32_t kMap1B = 0x0803D800UL;
 constexpr uint32_t kMap2A = 0x0803E000UL;
 constexpr uint32_t kMap2B = 0x0803E800UL;
-
-constexpr uint32_t kReservedGapPage = 0x0803F000UL;
 
 constexpr bool IsPageAligned(uint32_t address) {
   return (address % kFlashPageSize) == 0U;
@@ -33,27 +32,30 @@ constexpr bool InFlash(uint32_t address, uint32_t length) {
 
 static_assert(IsPageAligned(kMap1A) && IsPageAligned(kMap1B) &&
                   IsPageAligned(kMap2A) && IsPageAligned(kMap2B) &&
-                  IsPageAligned(kReservedGapPage) &&
-                  IsPageAligned(kCalibrationPage),
+                  IsPageAligned(kCalibrationA) &&
+                  IsPageAligned(kCalibrationB),
               "MAP/calibration storage must start on Flash page boundaries");
 static_assert(InFlash(kMap1A, kFlashPageSize) &&
                   InFlash(kMap1B, kFlashPageSize) &&
                   InFlash(kMap2A, kFlashPageSize) &&
                   InFlash(kMap2B, kFlashPageSize) &&
-                  InFlash(kReservedGapPage, kFlashPageSize) &&
-                  InFlash(kCalibrationPage, kFlashPageSize),
+                  InFlash(kCalibrationA, kFlashPageSize) &&
+                  InFlash(kCalibrationB, kFlashPageSize),
               "MAP/calibration storage must remain inside STM32 Flash");
 static_assert(kFlashEnd == 0x08040000UL,
               "STM32 physical Flash end must remain 0x08040000");
 static_assert(kMap1A == 0x0803D000UL,
               "MAP storage must start at the verified 256 KiB tail");
-static_assert(kCalibrationPage + kFlashPageSize == kFlashEnd,
-              "calibration page must remain the final physical Flash page");
+static_assert(kCalibrationA == 0x0803F000UL &&
+                  kCalibrationB == 0x0803F800UL,
+              "calibration A/B pages must remain at the verified Flash tail");
+static_assert(kCalibrationB + kFlashPageSize == kFlashEnd,
+              "calibration B must remain the final physical Flash page");
 static_assert(kMap1A + kFlashPageSize <= kMap1B &&
                   kMap1B + kFlashPageSize <= kMap2A &&
                   kMap2A + kFlashPageSize <= kMap2B &&
-                  kMap2B + kFlashPageSize <= kReservedGapPage &&
-                  kReservedGapPage + kFlashPageSize <= kCalibrationPage,
+                  kMap2B + kFlashPageSize <= kCalibrationA &&
+                  kCalibrationA + kFlashPageSize <= kCalibrationB,
               "MAP A/B pages must not overlap one another or calibration");
 }
 

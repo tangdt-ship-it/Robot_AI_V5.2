@@ -434,6 +434,35 @@ void loop() {
     }
     const WheelCalibrationStatus calibration =
         wheelOdometry.calibrationStatus();
+    const char* calibrationSource =
+        calibration.source == WheelCalibrationSource::WCAL_A
+            ? "A"
+            : calibration.source == WheelCalibrationSource::WCAL_B ? "B"
+                                                                    : "NOMINAL";
+    robotDebug.print("CALIBRATION,STATUS,SOURCE=");
+    robotDebug.print(calibrationSource);
+    robotDebug.print(",GEN=");
+    robotDebug.print(calibration.generation);
+    robotDebug.print(",SESSION_S=");
+    robotDebug.print(calibration.straightSamples);
+    robotDebug.print(",SESSION_T=");
+    robotDebug.print(calibration.turnSamples);
+    robotDebug.print(",COMMITTED_S=");
+    robotDebug.print(calibration.committedStraightSamples);
+    robotDebug.print(",COMMITTED_T=");
+    robotDebug.print(calibration.committedTurnSamples);
+    robotDebug.print(",ACTIVE_L=");
+    robotDebug.print(calibration.activeLeftMmPerTick, 6);
+    robotDebug.print(",ACTIVE_R=");
+    robotDebug.print(calibration.activeRightMmPerTick, 6);
+    robotDebug.print(",ACTIVE_TRACK=");
+    robotDebug.print(calibration.activeTrackMm, 3);
+    robotDebug.print(",CAND_L=");
+    robotDebug.print(calibration.leftMmPerTick, 6);
+    robotDebug.print(",CAND_R=");
+    robotDebug.print(calibration.rightMmPerTick, 6);
+    robotDebug.print(",CAND_TRACK=");
+    robotDebug.println(calibration.trackMm, 3);
     RobotLinkCalibrationStatus status;
     status.phase = static_cast<uint8_t>(calibration.phase);
     status.valid = calibration.valid;

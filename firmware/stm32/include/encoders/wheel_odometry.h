@@ -27,15 +27,29 @@ enum class WheelCalibrationPhase : uint8_t {
   TURN = 2,
 };
 
+enum class WheelCalibrationSource : uint8_t {
+  NOMINAL = 0,
+  WCAL_A = 1,
+  WCAL_B = 2,
+};
+
 struct WheelCalibrationStatus {
   WheelCalibrationPhase phase = WheelCalibrationPhase::NONE;
   bool valid = false;
   bool persisted = false;
+  WheelCalibrationSource source = WheelCalibrationSource::NOMINAL;
+  uint32_t generation = 0;
+  float activeLeftMmPerTick = 0.0f;
+  float activeRightMmPerTick = 0.0f;
+  float activeTrackMm = 0.0f;
   float leftMmPerTick = 0.0f;
   float rightMmPerTick = 0.0f;
   float trackMm = 0.0f;
+  // These counters belong to the current calibration session only.
   uint16_t straightSamples = 0;
   uint16_t turnSamples = 0;
+  uint16_t committedStraightSamples = 0;
+  uint16_t committedTurnSamples = 0;
 };
 
 struct WheelOdometryData {
@@ -106,7 +120,9 @@ class WheelOdometry {
                          int32_t rightDelta, int16_t leftCommand,
                          int16_t rightCommand);
   bool loadCalibration();
-  bool saveCalibration() const;
+  bool saveCalibration(uint32_t targetAddress, uint32_t generation,
+                       uint16_t committedStraightSamples,
+                       uint16_t committedTurnSamples) const;
   bool calibrationValuesValid(float leftMmPerTick, float rightMmPerTick,
                               float trackMm) const;
 
@@ -139,6 +155,8 @@ class WheelOdometry {
   uint16_t calibrationTurnSamples_ = 0;
   uint16_t committedStraightSamples_ = 0;
   uint16_t committedTurnSamples_ = 0;
+  WheelCalibrationSource calibrationSource_ = WheelCalibrationSource::NOMINAL;
+  uint32_t calibrationGeneration_ = 0;
   const char* calibrationLastError_ = "NONE";
   int64_t calibrationLastLeftDelta_ = 0;
   int64_t calibrationLastRightDelta_ = 0;

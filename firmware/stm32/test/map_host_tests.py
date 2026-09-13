@@ -64,7 +64,9 @@ MAP_ADDRESSES = [
     _constant(FLASH_TEXT, name)
     for name in ("kMap1A", "kMap1B", "kMap2A", "kMap2B")
 ]
-CALIBRATION_PAGE = _constant(FLASH_TEXT, "kCalibrationPage")
+CALIBRATION_ADDRESSES = [
+    _constant(FLASH_TEXT, name) for name in ("kCalibrationA", "kCalibrationB")
+]
 
 HEADER = struct.Struct("<I H B B B B H H I I I I 2x")
 WAYPOINT = struct.Struct("<i i h B B")
@@ -720,16 +722,23 @@ class MapHostTests(unittest.TestCase):
             MAP_ADDRESSES,
             [0x0803D000, 0x0803D800, 0x0803E000, 0x0803E800],
         )
-        self.assertEqual(CALIBRATION_PAGE, 0x0803F800)
-        self.assertEqual(CALIBRATION_PAGE + FLASH_PAGE, FLASH_END)
+        self.assertEqual(CALIBRATION_ADDRESSES,
+                         [0x0803F000, 0x0803F800])
+        self.assertTrue(
+            all(address % FLASH_PAGE == 0 for address in CALIBRATION_ADDRESSES)
+        )
+        self.assertEqual(CALIBRATION_ADDRESSES[-1] + FLASH_PAGE, FLASH_END)
         self.assertIn("board_upload.maximum_size = 249856", PLATFORMIO_TEXT)
         self.assertEqual(len(set(MAP_ADDRESSES)), 4)
         self.assertTrue(all(address % FLASH_PAGE == 0 for address in MAP_ADDRESSES))
-        self.assertEqual(CALIBRATION_PAGE % FLASH_PAGE, 0)
         self.assertTrue(
-            all(address + FLASH_PAGE <= CALIBRATION_PAGE for address in MAP_ADDRESSES)
+            all(
+                map_address + FLASH_PAGE <= CALIBRATION_ADDRESSES[0]
+                for map_address in MAP_ADDRESSES
+            )
         )
-        self.assertLessEqual(CALIBRATION_PAGE + FLASH_PAGE, FLASH_END)
+        self.assertLessEqual(CALIBRATION_ADDRESSES[0] + FLASH_PAGE,
+                             CALIBRATION_ADDRESSES[1])
 
     def test_flash_limit_checker_and_calibration_address_are_centralized(self):
         checker = _read(STM32_ROOT / "tools" / "check_map_flash_layout.py")
@@ -738,7 +747,10 @@ class MapHostTests(unittest.TestCase):
         self.assertIn("PHYSICAL_END = 0x08040000", checker)
         self.assertIn("PHYSICAL_END=0x%08X", checker)
         odometry = _read(SRC_ROOT / "encoders" / "wheel_odometry.cpp")
-        self.assertIn("Stm32FlashLayout::kCalibrationPage", odometry)
+        self.assertIn("Stm32FlashLayout::kCalibrationA", odometry)
+        self.assertIn("Stm32FlashLayout::kCalibrationB", odometry)
+        self.assertNotIn("kCalibrationPage", odometry)
+        self.assertNotIn("kReservedGapPage", odometry)
         self.assertNotIn("kCalibrationFlashAddress", odometry)
 
     def test_crc_valid_invalid(self):
