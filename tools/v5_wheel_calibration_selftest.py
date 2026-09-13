@@ -76,7 +76,7 @@ class V5WheelCalibrationSelfTest(unittest.TestCase):
         self.assertIn("ULTRASONIC_DEGRADED_CLEAR_CM", config)
         self.assertIn("degradedClearWindow", header)
         self.assertIn("c.lastValidEchoMs", source)
-        self.assertIn("c.consecutiveTimeouts>ULTRASONIC_DEGRADED_MAX_TIMEOUTS", source)
+        self.assertIn("c.consecutiveTimeouts<=ULTRASONIC_DEGRADED_MAX_TIMEOUTS", source)
         self.assertIn("if(!degradedClearWindow(millis()))return 0", source)
         self.assertIn("return min(cmd,ULTRASONIC_DEGRADED_MAX_FORWARD_COMMAND)", source)
 

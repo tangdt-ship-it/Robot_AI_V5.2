@@ -244,7 +244,7 @@ These are enabled only after Stage 6 or developed behind disabled feature flags:
 - multi-step voice missions;
 - status explanation using real state-machine data;
 - trapezoidal acceleration/deceleration and jerk limiting;
-- per-wheel PID, dead-zone compensation and adaptive motor trim;
+- per-wheel driver tuning, dead-zone compensation and adaptive motor trim;
 - encoder/IMU/compass disagreement and wheel-slip detection;
 - startup preflight and safe degraded modes;
 - calibration of ticks/mm, effective wheelbase, compass offset and motor balance;

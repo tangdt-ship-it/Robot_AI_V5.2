@@ -39,23 +39,6 @@ static constexpr int16_t ENCODER_STALL_COMMAND_THRESHOLD = 10;
 static constexpr uint32_t ENCODER_STALL_TIMEOUT_MS = 900;
 static constexpr int32_t ENCODER_STALL_MIN_TICKS = 1;
 
-// Wheel-speed PID candidate. It is deliberately disabled in the stable
-// production profile until PWM -> mm/s is measured on the assembled chassis.
-// The candidate profile enables it with conservative starting values; all
-// safety/PS2/obstacle decisions remain outside this loop.
-#ifndef ROBOT_WHEEL_SPEED_PID_ENABLE
-#define ROBOT_WHEEL_SPEED_PID_ENABLE 0
-#endif
-static constexpr bool WHEEL_SPEED_PID_ENABLED =
-    ROBOT_WHEEL_SPEED_PID_ENABLE != 0;
-static constexpr float WHEEL_PID_TARGET_MM_S_PER_COMMAND = 2.0f;
-static constexpr float WHEEL_PID_LEFT_KP = 0.20f;
-static constexpr float WHEEL_PID_LEFT_KI = 0.05f;
-static constexpr float WHEEL_PID_LEFT_KD = 0.0f;
-static constexpr float WHEEL_PID_RIGHT_KP = 0.20f;
-static constexpr float WHEEL_PID_RIGHT_KI = 0.05f;
-static constexpr float WHEEL_PID_RIGHT_KD = 0.0f;
-
 // Front HC-SR04. Use the genericSTM32F103VE digital IDs explicitly instead
 // of the Arduino analog aliases (PC4 is PIN_A14 in this variant). This keeps
 // the physical wiring unambiguous: left=PC12/PC9, right=PC4/PC7.

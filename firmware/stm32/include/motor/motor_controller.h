@@ -2,7 +2,6 @@
 #define MOTOR_CONTROLLER_H
 
 #include <Arduino.h>
-#include <control/wheel_speed_pid.h>
 
 class MotorController {
  public:
@@ -14,9 +13,6 @@ class MotorController {
   void brake();
   void freeStop();
   void update();
-  // Update applied PWM from the latest encoder velocity. The requested
-  // left/right command remains unchanged for RobotController and safety.
-  void updateSpeedPid(float leftVelocityMmS, float rightVelocityMmS);
 
   int16_t leftSpeed() const { return leftSpeed_; }
   int16_t rightSpeed() const { return rightSpeed_; }
@@ -42,8 +38,6 @@ class MotorController {
   uint8_t leftPwm_ = 255;
   uint8_t rightPwm_ = 255;
   bool brakeActive_ = false;
-  WheelSpeedPid leftPid_;
-  WheelSpeedPid rightPid_;
 };
 
 #endif

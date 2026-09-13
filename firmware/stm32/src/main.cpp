@@ -471,11 +471,6 @@ void loop() {
   // MAP is cooperative and observes the already-updated localization and
   // motion result state. It never drives MotorController directly.
   mapController.update();
-  // Apply the optional STM32-local wheel-speed loop after all command/safety
-  // owners for this iteration have had a chance to update the requested
-  // command. Encoder velocity was sampled at the beginning of this loop.
-  motors.updateSpeedPid(wheelOdometry.data().leftVelocityMmS,
-                        wheelOdometry.data().rightVelocityMmS);
   robot.updateDisplay();
   safetyWatchdog.kick();
   yield();

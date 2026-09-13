@@ -245,7 +245,7 @@ The Alpha.3 core HIL campaign is complete. The following are separate feature-de
 - encoder wheel-diameter / wheelbase and heading calibration/tolerance characterization;
 - Full Replay production commissioning under the hardened V5 gates;
 - automatic obstacle detour / rejoin / resume commissioning;
-- later V5 roadmap features such as closed-loop wheel-speed PID, calibration automation, patrol/waypoint actions and camera/landmark-assisted navigation.
+- later V5 roadmap features such as calibration automation, patrol/waypoint actions and camera/landmark-assisted navigation.
 
 Until the production feature gates are completed, V5 remains `DEVELOPMENT / NOT PRODUCTION` even though the Alpha.3 safety/HIL hardening campaign is complete.
 

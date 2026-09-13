@@ -18,6 +18,9 @@ Encoder được sample trước, sau đó fusion tính heading của vòng hi�
 
 `MOVE_DISTANCE` do STM32 đóng vòng theo encoder. MissionManager dùng primitive này cho Return Home thay vì duration->distance.
 
-## Wheel-speed PID
+## Motor driver cascade
 
-Firmware hiện tại **chưa bật PID tốc độ từng bánh đã được tune**. Trước khi bật cần đo PWM->mm/s, dead-zone và tune riêng từng bánh. Safety/PS2 phải nằm ngoài vòng PID.
+Robot dùng hai Driver Motor DC PID V1.0, mỗi driver điều khiển vòng tốc độ
+nội của một bánh bằng encoder riêng. STM32 chỉ phát lệnh trái/phải và chiều
+quay ở vòng ngoài; STM32 không chạy wheel-speed PID trong firmware production.
+Safety, PS2, obstacle limiter, heading và odometry vẫn thuộc quyền STM32.

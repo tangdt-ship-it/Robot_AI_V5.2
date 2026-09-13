@@ -248,7 +248,7 @@ The following are **not** closed by this HIL campaign and must be treated as sep
 
 - physical left/right ultrasonic mapping characterization under controlled geometry;
 - wheel-diameter, wheelbase and heading calibration/tolerance characterization;
-- closed-loop two-wheel speed PID;
+- external two-wheel driver speed-loop commissioning;
 - Full Replay production commissioning under the hardened gates;
 - autonomous obstacle Detour -> Rejoin -> Resume;
 - patrol and waypoint actions;

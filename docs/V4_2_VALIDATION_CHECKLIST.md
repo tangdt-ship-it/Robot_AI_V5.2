@@ -53,6 +53,6 @@ Các test motor đầu tiên phải kê bánh.
 
 ## G. Chưa làm ở V4.2
 
-- wheel-speed PID chưa tune;
+- external driver speed-loop commissioning is hardware-specific and is not run by STM32;
 - SLAM/global map chưa có;
 - Return Home không đảm bảo centimet sau hành trình dài hoặc trượt bánh.

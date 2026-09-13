@@ -8,6 +8,22 @@
 
 STM32 luôn là motor authority cuối cùng. ESP32 chỉ yêu cầu chuyển động cấp cao.
 
+## 1.1 Two-stage cascade control
+
+**Inner loop — external hardware**
+
+Two Driver Motor DC PID V1.0 modules are mandatory. Each driver receives the
+STM32 wheel command and direction, reads its wheel encoder, and maintains the
+wheel/motor speed.
+
+**Outer motion control — STM32F103VET6**
+
+STM32 owns distance moves, heading turns, sensor fusion, odometry, MAP
+Teach/Replay, guided waypoints, path and cross-track correction, Back-to-P0,
+Return Home, arbitration, and safety. STM32 does not run a wheel-speed PID in
+the production firmware. Command values such as 15/20/25/30 are driver
+commands, not mm/s.
+
 ## 2. Localization / odometry
 
 ```text
