@@ -56,6 +56,16 @@ class UltrasonicHostTests(unittest.TestCase):
         self.assertLessEqual(sample_ms, 80)
         self.assertLessEqual(timeout_us // 1000 + guard_ms, fresh_ms // 3)
 
+    def test_rejects_only_immediate_echo_coupling_not_close_obstacles(self):
+        min_rise_us = constant("ULTRASONIC_ECHO_MIN_RISE_US")
+        self.assertGreaterEqual(min_rise_us, 50)
+        # 2 cm acoustic round-trip is about 117 us, so the electrical-noise
+        # floor must remain below it.
+        self.assertLess(min_rise_us, 117)
+        self.assertIn("const uint32_t riseDelayUs=us-c.waitEchoStartedUs;", SENSOR_TEXT)
+        self.assertIn("riseDelayUs<ULTRASONIC_ECHO_MIN_RISE_US", SENSOR_TEXT)
+        self.assertIn("++c.earlyEchoCount;", SENSOR_TEXT)
+
     def test_map_precheck_uses_bounded_clear_grace(self):
         self.assertIn("const bool obstacleLiveClear", MAP_TEXT)
         self.assertIn("const bool obstacleGraceClear", MAP_TEXT)

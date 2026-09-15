@@ -40,6 +40,17 @@ void UltrasonicSensor::handleEchoEdge(uint8_t i){
   if(activeChannel_ != i || c.state != TriggerState::WAIT_ECHO) return;
   ++c.capturedEdgeCount;
   if(digitalRead(c.echoPin)==HIGH){
+    const uint32_t riseDelayUs=us-c.waitEchoStartedUs;
+    c.lastRiseDelayUs=riseDelayUs;
+    // A genuine return from the minimum 2 cm range cannot arrive before the
+    // acoustic round-trip floor. Ignore an immediate edge caused by TRIG/Echo
+    // electrical coupling, while leaving the channel armed for a later real
+    // Echo in the same measurement window.
+    if(riseDelayUs<ULTRASONIC_ECHO_MIN_RISE_US){
+      c.echoRiseUs=0;
+      ++c.earlyEchoCount;
+      return;
+    }
     c.echoRiseUs=us;
   }else if(c.echoRiseUs != 0U){
     c.echoPulseUs=us-c.echoRiseUs;

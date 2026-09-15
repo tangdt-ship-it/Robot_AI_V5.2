@@ -53,6 +53,10 @@ class UltrasonicSensor {
   uint32_t frontRightCapturedEdgeCount() const { return channels_[1].capturedEdgeCount; }
   uint32_t frontLeftLastPulseUs() const { return channels_[0].lastPulseUs; }
   uint32_t frontRightLastPulseUs() const { return channels_[1].lastPulseUs; }
+  uint32_t frontLeftLastRiseDelayUs() const { return channels_[0].lastRiseDelayUs; }
+  uint32_t frontRightLastRiseDelayUs() const { return channels_[1].lastRiseDelayUs; }
+  uint32_t frontLeftEarlyEchoCount() const { return channels_[0].earlyEchoCount; }
+  uint32_t frontRightEarlyEchoCount() const { return channels_[1].earlyEchoCount; }
   ObstacleZone frontLeftZone() const { return frontLeft_.zone; }
   ObstacleZone frontRightZone() const { return frontRight_.zone; }
   ObstacleZone overallZone() const { return overallZone_; }
@@ -69,10 +73,10 @@ class UltrasonicSensor {
   enum class TriggerState : uint8_t { IDLE, WAIT_ECHO };
   struct Channel {
     uint32_t trigPin=0, echoPin=0;
-    volatile uint32_t echoRiseUs=0, echoPulseUs=0;
+    volatile uint32_t echoRiseUs=0, echoPulseUs=0, lastRiseDelayUs=0;
     volatile bool echoPulseReady=false;
     volatile TriggerState state=TriggerState::IDLE;
-    volatile uint32_t isrCount=0, capturedEdgeCount=0;
+    volatile uint32_t isrCount=0, capturedEdgeCount=0, earlyEchoCount=0;
     uint32_t triggerCount=0;
     volatile uint32_t lastPulseUs=0;
     uint32_t waitEchoStartedUs=0;

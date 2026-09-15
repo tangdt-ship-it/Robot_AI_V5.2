@@ -1620,7 +1620,11 @@ void RobotController::emitDiagnostics(uint32_t nowMs) {
     debug_.print(",LC="); debug_.print(ultrasonic_.frontLeftCapturedEdgeCount());
     debug_.print(",RC="); debug_.print(ultrasonic_.frontRightCapturedEdgeCount());
     debug_.print(",LP="); debug_.print(ultrasonic_.frontLeftLastPulseUs());
-    debug_.print(",RP="); debug_.println(ultrasonic_.frontRightLastPulseUs());
+    debug_.print(",RP="); debug_.print(ultrasonic_.frontRightLastPulseUs());
+    debug_.print(",LRD="); debug_.print(ultrasonic_.frontLeftLastRiseDelayUs());
+    debug_.print(",RRD="); debug_.print(ultrasonic_.frontRightLastRiseDelayUs());
+    debug_.print(",LE="); debug_.print(ultrasonic_.frontLeftEarlyEchoCount());
+    debug_.print(",RE="); debug_.println(ultrasonic_.frontRightEarlyEchoCount());
     return;
   }
   static uint32_t lastFusionDebugMs = 0;

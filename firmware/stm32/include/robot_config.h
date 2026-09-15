@@ -66,6 +66,12 @@ static constexpr float IMU_CALIBRATION_MAX_RATE_DPS = 4.0f;
 static constexpr uint8_t IMU_READ_FAULT_COUNT = 5;
 static constexpr uint32_t IMU_I2C_HALF_PERIOD_US = 4;
 static constexpr uint32_t IMU_I2C_CLOCK_STRETCH_TIMEOUT_US = 500;
+// Fixed-pointer characterization with the commissioned chassis at 1.019f
+// consistently measured one degree of under-rotation at 90 and 180 degrees.
+// Lower the gain so the fused heading does not reach its target prematurely.
+// Apply the correction only after stationary bias removal, so boot bias
+// calibration and stationary heading hold remain unchanged.
+static constexpr float IMU_GYRO_Z_YAW_SCALE = 1.012f;
 
 // Heading fusion. Short-term yaw comes from MPU6050 Gyro-Z and wheel encoder
 // yaw constrains the estimate to chassis kinematics. Large jumps are never
@@ -270,6 +276,11 @@ static constexpr uint32_t ULTRASONIC_SAMPLE_PERIOD_MS = 60;
 // observation in the normal 0-4 m range, so front coverage remains continuous.
 static constexpr uint32_t ULTRASONIC_INTER_SENSOR_GUARD_MS = 45;
 static constexpr uint32_t ULTRASONIC_ECHO_TIMEOUT_US = 30000;
+// Reject a rising Echo edge that arrives immediately after TRIG.  A real
+// return from the minimum accepted 2 cm range needs about 117 us round-trip;
+// this 80 us floor therefore filters electrical TRIG-to-ECHO coupling without
+// reducing close-obstacle coverage.
+static constexpr uint32_t ULTRASONIC_ECHO_MIN_RISE_US = 80;
 static constexpr uint32_t ULTRASONIC_FRESH_MS = 350;
 // A single HC-SR04 timeout can be caused by an echo collision, no reflector
 // inside the acoustic cone, or a narrow electrical glitch. Keep the fail-safe

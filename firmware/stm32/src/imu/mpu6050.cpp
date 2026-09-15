@@ -268,6 +268,10 @@ void Mpu6050::update() {
     data_.gyroXDps -= gyroBiasXDegS_;
     data_.gyroYDps -= gyroBiasYDegS_;
     data_.gyroZDps -= gyroBiasZDegS_;
+    // Correct the commissioned physical yaw scale only after the stationary
+    // bias has been removed.  Scaling first would leave a residual bias and
+    // make the heading drift while the chassis is stopped.
+    data_.gyroZDps *= IMU_GYRO_Z_YAW_SCALE;
     health_ = ImuHealth::OK;
   }
 }
