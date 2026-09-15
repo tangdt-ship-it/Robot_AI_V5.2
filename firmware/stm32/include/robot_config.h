@@ -248,6 +248,11 @@ static_assert(MAP_GUIDE_BACK_ARRIVAL_POSITION_TOLERANCE_MM > 0U &&
 // HOLD, CANCEL and obstacle braking always bypass this ramp.
 static constexpr uint32_t MAP_GUIDE_ACCEL_RAMP_MS = 400U;
 static constexpr uint32_t MAP_GUIDE_TELEMETRY_MS = 250U;
+// An obstacle hold may resume only after both SR04 channels have remained
+// fresh, healthy and CLEAR for a complete bounded observation window. This is
+// deliberately longer than one alternating sensor sample (60 ms) and does
+// not alter any obstacle threshold or automatic-detour policy.
+static constexpr uint32_t OBSTACLE_CLEAR_STABLE_MS = 400U;
 
 // All MAP long-press gestures share one deliberate threshold. X still enters
 // HOLD on its down edge; this value only controls escalation to CANCEL.

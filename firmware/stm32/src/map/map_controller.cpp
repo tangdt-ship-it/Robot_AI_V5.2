@@ -250,6 +250,10 @@ void MapController::update() {
     }
   }
 
+  // Track the obstacle clear window while held. This never restarts replay;
+  // it only arms the explicit START resume gate after a stable clear period.
+  serviceObstacleHold();
+
   if (postTeachBack_.valid && !postTeachBackActive_) {
     const bool resetChanged =
         odometry_.resetGeneration() != postTeachBack_.odometryResetGeneration ||
@@ -706,6 +710,9 @@ void MapController::handleStart() {
       mode_ = MapControllerMode::REPLAY_RUNNING;
       replayOperation_ = MapReplayOperation::NONE;
       replayReason_ = "RESUME";
+      if (holdReason_ == MapHoldReason::OBSTACLE) {
+        debug_.println("OBS,HOLD,RESUME");
+      }
       holdReason_ = MapHoldReason::NONE;
       statusDirty_ = true;
       debug_.print("MAP,RESUME,ACCEPT,WP=");
@@ -2263,6 +2270,7 @@ void MapController::enterReplayHold(MapHoldReason reason, bool allowResume) {
   replayReason_ = HoldReasonName(reason);
   holdReason_ = reason;
   replayResumeAllowed_ = allowResume;
+  obstacleClearSinceMs_ = 0U;
   replayHoldPoseValid_ = readPose(replayHoldPose_);
   mode_ = MapControllerMode::REPLAY_HOLD;
   statusDirty_ = true;
@@ -2392,6 +2400,7 @@ void MapController::clearReplayResumeContext() {
   replayRealignReason_ = ReplayRealignReason::NONE;
   replayArrivalHeadingViolationSinceMs_ = 0U;
   holdReason_ = MapHoldReason::NONE;
+  obstacleClearSinceMs_ = 0U;
   replayOperation_ = MapReplayOperation::NONE;
   replayCurrentIndex_ = 0U;
   replayTargetIndex_ = 1U;
@@ -2412,7 +2421,31 @@ void MapController::clearReplayResumeContext() {
   replayCycleCounter_ = 0U;
 }
 
-bool MapController::canResumeReplay(const char*& rejectReason) const {
+void MapController::serviceObstacleHold() {
+  if (mode_ != MapControllerMode::REPLAY_HOLD ||
+      holdReason_ != MapHoldReason::OBSTACLE) {
+    obstacleClearSinceMs_ = 0U;
+    return;
+  }
+
+  const uint32_t now = millis();
+  const bool obstacleLiveClear =
+      ultrasonic_.isFresh() && ultrasonic_.healthy() &&
+      ultrasonic_.overallZone() == ObstacleZone::CLEAR;
+  if (!obstacleLiveClear) {
+    if (obstacleClearSinceMs_ != 0U) {
+      debug_.println("OBS,HOLD,WAIT");
+    }
+    obstacleClearSinceMs_ = 0U;
+    return;
+  }
+  if (obstacleClearSinceMs_ == 0U) {
+    obstacleClearSinceMs_ = now;
+    debug_.println("OBS,HOLD,CLEAR_PENDING");
+  }
+}
+
+bool MapController::canResumeReplay(const char*& rejectReason) {
   rejectReason = nullptr;
   if (!loadedValid_) {
     rejectReason = "NOT_SAVED";
@@ -2476,12 +2509,28 @@ bool MapController::canResumeReplay(const char*& rejectReason) const {
   const bool obstacleLiveClear =
       ultrasonic_.isFresh() && ultrasonic_.healthy() &&
       ultrasonic_.overallZone() == ObstacleZone::CLEAR;
-  const bool obstacleGraceClear =
-      ultrasonic_.overallZone() == ObstacleZone::CLEAR &&
-      ultrasonic_.hasRecentClearWindow(now);
-  if (!obstacleLiveClear && !obstacleGraceClear) {
-    rejectReason = "OBSTACLE_NOT_CLEAR";
-    return false;
+  if (holdReason_ == MapHoldReason::OBSTACLE) {
+    if (!obstacleLiveClear) {
+      obstacleClearSinceMs_ = 0U;
+      rejectReason = "OBSTACLE_NOT_CLEAR";
+      return false;
+    }
+    if (obstacleClearSinceMs_ == 0U) {
+      obstacleClearSinceMs_ = now;
+      debug_.println("OBS,HOLD,CLEAR_PENDING");
+    }
+    if ((now - obstacleClearSinceMs_) < OBSTACLE_CLEAR_STABLE_MS) {
+      rejectReason = "OBSTACLE_NOT_CLEAR";
+      return false;
+    }
+  } else {
+    const bool obstacleGraceClear =
+        ultrasonic_.overallZone() == ObstacleZone::CLEAR &&
+        ultrasonic_.hasRecentClearWindow(now);
+    if (!obstacleLiveClear && !obstacleGraceClear) {
+      rejectReason = "OBSTACLE_NOT_CLEAR";
+      return false;
+    }
   }
   Pose pose;
   if (!replayHoldPoseValid_ || !readPose(pose)) {

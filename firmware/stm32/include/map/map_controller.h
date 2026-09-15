@@ -158,7 +158,8 @@ class MapController {
   void abortReplay(const char* reason);
   void completeReplay();
   void cancelReplay(const char* reason = "CANCELLED");
-  bool canResumeReplay(const char*& rejectReason) const;
+  void serviceObstacleHold();
+  bool canResumeReplay(const char*& rejectReason);
   void clearReplayResumeContext();
   uint32_t nextReplayGeneration();
   void beginCancelTrace();
@@ -282,6 +283,7 @@ class MapController {
   uint32_t replayCycleCounter_ = 0U;
   const char* replayReason_ = "NONE";
   MapHoldReason holdReason_ = MapHoldReason::NONE;
+  uint32_t obstacleClearSinceMs_ = 0U;
   uint32_t closeCandidateDistanceMm_ = 0U;
   int16_t closeCandidateHeadingDeg_ = 0;
   bool cancelTraceActive_ = false;

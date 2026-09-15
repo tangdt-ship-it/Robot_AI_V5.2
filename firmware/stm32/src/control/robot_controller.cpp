@@ -365,8 +365,16 @@ void RobotController::applyMotorCommand() {
   const int16_t forward = static_cast<int16_t>((left + right) / 2);
   const int16_t turn = static_cast<int16_t>((left - right) / 2);
   if (!manualPs2 && forward > 0) {
-    const int16_t limitedForward =
-        ultrasonic_.limitForwardCommand(forward);
+    // MAP/Replay is fail-closed on sensor validity. The generic limiter keeps
+    // its existing bounded degraded-clear behavior for non-MAP AI commands,
+    // but a replay segment must never advance on stale/timeout/unknown data.
+    const bool replaySensorValid =
+        motionOwner_ != MotionOwner::REPLAY ||
+        (ultrasonic_.isFresh() && ultrasonic_.healthy() &&
+         ultrasonic_.overallZone() != ObstacleZone::UNKNOWN);
+    const int16_t limitedForward = replaySensorValid
+        ? ultrasonic_.limitForwardCommand(forward)
+        : 0;
     if (limitedForward < forward) {
       obstacleLimited_ = true;
       left = constrain(limitedForward + turn, -255, 255);
@@ -1211,11 +1219,15 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   const bool rightSectorClear =
       ultrasonic_.frontRight().fresh &&
       ultrasonic_.frontRightZone() == ObstacleZone::CLEAR;
-  const bool oneSectorClear =
-      turnZone == ObstacleZone::CLEAR ||
-      (turnZone == ObstacleZone::UNKNOWN &&
-       (leftSectorClear || rightSectorClear));
-  const bool recentClearWindow =
+  const bool mapSensorClear =
+      ultrasonic_.isFresh() && ultrasonic_.healthy() &&
+      turnZone == ObstacleZone::CLEAR;
+  const bool oneSectorClear = mapTurnProfile
+      ? mapSensorClear
+      : (turnZone == ObstacleZone::CLEAR ||
+         (turnZone == ObstacleZone::UNKNOWN &&
+          (leftSectorClear || rightSectorClear)));
+  const bool recentClearWindow = !mapTurnProfile &&
       ultrasonic_.hasRecentClearWindow(nowMs);
   if (!oneSectorClear && !recentClearWindow) {
 #if ROBOT_DEBUG
