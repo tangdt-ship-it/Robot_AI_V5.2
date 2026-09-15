@@ -1037,6 +1037,8 @@ void RobotController::updateAiGuidedWaypoint(uint32_t nowMs) {
   // Arrival heading is the immutable incoming route-edge bearing supplied by
   // MapController. The live target bearing above remains the PATH steering
   // direction and must not replace the arrival heading at a side offset.
+  const float routeHeadingError = HeadingFusion::shortestDelta(
+      incomingBearing, currentHeadingDeg());
   const float arrivalHeadingError = HeadingFusion::shortestDelta(
       incomingBearing, currentHeadingDeg());
   if (remaining <= guidedArrivalPositionToleranceMm_ &&
@@ -1081,7 +1083,14 @@ void RobotController::updateAiGuidedWaypoint(uint32_t nowMs) {
   // A large live bearing error means the robot is no longer converging by a
   // gentle differential correction. Stop forward motion and let MapController
   // re-enter the shared coarse-turn primitive for this same waypoint.
-  if (fabsf(guidedHeadingErrorDeg_) >= MAP_GUIDE_REALIGN_THRESHOLD_DEG) {
+  // Near a waypoint, point-pursuit bearing can legitimately swing tens of
+  // degrees when the chassis has lateral or small endpoint error.  Treating
+  // that live bearing as a hard realign request repeatedly restarts the same
+  // MAP segment even though the chassis is still aligned with the immutable
+  // route edge.  A PATH realign is warranted only when the chassis heading
+  // itself is also outside the route-edge threshold.
+  if (fabsf(guidedHeadingErrorDeg_) >= MAP_GUIDE_REALIGN_THRESHOLD_DEG &&
+      fabsf(routeHeadingError) >= MAP_GUIDE_REALIGN_THRESHOLD_DEG) {
 #if ROBOT_DEBUG
     debug_.print("MAP,GUIDE,REALIGN,ERR=");
     debug_.println(guidedHeadingErrorDeg_, 2);
