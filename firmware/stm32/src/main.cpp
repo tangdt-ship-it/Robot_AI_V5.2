@@ -12,6 +12,7 @@
 #include <ps2/ps2_controller.h>
 #include <robot_config.h>
 #include <sensors/ultrasonic_sensor.h>
+#include <sensors/obstacle_classifier.h>
 #include <safety/safety_watchdog.h>
 
 HardwareSerial robotDebugSerial(ROBOT_DEBUG_RX_PIN, ROBOT_DEBUG_TX_PIN);
@@ -24,6 +25,7 @@ Ps2Controller ps2;
 LcdDisplay display(LCD_SCL_PIN, LCD_SDA_PIN, LCD_ADDRESS);
 HeadingController heading;
 UltrasonicSensor ultrasonic;
+ObstacleClassifier obstacleClassifier(ultrasonic, robotDebug);
 WheelOdometry wheelOdometry;
 Mpu6050 imu(MPU6050_SCL_PIN, MPU6050_SDA_PIN, MPU6050_ADDRESS);
 HeadingFusion headingFusion;
@@ -154,6 +156,9 @@ void loop() {
 #endif
   if (ENCODER_ENABLED) wheelOdometry.update(motors.leftSpeed(), motors.rightSpeed());
   ultrasonic.update();
+  // Phase 2 is read-only: classification/recommendation logging never owns
+  // motion, alters MAP state, or bypasses the established Phase 1 hold gate.
+  obstacleClassifier.update();
   ps2.update();
   // Sample localization sensors before motion control. Encoder travel is
   // integrated only after the fused Heading for this loop has been computed.

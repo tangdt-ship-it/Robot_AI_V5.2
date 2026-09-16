@@ -336,6 +336,14 @@ static constexpr float OBSTACLE_STOP_PER_COMMAND_CM = 0.10f;
 static constexpr float OBSTACLE_APPROACH_LOOKAHEAD_S = 0.15f;
 static constexpr float OBSTACLE_SLOW_BAND_CM = 18.0f;
 static constexpr int16_t OBSTACLE_MIN_FORWARD_COMMAND = 8;
+// Phase 2 is diagnostic/decision-only.  These constants classify the two
+// existing front sectors and never change the established stop thresholds.
+// The 100 mm balance window is deliberately conservative for two separated
+// forward-facing beams; a close, asymmetric pair remains BOTH_BLOCKED unless
+// the clearance margin provides evidence for a side recommendation.
+static constexpr float OBSTACLE_CLASS_CENTER_BALANCE_MM = 100.0f;
+static constexpr float OBSTACLE_CLASS_SIDE_CLEARANCE_MARGIN_MM = 80.0f;
+static constexpr uint32_t OBSTACLE_CLASS_STABLE_MS = 240U;
 static constexpr float AVOID_MIN_CLEARANCE_CM = 30.0f;
 static constexpr float AVOID_SIDE_HYSTERESIS_CM = 8.0f;
 
