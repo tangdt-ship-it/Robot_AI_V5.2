@@ -347,6 +347,30 @@ static constexpr uint32_t OBSTACLE_CLASS_STABLE_MS = 240U;
 static constexpr float AVOID_MIN_CLEARANCE_CM = 30.0f;
 static constexpr float AVOID_SIDE_HYSTERESIS_CM = 8.0f;
 
+// Phase 3 is a deliberately bounded, one-attempt detour from an obstacle
+// hold.  These are commissioning values only; the detour never mutates the
+// saved MAP route and never retries the opposite side automatically.
+static constexpr float OBSTACLE_DETOUR_TURN_AWAY_DEG = 45.0f;
+static constexpr uint32_t OBSTACLE_DETOUR_MOVE_AWAY_MM = 250U;
+static constexpr uint32_t OBSTACLE_DETOUR_BYPASS_MM = 450U;
+static constexpr int16_t OBSTACLE_DETOUR_SPEED = 15;
+static constexpr uint32_t OBSTACLE_DETOUR_CLEAR_STABLE_MS = 400U;
+static constexpr uint32_t OBSTACLE_DETOUR_TIMEOUT_MS = 20000U;
+static constexpr uint8_t OBSTACLE_DETOUR_MAX_ATTEMPTS = 1U;
+static constexpr uint32_t OBSTACLE_DETOUR_MAX_TOTAL_DISTANCE_MM = 700U;
+static constexpr float OBSTACLE_DETOUR_MAX_TOTAL_TURN_DEG = 90.0f;
+static_assert(OBSTACLE_DETOUR_SPEED >= ROBOT_AI_SPEED_MIN &&
+                  OBSTACLE_DETOUR_SPEED <= ROBOT_AI_SPEED_MAX,
+              "Obstacle detour speed must stay in the AI/replay range");
+static_assert(OBSTACLE_DETOUR_MOVE_AWAY_MM + OBSTACLE_DETOUR_BYPASS_MM <=
+                  OBSTACLE_DETOUR_MAX_TOTAL_DISTANCE_MM,
+              "Obstacle detour distance budget exceeded");
+static_assert(2.0f * OBSTACLE_DETOUR_TURN_AWAY_DEG <=
+                  OBSTACLE_DETOUR_MAX_TOTAL_TURN_DEG,
+              "Obstacle detour turn budget exceeded");
+static_assert(OBSTACLE_DETOUR_MAX_ATTEMPTS == 1U,
+              "Phase 3 permits exactly one detour attempt per event");
+
 static constexpr uint32_t PS2_POLL_MS = 2;
 static constexpr uint32_t PS2_RECONNECT_MS = 1000;
 static constexpr uint32_t PS2_FAILSAFE_MS = 80;

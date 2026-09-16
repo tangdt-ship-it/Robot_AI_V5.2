@@ -28,13 +28,12 @@ class ObstacleHoldHostTests(unittest.TestCase):
         self.assertLessEqual(stable_ms, 500)
         self.assertGreater(stable_ms, sample_ms)
 
-    def test_obstacle_hold_is_a_map_state_not_a_detour(self):
+    def test_obstacle_hold_remains_phase1_state_with_phase3_separate(self):
         self.assertIn("OBSTACLE = 2U", MAP_TYPES)
         self.assertIn("MapHoldReason", MAP_HEADER)
         self.assertIn("enterReplayHold(MapHoldReason::OBSTACLE, true)", MAP)
-        self.assertNotIn("DETOUR", MAP.upper())
-        self.assertNotIn("SIDESTEP", MAP.upper())
-        self.assertNotIn("avoidance", MAP.lower())
+        self.assertIn("obstacleDetourPhase_", MAP_HEADER)
+        self.assertIn("obstacleClassifier_.decision()", MAP)
 
     def test_hold_preserves_route_and_waypoint(self):
         hold_start = MAP.index("void MapController::enterReplayHold")

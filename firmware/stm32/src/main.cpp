@@ -33,7 +33,7 @@ SafetyWatchdog safetyWatchdog;
 RobotController robot(motors, ps2, display, heading, ultrasonic,
                       wheelOdometry, imu, headingFusion, robotDebug);
 MapController mapController(robot, ps2, display, wheelOdometry, headingFusion,
-                             ultrasonic, robotDebug);
+                             ultrasonic, obstacleClassifier, robotDebug);
 
 void setup() {
   motors.begin();
