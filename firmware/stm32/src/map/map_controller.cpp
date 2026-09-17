@@ -302,7 +302,10 @@ void MapController::update() {
       }
     } else if (robot_.motionOwner() != MotionOwner::REPLAY &&
                !robot_.aiMotionActive() &&
-               replayOperation_ != MapReplayOperation::NONE) {
+               replayOperation_ != MapReplayOperation::NONE &&
+               !(mode_ == MapControllerMode::REPLAY_HOLD &&
+                 holdReason_ == MapHoldReason::OBSTACLE &&
+                 replayOperation_ == MapReplayOperation::HOLD)) {
       // External STOP/mission arbitration removed the owner without producing
       // a replay result. Do not infer success from a stopped motor.
       enterReplayHold(MapHoldReason::EXTERNAL_STOP, false);
@@ -1973,8 +1976,28 @@ bool MapController::obstacleDetourSensorsReady() const {
 }
 
 bool MapController::obstacleDetourPathClear() const {
-  return obstacleDetourSensorsReady() && ultrasonic_.isFresh() &&
-         ultrasonic_.healthy() && ultrasonic_.overallZone() == ObstacleZone::CLEAR;
+  const UltrasonicReading& left = ultrasonic_.frontLeft();
+  const UltrasonicReading& right = ultrasonic_.frontRight();
+  const bool strictClear =
+      obstacleDetourSensorsReady() && ultrasonic_.isFresh() &&
+      ultrasonic_.healthy() && ultrasonic_.overallZone() == ObstacleZone::CLEAR;
+  // Once Phase 2 has selected a direction from strict evidence, a short
+  // dropout during the already bounded detour may use the sensor subsystem's
+  // existing qualified clear window. This is still fail-closed: a channel
+  // must not be UNKNOWN/BLOCKED/EMERGENCY, and the window itself enforces
+  // prior real Echo, distance, timeout-count, and age limits.
+  const auto boundedClearZone = [](const UltrasonicReading& reading) {
+    return reading.zone != ObstacleZone::UNKNOWN &&
+           reading.zone != ObstacleZone::BLOCKED &&
+           reading.zone != ObstacleZone::EMERGENCY;
+  };
+  const bool boundedDegradedClear =
+      ultrasonic_.hasRecentClearWindow(millis()) &&
+      boundedClearZone(left) && boundedClearZone(right) &&
+      ultrasonic_.overallZone() != ObstacleZone::UNKNOWN &&
+      ultrasonic_.overallZone() != ObstacleZone::BLOCKED &&
+      ultrasonic_.overallZone() != ObstacleZone::EMERGENCY;
+  return strictClear || boundedDegradedClear;
 }
 
 bool MapController::obstacleDetourEntryGates(const char*& rejectReason) const {

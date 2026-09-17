@@ -169,10 +169,51 @@ class DetourModel:
             return True
         return False
 
+    def controller_tick(self):
+        """Model the owner guard that runs after an immediate obstacle stop."""
+        waiting_for_start = (
+            self.mode == "REPLAY_HOLD"
+            and self.hold_reason == "OBSTACLE"
+            and self.operation == "HOLD"
+        )
+        if (self.replay_active and self.owner != "REPLAY"
+                and self.operation != "NONE" and not waiting_for_start):
+            self.abort("EXTERNAL_STOP")
+
     def complete(self):
         self.route_mutated = False
         self.auto_resumed = False
         return self.distance_result("DONE", self.expected_generation)
+
+
+class SensorGateModel:
+    """Model the Phase 3 post-turn path-clear safety boundary."""
+
+    def __init__(self, strict=True, bounded=False, left_zone="CLEAR",
+                 right_zone="CLEAR", overall_zone="CLEAR",
+                 requested_speed=15, degraded_limit=8,
+                 recent_window=True, timeout_budget=True,
+                 prior_far_clear=True, valid_echo=True):
+        self.strict = strict
+        self.bounded = (bounded and recent_window and timeout_budget and
+                        prior_far_clear and valid_echo)
+        self.left_zone = left_zone
+        self.right_zone = right_zone
+        self.overall_zone = overall_zone
+        self.requested_speed = requested_speed
+        self.degraded_limit = degraded_limit
+
+    def path_clear(self):
+        safe_zones = {"CLEAR", "CAUTION"}
+        no_hard_block = self.left_zone in safe_zones and self.right_zone in safe_zones
+        no_overall_block = self.overall_zone in safe_zones
+        return (self.strict and self.overall_zone == "CLEAR") or (
+            self.bounded and no_hard_block and no_overall_block
+        )
+
+    def permitted_forward(self):
+        return (self.requested_speed if self.strict else
+                min(self.requested_speed, self.degraded_limit))
 
 
 class ObstacleDetourHostTests(unittest.TestCase):
@@ -393,6 +434,75 @@ class ObstacleDetourHostTests(unittest.TestCase):
         self.assertIn("enterReplayHold(MapHoldReason::OBSTACLE, true)", MAP)
         self.assertIn("OBSTACLE_CLEAR_STABLE_MS", MAP)
         self.assertIn('debug_.println("MAP,START,ACTION=RESUME")', MAP)
+
+    def test_obstacle_hold_is_not_reclassified_as_external_stop(self):
+        model = DetourModel()
+        model.controller_tick()
+        self.assertEqual(model.hold_reason, "OBSTACLE")
+        self.assertEqual(model.operation, "HOLD")
+        self.assertEqual(model.motors, (0, 0))
+        update_guard = MAP[MAP.index("} else if (robot_.motionOwner()"):
+                           MAP.index("} else {\n      updateReplay();", MAP.index("} else if (robot_.motionOwner()"))]
+        self.assertIn("holdReason_ == MapHoldReason::OBSTACLE", update_guard)
+        self.assertIn("replayOperation_ == MapReplayOperation::HOLD", update_guard)
+
+    def test_strict_healthy_clear_allows_phase3_path(self):
+        self.assertTrue(SensorGateModel(strict=True).path_clear())
+
+    def test_short_timeout_after_proven_far_clear_uses_bounded_window(self):
+        model = SensorGateModel(strict=False, bounded=True)
+        self.assertTrue(model.path_clear())
+
+    def test_bounded_degraded_motion_keeps_production_speed_cap(self):
+        model = SensorGateModel(strict=False, bounded=True, requested_speed=15,
+                                degraded_limit=8)
+        self.assertEqual(model.permitted_forward(), 8)
+        self.assertIn("ULTRASONIC_DEGRADED_MAX_FORWARD_COMMAND", CONFIG)
+        self.assertIn("limitForwardCommand(forward)",
+                      (STM32_ROOT / "src" / "control" / "robot_controller.cpp")
+                      .read_text(encoding="utf-8"))
+
+    def test_previous_near_obstacle_timeout_fails_closed(self):
+        self.assertFalse(SensorGateModel(strict=False, bounded=True,
+                                         left_zone="BLOCKED",
+                                         right_zone="CLEAR",
+                                         prior_far_clear=False).path_clear())
+
+    def test_startup_without_echo_fails_closed(self):
+        self.assertFalse(SensorGateModel(strict=False, bounded=True,
+                                         left_zone="UNKNOWN",
+                                         right_zone="UNKNOWN",
+                                         overall_zone="UNKNOWN",
+                                         valid_echo=False).path_clear())
+
+    def test_expired_bounded_window_fails_closed(self):
+        self.assertFalse(SensorGateModel(strict=False, bounded=True,
+                                         recent_window=False).path_clear())
+
+    def test_exceeded_timeout_budget_fails_closed(self):
+        self.assertFalse(SensorGateModel(strict=False, bounded=True,
+                                         timeout_budget=False).path_clear())
+
+    def test_blocked_or_emergency_fails_closed(self):
+        for zone in ("BLOCKED", "EMERGENCY"):
+            self.assertFalse(SensorGateModel(strict=False, bounded=True,
+                                             left_zone=zone,
+                                             overall_zone=zone).path_clear())
+
+    def test_invalid_electrical_pulse_fails_closed(self):
+        self.assertFalse(SensorGateModel(strict=False, bounded=True,
+                                         valid_echo=False).path_clear())
+
+    def test_path_gate_reuses_bounded_sensor_policy_without_lcd_state(self):
+        start = MAP.index("bool MapController::obstacleDetourPathClear")
+        end = MAP.index("bool MapController::obstacleDetourEntryGates", start)
+        path_gate = MAP[start:end]
+        self.assertIn("hasRecentClearWindow(millis())", path_gate)
+        self.assertIn("ObstacleZone::UNKNOWN", path_gate)
+        self.assertIn("ObstacleZone::BLOCKED", path_gate)
+        self.assertIn("ObstacleZone::EMERGENCY", path_gate)
+        self.assertNotIn("displayFar", path_gate)
+        self.assertNotIn("displayNoEchoFar", path_gate)
 
     def test_phase2_classifier_remains_decision_only(self):
         for forbidden in ("startReplay", "startTurn", "startDistance", "MotorController", "route_"):
