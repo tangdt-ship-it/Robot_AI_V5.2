@@ -1353,7 +1353,6 @@ class MapHostTests(unittest.TestCase):
             'invalidatePostTeachBack("RESET_BOUNDARY")',
             'invalidatePostTeachBack("STORAGE_ERROR")',
             'MAP,BACK_P0,INVALIDATE,REASON=',
-            'MAP,BACK_P0,REJECT,REASON=',
         ):
             self.assertIn(token, MAP_TEXT)
         self.assertIn('route_.header.generation != postTeachBack_.routeGeneration',
@@ -1370,12 +1369,15 @@ class MapHostTests(unittest.TestCase):
             '"ODOMETRY"', '"HEADING"', '"OBSTACLE_SENSOR"',
             '"OBSTACLE_NOT_CLEAR"', '"POSE"'):
             self.assertIn(reason, MAP_TEXT)
-        self.assertIn('debug_.println(",RETRY=1")', MAP_TEXT)
+        helper = MAP_TEXT.split(
+            'bool MapController::postTeachBackRejectShouldInvalidate', 1
+        )[1].split('bool MapController::postTeachBackAvailable', 1)[0]
+        self.assertIn('const char* transientReasons[]', helper)
         start_block = MAP_TEXT.split(
             'void MapController::handleStart()', 1
         )[1].split('void MapController::handleTriangle()', 1)[0]
         self.assertIn('robot_.stopImmediately(true)', start_block)
-        self.assertIn('postTeachBackRejectShouldInvalidate(reason)', start_block)
+        self.assertIn('requestReturnToP0(ReturnP0Source::PS2_START', start_block)
         self.assertIn('postTeachBack_.valid && !postTeachBackActive_', MAP_TEXT)
 
     def test_post_teach_back_motion_owner_is_hard_invalidated(self):
@@ -1388,7 +1390,8 @@ class MapHostTests(unittest.TestCase):
         start_block = MAP_TEXT.split(
             'void MapController::handleStart()', 1
         )[1].split('void MapController::handleTriangle()', 1)[0]
-        self.assertIn('invalidatePostTeachBack(reason)', start_block)
+        self.assertIn('backReadyP0Available', start_block)
+        self.assertIn('MAP,RETURN_P0,REJECT,REASON=', start_block)
 
         for owner in ("REPLAY", "MCP", "MISSION", "PS2"):
             model = PostTeachBackModel(4)

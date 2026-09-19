@@ -220,6 +220,7 @@ void MapController::applyStoredSettings(MapRouteType type, MapReplayMode mode,
 void MapController::begin() {
   ps2_.setMapUiCapture(false);
   homeContext_ = {};
+  backP0UiDismissed_ = false;
   pendingHomeOrigin_ = {};
   pendingHomeResetGeneration_ = 0U;
   pendingHomeHeadingResetGeneration_ = 0U;
@@ -776,6 +777,11 @@ bool MapController::requestStart(MapMissionInitiator initiator) {
                        : "STORAGE_ERROR");
     return false;
   }
+  if (returnP0InProgress()) {
+    logStartReject("RETURN_P0_ACTIVE");
+    debug_.println("MAP,RETURN_P0,START,REJECT=RETURN_P0_ACTIVE");
+    return false;
+  }
   if (mode_ == MapControllerMode::SETTINGS) {
     if (initiator != MapMissionInitiator::PS2) {
       logStartReject("SETTINGS");
@@ -798,41 +804,28 @@ bool MapController::requestStart(MapMissionInitiator initiator) {
                            : "CLOSED_CONFIRM");
     return false;
   }
-  if (postTeachBack_.valid && !postTeachBackActive_) {
-    if (initiator != MapMissionInitiator::PS2) {
-      logStartReject("POST_TEACH_BACK_PS2_ONLY");
-      return false;
-    }
+  if (initiator == MapMissionInitiator::PS2 &&
+      mode_ == MapControllerMode::SAVED && homeContext_.valid &&
+      !backP0UiDismissed_ && returnP0State_ != ReturnP0State::COMPLETE) {
     const char* backReason = nullptr;
-    if (!postTeachBackAvailable(backReason)) {
+    if (!backReadyP0Available(backReason)) {
       const char* reason = backReason != nullptr ? backReason : "UNAVAILABLE";
       robot_.stopImmediately(true);
-      debug_.print("MAP,BACK_P0,REJECT,REASON=");
-      if (postTeachBackRejectShouldInvalidate(reason)) {
-        debug_.println(reason);
-        invalidatePostTeachBack(reason);
-      } else {
-        debug_.print(reason);
-        debug_.println(",RETRY=1");
-      }
+      debug_.print("MAP,RETURN_P0,REJECT,REASON=");
+      debug_.println(reason);
+      logStartReject(reason);
       return false;
     }
-    if (!startPostTeachBack(backReason)) {
+    if (!requestReturnToP0(ReturnP0Source::PS2_START, backReason)) {
       const char* reason = backReason != nullptr ? backReason : "START";
       robot_.stopImmediately(true);
-      debug_.print("MAP,BACK_P0,REJECT,REASON=");
-      if (postTeachBackRejectShouldInvalidate(reason)) {
-        debug_.println(reason);
-        invalidatePostTeachBack(reason);
-      } else {
-        debug_.print(reason);
-        debug_.println(",RETRY=1");
-      }
+      debug_.print("MAP,RETURN_P0,REJECT,REASON=");
+      debug_.println(reason);
+      logStartReject(reason);
       return false;
     }
     missionInitiator_ = MapMissionInitiator::PS2;
-    debug_.print("MAP,MISSION,INITIATOR=");
-    debug_.println(MissionInitiatorName(missionInitiator_));
+    debug_.println("MAP,RETURN_P0,START,SOURCE=PS2_START");
     return true;
   }
   if (replayActive_ && mode_ != MapControllerMode::REPLAY_HOLD) {
@@ -951,6 +944,10 @@ bool MapController::requestReturnToP0(ReturnP0Source source,
 bool MapController::requestReturnToP0Internal(ReturnP0Source source,
                                               const char*& reason) {
   reason = nullptr;
+  if (returnP0InProgress()) {
+    reason = "RETURN_P0_ACTIVE";
+    return false;
+  }
   returnP0State_ = ReturnP0State::VALIDATE_HOME;
   if (source == ReturnP0Source::NONE) {
     reason = "SOURCE";
@@ -1184,6 +1181,16 @@ void MapController::handleSquare(bool longPress) {
 void MapController::handleCross() {
   if (mode_ == MapControllerMode::TEACHING) {
     cancelTeach();
+  } else if (homeContext_.valid && !backP0UiDismissed_ &&
+             returnP0State_ != ReturnP0State::COMPLETE &&
+             !returnP0InProgress()) {
+    const char* backReason = nullptr;
+    if (backReadyP0Available(backReason)) {
+      backP0UiDismissed_ = true;
+      invalidatePostTeachBack("DISMISS");
+      debug_.println("MAP,RETURN_P0,DISMISS");
+      statusDirty_ = true;
+    }
   } else if (postTeachBack_.valid && !postTeachBackActive_) {
     debug_.println("MAP,BACK_P0,DISMISS");
     invalidatePostTeachBack("DISMISS");
@@ -1233,6 +1240,18 @@ void MapController::handleCrossLong() {
   if (mode_ == MapControllerMode::SETTINGS ||
       mode_ == MapControllerMode::DELETE_CONFIRM) {
     cancelSettings();
+    return;
+  }
+  if (homeContext_.valid && !backP0UiDismissed_ &&
+      returnP0State_ != ReturnP0State::COMPLETE &&
+      !returnP0InProgress()) {
+    const char* backReason = nullptr;
+    if (backReadyP0Available(backReason)) {
+      backP0UiDismissed_ = true;
+      invalidatePostTeachBack("DISMISS_LONG");
+      debug_.println("MAP,RETURN_P0,DISMISS_LONG");
+      statusDirty_ = true;
+    }
     return;
   }
   if (postTeachBack_.valid && !postTeachBackActive_) {
@@ -1418,6 +1437,9 @@ void MapController::armHomeContextAfterSave() {
   homeContext_.odometryResetGeneration = pendingHomeResetGeneration_;
   homeContext_.headingResetGeneration = pendingHomeHeadingResetGeneration_;
   homeContext_.p0WorldPose = pendingHomeOrigin_;
+  backP0UiDismissed_ = false;
+  returnP0State_ = ReturnP0State::IDLE;
+  returnP0Source_ = ReturnP0Source::NONE;
   pendingHomeContextValid_ = false;
   debug_.print("MAP,HOME,ARM,SLOT=");
   debug_.print(static_cast<unsigned>(homeContext_.slot));
@@ -1542,6 +1564,86 @@ bool MapController::postTeachBackAvailable(const char*& reason) const {
   if (distanceMm(current.xMm, current.yMm, endpoint.xMm, endpoint.yMm) >
       kReplayPoseHoldToleranceMm) {
     reason = "NOT_AT_ENDPOINT";
+    return false;
+  }
+  reason = "OK";
+  return true;
+}
+
+bool MapController::backReadyP0Available(const char*& reason) const {
+  reason = nullptr;
+  if (!display_.isMapPage()) {
+    reason = "NOT_MAP_PAGE";
+    return false;
+  }
+  if (!homeContext_.valid) {
+    reason = "HOME_CONTEXT_INVALID";
+    return false;
+  }
+  if (backP0UiDismissed_) {
+    reason = "DISMISSED";
+    return false;
+  }
+  if (returnP0InProgress()) {
+    reason = "RETURN_P0_ACTIVE";
+    return false;
+  }
+  if (returnP0State_ == ReturnP0State::COMPLETE) {
+    reason = "RETURN_P0_COMPLETE";
+    return false;
+  }
+  if (mode_ != MapControllerMode::SAVED || !loadedValid_ ||
+      storeState_ != MapStoreState::SAVED) {
+    reason = "STATE";
+    return false;
+  }
+  if (selectedSlot_ != homeContext_.slot) {
+    reason = "SLOT_CHANGED";
+    return false;
+  }
+  if (route_.header.generation != homeContext_.routeGeneration) {
+    reason = "ROUTE_CHANGED";
+    return false;
+  }
+  if (route_.header.waypointCount < 2U ||
+      (route_.waypoints[0].flags & MAP_WP_START) == 0U) {
+    reason = "ROUTE_POINTS";
+    return false;
+  }
+  if (odometry_.resetGeneration() != homeContext_.odometryResetGeneration) {
+    reason = "RESET_BOUNDARY";
+    return false;
+  }
+  if (robot_.headingResetGeneration() != homeContext_.headingResetGeneration) {
+    reason = "HEADING_RESET_BOUNDARY";
+    return false;
+  }
+  if (!robot_.motorsStopped() || robot_.aiMotionActive() ||
+      robot_.motionOwner() != MotionOwner::NONE) {
+    reason = "MOTION_OWNER";
+    return false;
+  }
+  if (robot_.brakeEnabled()) {
+    reason = "BRAKE";
+    return false;
+  }
+  const uint32_t now = millis();
+  if (!ps2_.state().frameFresh || ps2_.frameTimedOut(now) ||
+      ps2_.motionCommandActive() || ps2_.state().r3) {
+    reason = "PS2_NOT_NEUTRAL";
+    return false;
+  }
+  if (!odometry_.ready() || !odometry_.healthy()) {
+    reason = "ODOMETRY";
+    return false;
+  }
+  if (!fusion_.ready() || fusion_.health() == FusionHealth::NO_SOURCE) {
+    reason = "HEADING";
+    return false;
+  }
+  if (!ultrasonic_.isFresh() || !ultrasonic_.healthy() ||
+      ultrasonic_.overallZone() != ObstacleZone::CLEAR) {
+    reason = "OBSTACLE_SENSOR";
     return false;
   }
   reason = "OK";
@@ -4567,6 +4669,10 @@ void MapController::serviceStorage() {
 }
 
 void MapController::publishStatus() {
+  const char* backReadyReason = nullptr;
+  const bool backReady = backReadyP0Available(backReadyReason);
+  const bool returnActive = returnP0InProgress();
+  const bool returnComplete = returnP0State_ == ReturnP0State::COMPLETE;
   MapSlotMetadata metadata = store_.metadata(selectedSlot_);
   if (storeState_ == MapStoreState::STORAGE_ERROR) {
     metadata.state = MapStoreState::STORAGE_ERROR;
@@ -4611,8 +4717,8 @@ void MapController::publishStatus() {
       static_cast<uint8_t>(settingsItem_), displaySpeed, displayLoopTarget,
       helpPage_, static_cast<uint8_t>(storageErrorReason_), loadedValid_,
       static_cast<uint8_t>(displayUserMode), replayCycleCounter_,
-      postTeachBack_.valid && !postTeachBackActive_, postTeachBackActive_,
-      postTeachBackComplete_);
+      backReady, postTeachBackActive_ || returnActive,
+      postTeachBackComplete_ || returnComplete);
   const uint32_t now = millis();
   if (replayActive_ && replayOperation_ == MapReplayOperation::MOVE &&
       robot_.guidedWaypointActive() &&

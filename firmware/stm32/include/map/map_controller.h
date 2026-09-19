@@ -165,6 +165,7 @@ class MapController {
   bool postTeachBackRejectShouldInvalidate(const char* reason) const;
   bool postTeachBackAvailable(const char*& reason) const;
   bool startPostTeachBack(const char*& reason);
+  bool backReadyP0Available(const char*& reason) const;
   void armHomeContextAfterSave();
   void invalidateHomeContext(const char* reason);
   bool locateRouteProjection(RouteProjection& projection,
@@ -322,6 +323,7 @@ class MapController {
   bool postTeachBackActive_ = false;
   bool postTeachBackComplete_ = false;
   HomeContext homeContext_{};
+  bool backP0UiDismissed_ = false;
   Pose pendingHomeOrigin_{};
   uint32_t pendingHomeResetGeneration_ = 0U;
   uint32_t pendingHomeHeadingResetGeneration_ = 0U;
