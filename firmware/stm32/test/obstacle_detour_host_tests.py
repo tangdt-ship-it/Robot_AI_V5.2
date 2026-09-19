@@ -533,7 +533,10 @@ class ObstacleDetourHostTests(unittest.TestCase):
 
     def _phase3_source(self):
         start = MAP.index("bool MapController::obstacleDetourContextActive")
-        end = MAP.index("MapController::Pose MapController::routePointWorld", start)
+        # Return-to-P0 is a separate owner/state machine inserted after the
+        # obstacle detour implementation; do not include it in the Phase 3
+        # route-mutation contract slice.
+        end = MAP.index("bool MapController::returnP0InProgress", start)
         return MAP[start:end]
 
     def _finish(self, model):

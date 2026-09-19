@@ -35,6 +35,8 @@ class MapController {
   // Unified MAP mission entry. Phase 1 exposes the AI initiator for host
   // tests/future integration only; main.cpp and RobotLink do not call it yet.
   bool requestStart(MapMissionInitiator initiator);
+  // Phase 2 core API only. PS2/voice integration is intentionally deferred.
+  bool requestReturnToP0(ReturnP0Source source, const char*& reason);
   // Called at the existing RobotLink STOP boundary after the electrical stop
   // has been consumed. It never starts motion or changes the wire protocol.
   void notifyExternalStop();
@@ -49,6 +51,8 @@ class MapController {
   MapSlot selectedSlot() const { return selectedSlot_; }
   MapReplayMode replayMode() const { return routeMode_; }
   MapUserMode userMode() const { return userMode_; }
+  ReturnP0State returnP0State() const { return returnP0State_; }
+  bool homeContextValid() const { return homeContext_.valid; }
 
  private:
   enum class ReplayResumeSource : uint8_t { PS2_START, AI_AUTO };
@@ -99,6 +103,25 @@ class MapController {
     Pose teachOrigin{};
   };
 
+  struct HomeContext {
+    bool valid = false;
+    MapSlot slot = MapSlot::MAP_1;
+    uint32_t routeGeneration = 0U;
+    uint32_t odometryResetGeneration = 0U;
+    uint32_t headingResetGeneration = 0U;
+    Pose p0WorldPose{};
+  };
+
+  struct RouteProjection {
+    bool valid = false;
+    uint16_t segmentStartIndex = 0U;
+    uint16_t segmentEndIndex = 0U;
+    float t = 0.0f;
+    Pose projectedPose{};
+    float crossTrackMm = 0.0f;
+    float distanceMm = 0.0f;
+  };
+
   void handleEvent(const Ps2MapEvent& event);
   void handleStart();
   void handleTriangle();
@@ -142,6 +165,22 @@ class MapController {
   bool postTeachBackRejectShouldInvalidate(const char* reason) const;
   bool postTeachBackAvailable(const char*& reason) const;
   bool startPostTeachBack(const char*& reason);
+  void armHomeContextAfterSave();
+  void invalidateHomeContext(const char* reason);
+  bool locateRouteProjection(RouteProjection& projection,
+                             const char*& reason) const;
+  bool requestReturnToP0Internal(ReturnP0Source source, const char*& reason);
+  void updateReturnToP0();
+  bool startReturnReacquire();
+  bool startReturnWaypoint();
+  bool startReturnP0Position();
+  bool startReturnP0Heading();
+  bool consumeReturnTurnResult(const AiTurnResult& result);
+  bool consumeReturnDistanceResult(const AiDistanceResult& result);
+  void abortReturnToP0(const char* reason);
+  void completeReturnToP0();
+  bool returnP0InProgress() const;
+  static const char* returnP0StateName(ReturnP0State state);
   bool validateRoute(const MapRouteData& route, const char*& reason) const;
   bool hasValidClosingEdge(const MapRouteData& route,
                            const char*& reason) const;
@@ -282,6 +321,11 @@ class MapController {
   PostTeachBackContext postTeachBack_{};
   bool postTeachBackActive_ = false;
   bool postTeachBackComplete_ = false;
+  HomeContext homeContext_{};
+  Pose pendingHomeOrigin_{};
+  uint32_t pendingHomeResetGeneration_ = 0U;
+  uint32_t pendingHomeHeadingResetGeneration_ = 0U;
+  bool pendingHomeContextValid_ = false;
   Pose lastTeachSample_{};
   bool teachOriginValid_ = false;
   bool lastTeachSampleValid_ = false;
@@ -349,6 +393,18 @@ class MapController {
   int8_t obstacleDetourOriginalDirection_ = 1;
   uint32_t obstacleDetourOriginalRouteGeneration_ = 0U;
   uint32_t obstacleDetourOriginalReplayGeneration_ = 0U;
+  ReturnP0State returnP0State_ = ReturnP0State::IDLE;
+  ReturnP0Source returnP0Source_ = ReturnP0Source::NONE;
+  uint32_t returnP0Generation_ = 0U;
+  uint32_t returnP0SegmentGeneration_ = 0U;
+  uint16_t returnP0TargetIndex_ = 0U;
+  uint16_t returnP0SegmentStartIndex_ = 0U;
+  uint8_t returnP0ReacquireAttempts_ = 0U;
+  uint8_t returnP0PositionCorrectionAttempts_ = 0U;
+  uint8_t returnP0HeadingAttempts_ = 0U;
+  bool returnP0TurnPending_ = false;
+  uint32_t returnP0SettleSinceMs_ = 0U;
+  RouteProjection returnP0Projection_{};
   uint32_t closeCandidateDistanceMm_ = 0U;
   int16_t closeCandidateHeadingDeg_ = 0;
   bool cancelTraceActive_ = false;

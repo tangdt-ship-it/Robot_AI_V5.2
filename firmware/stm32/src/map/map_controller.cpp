@@ -105,6 +105,16 @@ const char* MissionInitiatorName(MapMissionInitiator initiator) {
   }
   return "NONE";
 }
+
+const char* ReturnP0SourceName(ReturnP0Source source) {
+  switch (source) {
+    case ReturnP0Source::PS2_START: return "PS2_START";
+    case ReturnP0Source::AI_VOICE: return "AI_VOICE";
+    case ReturnP0Source::INTERNAL: return "INTERNAL";
+    case ReturnP0Source::NONE: return "NONE";
+  }
+  return "NONE";
+}
 }  // namespace
 
 MapController::MapController(RobotController& robot, Ps2Controller& ps2,
@@ -209,6 +219,15 @@ void MapController::applyStoredSettings(MapRouteType type, MapReplayMode mode,
 
 void MapController::begin() {
   ps2_.setMapUiCapture(false);
+  homeContext_ = {};
+  pendingHomeOrigin_ = {};
+  pendingHomeResetGeneration_ = 0U;
+  pendingHomeHeadingResetGeneration_ = 0U;
+  pendingHomeContextValid_ = false;
+  returnP0State_ = ReturnP0State::IDLE;
+  returnP0Source_ = ReturnP0Source::NONE;
+  returnP0Generation_ = 0U;
+  returnP0SegmentGeneration_ = 0U;
   if (!store_.begin()) {
     storeState_ = MapStoreState::STORAGE_ERROR;
     storageErrorReason_ = MapStorageErrorReason::STORAGE_INIT;
@@ -248,7 +267,9 @@ void MapController::notifyExternalStop() {
   // autonomous resume off and never creates a new motion command.
   inhibitAutonomousResume("EXTERNAL_STOP");
   debug_.println("MAP,STOP,EXTERNAL,LATCH=1");
-  if (obstacleDetourContextActive()) {
+  if (returnP0InProgress()) {
+    abortReturnToP0("EXTERNAL_STOP");
+  } else if (obstacleDetourContextActive()) {
     abortObstacleDetour("EXTERNAL_STOP");
   } else if (replayActive_ && mode_ != MapControllerMode::REPLAY_HOLD) {
     enterReplayHold(MapHoldReason::EXTERNAL_STOP, false);
@@ -257,6 +278,21 @@ void MapController::notifyExternalStop() {
 
 void MapController::update() {
   processInput();
+
+  if (homeContext_.valid) {
+    if (storageErrorReason_ != MapStorageErrorReason::NONE) {
+      invalidateHomeContext("STORAGE_ERROR");
+    } else if (selectedSlot_ != homeContext_.slot ||
+               (loadedValid_ &&
+                route_.header.generation != homeContext_.routeGeneration)) {
+      invalidateHomeContext("ROUTE_GENERATION");
+    } else if (odometry_.resetGeneration() !=
+                   homeContext_.odometryResetGeneration ||
+               robot_.headingResetGeneration() !=
+                   homeContext_.headingResetGeneration) {
+      invalidateHomeContext("RESET_BOUNDARY");
+    }
+  }
 
   // A PS2 reconnect resets its transient parser state. Reassert the explicit
   // UI capture while Settings/Help/Delete is still active so a reconnect can
@@ -303,7 +339,27 @@ void MapController::update() {
   }
 
   if (replayActive_) {
-    if (odometry_.resetGeneration() != replayOriginResetGeneration_ ||
+    if (returnP0InProgress()) {
+      if (!homeContext_.valid || selectedSlot_ != homeContext_.slot ||
+          route_.header.generation != homeContext_.routeGeneration ||
+          odometry_.resetGeneration() != homeContext_.odometryResetGeneration ||
+          robot_.headingResetGeneration() !=
+              homeContext_.headingResetGeneration) {
+        invalidateHomeContext("RESET_BOUNDARY");
+        abortReturnToP0("RESET_BOUNDARY");
+      } else if (ps2_.state().r3 || ps2_.motionCommandActive()) {
+        abortReturnToP0(ps2_.state().r3 ? "R3" : "PS2_TAKEOVER");
+      } else if (returnP0State_ == ReturnP0State::HOLD) {
+        // Return obstacle HOLD is intentionally non-resumable in Phase 2.
+        // Phase 3 may add an explicit caller using the same state machine.
+      } else if (robot_.motionOwner() != MotionOwner::REPLAY &&
+                 !robot_.aiMotionActive() &&
+                 replayOperation_ != MapReplayOperation::NONE) {
+        abortReturnToP0("EXTERNAL_STOP");
+      } else {
+        updateReturnToP0();
+      }
+    } else if (odometry_.resetGeneration() != replayOriginResetGeneration_ ||
         robot_.headingResetGeneration() != replayOriginHeadingResetGeneration_ ||
         route_.header.generation != replayOriginRouteGeneration_) {
       // This is intentionally diagnostic-only. The three origin snapshots
@@ -408,6 +464,7 @@ void MapController::handleSlot(uint8_t slot) {
     return;
   }
   invalidatePostTeachBack("SLOT_CHANGED");
+  invalidateHomeContext("SLOT_CHANGED");
   selectedSlot_ = slot == 2U ? MapSlot::MAP_2 : MapSlot::MAP_1;
   loadedValid_ = false;
   const MapSlotMetadata metadata = store_.metadata(selectedSlot_);
@@ -886,6 +943,151 @@ bool MapController::requestStart(MapMissionInitiator initiator) {
   return started;
 }
 
+bool MapController::requestReturnToP0(ReturnP0Source source,
+                                       const char*& reason) {
+  return requestReturnToP0Internal(source, reason);
+}
+
+bool MapController::requestReturnToP0Internal(ReturnP0Source source,
+                                              const char*& reason) {
+  reason = nullptr;
+  returnP0State_ = ReturnP0State::VALIDATE_HOME;
+  if (source == ReturnP0Source::NONE) {
+    reason = "SOURCE";
+    returnP0State_ = ReturnP0State::ABORTED;
+    return false;
+  }
+  if (!homeContext_.valid) {
+    reason = "HOME_CONTEXT_INVALID";
+    robot_.stopImmediately(true);
+    returnP0State_ = ReturnP0State::ABORTED;
+    debug_.println("MAP,RETURN_P0,ABORT,REASON=HOME_CONTEXT_INVALID");
+    return false;
+  }
+  if (selectedSlot_ != homeContext_.slot) {
+    reason = "SLOT_CHANGED";
+    robot_.stopImmediately(true);
+    invalidateHomeContext(reason);
+    returnP0State_ = ReturnP0State::ABORTED;
+    return false;
+  }
+  if (odometry_.resetGeneration() != homeContext_.odometryResetGeneration) {
+    reason = "RESET_BOUNDARY";
+    robot_.stopImmediately(true);
+    invalidateHomeContext(reason);
+    returnP0State_ = ReturnP0State::ABORTED;
+    return false;
+  }
+  if (robot_.headingResetGeneration() != homeContext_.headingResetGeneration) {
+    reason = "RESET_BOUNDARY";
+    robot_.stopImmediately(true);
+    invalidateHomeContext(reason);
+    returnP0State_ = ReturnP0State::ABORTED;
+    return false;
+  }
+  if (!loadedValid_ && !loadSelected()) {
+    reason = "ROUTE_INVALID";
+    robot_.stopImmediately(true);
+    returnP0State_ = ReturnP0State::ABORTED;
+    return false;
+  }
+  if (route_.header.generation != homeContext_.routeGeneration) {
+    reason = "ROUTE_CHANGED";
+    robot_.stopImmediately(true);
+    invalidateHomeContext(reason);
+    returnP0State_ = ReturnP0State::ABORTED;
+    return false;
+  }
+  if (robot_.motionOwner() != MotionOwner::NONE &&
+      robot_.motionOwner() != MotionOwner::REPLAY) {
+    reason = "MOTION_OWNER";
+    robot_.stopImmediately(true);
+    returnP0State_ = ReturnP0State::ABORTED;
+    return false;
+  }
+  if (robot_.motionOwner() == MotionOwner::REPLAY || replayActive_ ||
+      mode_ == MapControllerMode::REPLAY_HOLD) {
+    robot_.stopImmediately(true);
+  } else if (!robot_.motorsStopped() || robot_.aiMotionActive()) {
+    reason = "MOTION_OWNER";
+    robot_.stopImmediately(true);
+    returnP0State_ = ReturnP0State::ABORTED;
+    return false;
+  }
+
+  returnP0State_ = ReturnP0State::LOCATE_ON_ROUTE;
+  RouteProjection projection;
+  if (!locateRouteProjection(projection, reason)) {
+    robot_.stopImmediately(true);
+    returnP0State_ = ReturnP0State::ABORTED;
+    debug_.print("MAP,RETURN_P0,ABORT,REASON=");
+    debug_.println(reason != nullptr ? reason : "LOCATE");
+    return false;
+  }
+
+  // A universal Return request owns the local MAP replay channel from this
+  // point. The saved route and HomeContext remain untouched; only the old
+  // operation/generation is invalidated.
+  invalidatePostTeachBack("RETURN_P0");
+  nextReplayGeneration();
+  returnP0Generation_ = replayGeneration_;
+  returnP0SegmentGeneration_ = 0U;
+  returnP0Source_ = source;
+  returnP0Projection_ = projection;
+  returnP0TargetIndex_ = projection.segmentStartIndex;
+  returnP0SegmentStartIndex_ = projection.segmentStartIndex;
+  returnP0ReacquireAttempts_ = 0U;
+  returnP0PositionCorrectionAttempts_ = 0U;
+  returnP0HeadingAttempts_ = 0U;
+  returnP0TurnPending_ = false;
+  returnP0SettleSinceMs_ = 0U;
+  replayOrigin_ = homeContext_.p0WorldPose;
+  replayOriginValid_ = true;
+  replayContextSlot_ = homeContext_.slot;
+  replayOriginRouteGeneration_ = homeContext_.routeGeneration;
+  replayOriginResetGeneration_ = homeContext_.odometryResetGeneration;
+  replayOriginHeadingResetGeneration_ = homeContext_.headingResetGeneration;
+  replayCurrentIndex_ = projection.segmentEndIndex;
+  replayTargetIndex_ = returnP0TargetIndex_;
+  replayDirection_ = -1;
+  replayOperation_ = MapReplayOperation::NONE;
+  replayResumeAllowed_ = false;
+  replayHoldPoseValid_ = false;
+  holdReason_ = MapHoldReason::NONE;
+  replayReason_ = "RETURN_P0";
+  replayActive_ = true;
+  mode_ = MapControllerMode::REPLAY_CHECKED;
+  statusDirty_ = true;
+  debug_.print("MAP,RETURN_P0,REQUEST,SOURCE=");
+  debug_.print(ReturnP0SourceName(source));
+  debug_.print(",GEN=");
+  debug_.print(returnP0Generation_);
+  debug_.print(",SEG=");
+  debug_.print(static_cast<unsigned>(projection.segmentStartIndex));
+  debug_.print(",T=");
+  debug_.print(projection.t, 3);
+  debug_.print(",XT=");
+  debug_.println(projection.crossTrackMm, 1);
+
+  if (projection.crossTrackMm >
+      static_cast<float>(MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM)) {
+    returnP0State_ = ReturnP0State::REACQUIRE_ROUTE;
+    if (!startReturnReacquire()) {
+      reason = "REACQUIRE_START";
+      abortReturnToP0(reason);
+      return false;
+    }
+  } else {
+    returnP0State_ = ReturnP0State::RETURN_WAYPOINT;
+    if (!startReturnWaypoint()) {
+      reason = "RETURN_START";
+      abortReturnToP0(reason);
+      return false;
+    }
+  }
+  return true;
+}
+
 void MapController::handleTriangle() {
   if (storageErrorReason_ != MapStorageErrorReason::NONE) {
     debug_.print("MAP,TEACH,REJECT,REASON=");
@@ -1007,6 +1209,11 @@ void MapController::handleCross() {
     if (obstacleDetourInProgress()) {
       abortObstacleDetour("USER_STOP");
     } else if (!obstacleDetourContextActive()) {
+      if (returnP0InProgress()) {
+        // Return-to-P0 has no implicit resume contract in Phase 2. Preserve
+        // Home, but make a manual stop a non-resumable hold.
+        returnP0State_ = ReturnP0State::HOLD;
+      }
       enterReplayHold(MapHoldReason::USER, true);
     }
   } else if (mode_ == MapControllerMode::REPLAY_HOLD) {
@@ -1039,6 +1246,10 @@ void MapController::handleCrossLong() {
     abortObstacleDetour("X_LONG");
     return;
   }
+  if (returnP0InProgress()) {
+    cancelReplay("X_LONG");
+    return;
+  }
   if (replayActive_) {
     // Be robust if the short event was delayed behind another input: safety
     // still stops first, then the same physical press escalates to CANCEL.
@@ -1052,6 +1263,7 @@ void MapController::handleCrossLong() {
 bool MapController::loadSelected() {
   invalidatePostTeachBack("ROUTE_LOAD");
   if (!store_.load(selectedSlot_, route_)) {
+    invalidateHomeContext("STORAGE_INVALID");
     loadedValid_ = false;
     storeState_ = MapStoreState::INVALID;
     mode_ = MapControllerMode::READY;
@@ -1059,12 +1271,18 @@ bool MapController::loadSelected() {
   }
   const char* reason = nullptr;
   if (!validateRoute(route_, reason)) {
+    invalidateHomeContext("STORAGE_INVALID");
     loadedValid_ = false;
     storeState_ = MapStoreState::INVALID;
     mode_ = MapControllerMode::READY;
     return false;
   }
   loadedValid_ = true;
+  if (homeContext_.valid &&
+      (homeContext_.slot != selectedSlot_ ||
+       homeContext_.routeGeneration != route_.header.generation)) {
+    invalidateHomeContext("ROUTE_GENERATION");
+  }
   storeState_ = MapStoreState::SAVED;
   const MapRouteType storedType =
       static_cast<MapRouteType>(route_.header.routeType);
@@ -1098,6 +1316,7 @@ bool MapController::beginTeach() {
     return false;
   }
   invalidatePostTeachBack("NEW_TEACH");
+  invalidateHomeContext("NEW_TEACH");
   teachOldRouteAvailable_ = storeState_ == MapStoreState::SAVED &&
                             (loadedValid_ ||
                              store_.metadata(selectedSlot_).state ==
@@ -1108,6 +1327,10 @@ bool MapController::beginTeach() {
   teachOriginValid_ = true;
   teachOriginResetGeneration_ = odometry_.resetGeneration();
   teachOriginHeadingResetGeneration_ = robot_.headingResetGeneration();
+  pendingHomeOrigin_ = origin;
+  pendingHomeResetGeneration_ = teachOriginResetGeneration_;
+  pendingHomeHeadingResetGeneration_ = teachOriginHeadingResetGeneration_;
+  pendingHomeContextValid_ = true;
   teachMode_ = MapTeachMode::MANUAL_KEYFRAME;
   route_ = {};
   route_.header.waypointCount = 0U;
@@ -1139,6 +1362,7 @@ void MapController::cancelTeach() {
   route_ = {};
   teachOriginValid_ = false;
   pendingTeachBackValid_ = false;
+  pendingHomeContextValid_ = false;
   teachFinishPending_ = false;
   teachOldRouteAvailable_ = false;
   mode_ = storeState_ == MapStoreState::SAVED ? MapControllerMode::SAVED
@@ -1179,6 +1403,45 @@ void MapController::armPostTeachBackAfterSave() {
   debug_.print(",GEN=");
   debug_.println(postTeachBack_.routeGeneration);
   statusDirty_ = true;
+}
+
+void MapController::armHomeContextAfterSave() {
+  if (!pendingHomeContextValid_ || route_.header.waypointCount < 2U ||
+      route_.header.generation == 0U) {
+    pendingHomeContextValid_ = false;
+    return;
+  }
+  homeContext_ = {};
+  homeContext_.valid = true;
+  homeContext_.slot = selectedSlot_;
+  homeContext_.routeGeneration = route_.header.generation;
+  homeContext_.odometryResetGeneration = pendingHomeResetGeneration_;
+  homeContext_.headingResetGeneration = pendingHomeHeadingResetGeneration_;
+  homeContext_.p0WorldPose = pendingHomeOrigin_;
+  pendingHomeContextValid_ = false;
+  debug_.print("MAP,HOME,ARM,SLOT=");
+  debug_.print(static_cast<unsigned>(homeContext_.slot));
+  debug_.print(",GEN=");
+  debug_.print(homeContext_.routeGeneration);
+  debug_.print(",X=");
+  debug_.print(homeContext_.p0WorldPose.xMm, 1);
+  debug_.print(",Y=");
+  debug_.print(homeContext_.p0WorldPose.yMm, 1);
+  debug_.print(",H=");
+  debug_.println(homeContext_.p0WorldPose.headingDeg, 1);
+}
+
+void MapController::invalidateHomeContext(const char* reason) {
+  const bool hadContext = homeContext_.valid || pendingHomeContextValid_;
+  homeContext_ = {};
+  pendingHomeOrigin_ = {};
+  pendingHomeResetGeneration_ = 0U;
+  pendingHomeHeadingResetGeneration_ = 0U;
+  pendingHomeContextValid_ = false;
+  if (hadContext) {
+    debug_.print("MAP,HOME,INVALIDATE,REASON=");
+    debug_.println(reason != nullptr ? reason : "UNKNOWN");
+  }
 }
 
 void MapController::invalidatePostTeachBack(const char* reason) {
@@ -2491,6 +2754,594 @@ void MapController::abortObstacleDetour(const char* reason) {
   statusDirty_ = true;
 }
 
+bool MapController::returnP0InProgress() const {
+  return returnP0State_ != ReturnP0State::IDLE &&
+         returnP0State_ != ReturnP0State::COMPLETE &&
+         returnP0State_ != ReturnP0State::ABORTED;
+}
+
+const char* MapController::returnP0StateName(ReturnP0State state) {
+  switch (state) {
+    case ReturnP0State::IDLE: return "IDLE";
+    case ReturnP0State::VALIDATE_HOME: return "VALIDATE_HOME";
+    case ReturnP0State::LOCATE_ON_ROUTE: return "LOCATE_ON_ROUTE";
+    case ReturnP0State::REACQUIRE_ROUTE: return "REACQUIRE_ROUTE";
+    case ReturnP0State::RETURN_WAYPOINT: return "RETURN_WAYPOINT";
+    case ReturnP0State::P0_POSITION_APPROACH: return "P0_POSITION_APPROACH";
+    case ReturnP0State::P0_POSITION_SETTLE: return "P0_POSITION_SETTLE";
+    case ReturnP0State::P0_HEADING_RESTORE: return "P0_HEADING_RESTORE";
+    case ReturnP0State::P0_HEADING_SETTLE: return "P0_HEADING_SETTLE";
+    case ReturnP0State::HOLD: return "HOLD";
+    case ReturnP0State::COMPLETE: return "COMPLETE";
+    case ReturnP0State::ABORTED: return "ABORTED";
+  }
+  return "ABORTED";
+}
+
+bool MapController::locateRouteProjection(RouteProjection& projection,
+                                           const char*& reason) const {
+  projection = {};
+  reason = nullptr;
+  if (!homeContext_.valid) {
+    reason = "HOME_CONTEXT_INVALID";
+    return false;
+  }
+  if (!loadedValid_ || route_.header.waypointCount < 2U ||
+      route_.header.generation != homeContext_.routeGeneration) {
+    reason = "ROUTE_CHANGED";
+    return false;
+  }
+  Pose current;
+  if (!readPose(current)) {
+    reason = "POSE";
+    return false;
+  }
+
+  float bestDistance = 1.0e30f;
+  uint16_t bestSegment = 0U;
+  bool found = false;
+  const uint16_t count = route_.header.waypointCount;
+  for (uint16_t index = 0U; index + 1U < count; ++index) {
+    const Pose start = routePointWorldFromOrigin(homeContext_.p0WorldPose,
+                                                 index);
+    const Pose end = routePointWorldFromOrigin(homeContext_.p0WorldPose,
+                                               index + 1U);
+    const float dx = end.xMm - start.xMm;
+    const float dy = end.yMm - start.yMm;
+    const float lengthSquared = dx * dx + dy * dy;
+    if (lengthSquared <= 1.0e-3f) continue;
+    float t = ((current.xMm - start.xMm) * dx +
+               (current.yMm - start.yMm) * dy) /
+              lengthSquared;
+    t = constrain(t, 0.0f, 1.0f);
+    const float projectedX = start.xMm + t * dx;
+    const float projectedY = start.yMm + t * dy;
+    const float distance = distanceMm(current.xMm, current.yMm, projectedX,
+                                      projectedY);
+    // At a shared adjacent corner, prefer the earlier segment. This makes
+    // P1/P2 resolve to their predecessor while non-adjacent crossings are
+    // handled by the explicit ambiguity gate below.
+    if (!found || distance < bestDistance - 0.001f ||
+        (fabsf(distance - bestDistance) <= 0.001f && index < bestSegment)) {
+      bestDistance = distance;
+      bestSegment = index;
+      found = true;
+    }
+  }
+  if (!found) {
+    reason = "DEGENERATE_ROUTE";
+    return false;
+  }
+  for (uint16_t index = 0U; index + 1U < count; ++index) {
+    if (index == bestSegment ||
+        (index > bestSegment ? index - bestSegment : bestSegment - index) <=
+            1U) {
+      continue;
+    }
+    const Pose start = routePointWorldFromOrigin(homeContext_.p0WorldPose,
+                                                 index);
+    const Pose end = routePointWorldFromOrigin(homeContext_.p0WorldPose,
+                                               index + 1U);
+    const float dx = end.xMm - start.xMm;
+    const float dy = end.yMm - start.yMm;
+    const float lengthSquared = dx * dx + dy * dy;
+    if (lengthSquared <= 1.0e-3f) continue;
+    float t = ((current.xMm - start.xMm) * dx +
+               (current.yMm - start.yMm) * dy) /
+              lengthSquared;
+    t = constrain(t, 0.0f, 1.0f);
+    const float projectedX = start.xMm + t * dx;
+    const float projectedY = start.yMm + t * dy;
+    const float distance = distanceMm(current.xMm, current.yMm, projectedX,
+                                      projectedY);
+    if (distance <= bestDistance + MAP_RETURN_P0_AMBIGUITY_MARGIN_MM) {
+      reason = "AMBIGUOUS_SEGMENT";
+      return false;
+    }
+  }
+  if (bestDistance > MAP_RETURN_P0_MAX_CROSSTRACK_MM) {
+    reason = "OFF_ROUTE";
+    return false;
+  }
+  const Pose bestStart = routePointWorldFromOrigin(homeContext_.p0WorldPose,
+                                                   bestSegment);
+  const Pose bestEnd = routePointWorldFromOrigin(homeContext_.p0WorldPose,
+                                                 bestSegment + 1U);
+  const float dx = bestEnd.xMm - bestStart.xMm;
+  const float dy = bestEnd.yMm - bestStart.yMm;
+  const float lengthSquared = dx * dx + dy * dy;
+  float t = ((current.xMm - bestStart.xMm) * dx +
+             (current.yMm - bestStart.yMm) * dy) /
+            lengthSquared;
+  t = constrain(t, 0.0f, 1.0f);
+  projection.valid = true;
+  projection.segmentStartIndex = bestSegment;
+  projection.segmentEndIndex = bestSegment + 1U;
+  projection.t = t;
+  projection.projectedPose.xMm = bestStart.xMm + t * dx;
+  projection.projectedPose.yMm = bestStart.yMm + t * dy;
+  projection.projectedPose.headingDeg =
+      atan2f(dy, dx) * kRadToDeg;
+  projection.crossTrackMm = bestDistance;
+  projection.distanceMm = bestDistance;
+  reason = "OK";
+  return true;
+}
+
+bool MapController::startReturnReacquire() {
+  if (!returnP0Projection_.valid || !returnP0InProgress()) return false;
+  if (returnP0ReacquireAttempts_ >= MAP_RETURN_P0_MAX_REACQUIRE_ATTEMPTS) {
+    return false;
+  }
+  Pose current;
+  if (!readPose(current)) return false;
+  const Pose target = returnP0Projection_.projectedPose;
+  const float targetDistance = distanceMm(current.xMm, current.yMm,
+                                          target.xMm, target.yMm);
+  if (targetDistance <=
+      static_cast<float>(MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM)) {
+    returnP0State_ = ReturnP0State::RETURN_WAYPOINT;
+    return startReturnWaypoint();
+  }
+  ++returnP0ReacquireAttempts_;
+  const Pose segmentStart = returnP0Projection_.t <= 0.01f
+                                ? routePointWorldFromOrigin(
+                                      homeContext_.p0WorldPose,
+                                      returnP0Projection_.segmentEndIndex)
+                                : routePointWorldFromOrigin(
+                                      homeContext_.p0WorldPose,
+                                      returnP0Projection_.segmentStartIndex);
+  const float bearing = atan2f(target.yMm - segmentStart.yMm,
+                               target.xMm - segmentStart.xMm) * kRadToDeg;
+  const uint32_t generation = nextReplayGeneration();
+  returnP0Generation_ = generation;
+  returnP0SegmentGeneration_ = generation;
+  replaySegmentGeneration_ = generation;
+  replayOperation_ = MapReplayOperation::MOVE;
+  replayTargetDistanceMm_ = static_cast<uint32_t>(lroundf(targetDistance));
+  replayTravelMm_ = 0U;
+  replayErrorMm_ = replayTargetDistanceMm_;
+  if (!robot_.startReplayGuidedWaypoint(
+          target.xMm, target.yMm, segmentStart.xMm, segmentStart.yMm,
+          replaySpeed_, bearing,
+          MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM, generation)) {
+    replayOperation_ = MapReplayOperation::NONE;
+    replaySegmentGeneration_ = 0U;
+    returnP0SegmentGeneration_ = 0U;
+    return false;
+  }
+  debug_.print("MAP,RETURN_P0,REACQUIRE,SEG=");
+  debug_.print(static_cast<unsigned>(returnP0Projection_.segmentStartIndex));
+  debug_.print(",T=");
+  debug_.print(returnP0Projection_.t, 3);
+  debug_.print(",XT=");
+  debug_.print(returnP0Projection_.crossTrackMm, 1);
+  debug_.print(",ATTEMPT=");
+  debug_.println(static_cast<unsigned>(returnP0ReacquireAttempts_));
+  return true;
+}
+
+bool MapController::startReturnWaypoint() {
+  if (!returnP0InProgress()) return false;
+  if (returnP0TargetIndex_ == 0U) return startReturnP0Position();
+  if (returnP0TargetIndex_ + 1U >= route_.header.waypointCount) {
+    return false;
+  }
+  Pose current;
+  if (!readPose(current)) return false;
+  const Pose target = routePointWorldFromOrigin(homeContext_.p0WorldPose,
+                                                returnP0TargetIndex_);
+  const float targetDistance = distanceMm(current.xMm, current.yMm,
+                                          target.xMm, target.yMm);
+  if (targetDistance <=
+      static_cast<float>(MAP_GUIDE_BACK_ARRIVAL_POSITION_TOLERANCE_MM)) {
+    replayCurrentIndex_ = returnP0TargetIndex_;
+    --returnP0TargetIndex_;
+    replayTargetIndex_ = returnP0TargetIndex_;
+    return startReturnWaypoint();
+  }
+  const Pose segmentStart = routePointWorldFromOrigin(
+      homeContext_.p0WorldPose, returnP0TargetIndex_ + 1U);
+  const float bearing = atan2f(target.yMm - segmentStart.yMm,
+                               target.xMm - segmentStart.xMm) * kRadToDeg;
+  const uint32_t generation = nextReplayGeneration();
+  returnP0Generation_ = generation;
+  returnP0SegmentGeneration_ = generation;
+  replaySegmentGeneration_ = generation;
+  replayOperation_ = MapReplayOperation::MOVE;
+  replayTargetDistanceMm_ = static_cast<uint32_t>(lroundf(targetDistance));
+  replayTravelMm_ = 0U;
+  replayErrorMm_ = replayTargetDistanceMm_;
+  replayTargetIndex_ = returnP0TargetIndex_;
+  replayCurrentIndex_ = returnP0TargetIndex_ + 1U;
+  if (!robot_.startReplayGuidedWaypoint(
+          target.xMm, target.yMm, segmentStart.xMm, segmentStart.yMm,
+          replaySpeed_, bearing, MAP_GUIDE_BACK_ARRIVAL_POSITION_TOLERANCE_MM,
+          generation)) {
+    replayOperation_ = MapReplayOperation::NONE;
+    replaySegmentGeneration_ = 0U;
+    returnP0SegmentGeneration_ = 0U;
+    return false;
+  }
+  debug_.print("MAP,RETURN_P0,WP=");
+  debug_.print(static_cast<unsigned>(returnP0TargetIndex_));
+  debug_.print(",GEN=");
+  debug_.println(generation);
+  return true;
+}
+
+bool MapController::startReturnP0Position() {
+  if (!returnP0InProgress() || route_.header.waypointCount < 2U) {
+    return false;
+  }
+  Pose current;
+  if (!readPose(current)) return false;
+  const Pose target = homeContext_.p0WorldPose;
+  const float positionError = distanceMm(current.xMm, current.yMm,
+                                         target.xMm, target.yMm);
+  replayTargetIndex_ = 0U;
+  if (positionError <= MAP_RETURN_P0_POSITION_TOLERANCE_MM) {
+    robot_.stopImmediately(true);
+    replayOperation_ = MapReplayOperation::NONE;
+    returnP0State_ = ReturnP0State::P0_POSITION_SETTLE;
+    returnP0SettleSinceMs_ = millis();
+    debug_.print("MAP,RETURN_P0,P0_POSITION,ERR=");
+    debug_.println(positionError, 1);
+    return true;
+  }
+  const Pose segmentStart = routePointWorldFromOrigin(homeContext_.p0WorldPose,
+                                                       1U);
+  const float bearing = atan2f(target.yMm - segmentStart.yMm,
+                               target.xMm - segmentStart.xMm) * kRadToDeg;
+  const uint32_t generation = nextReplayGeneration();
+  returnP0Generation_ = generation;
+  returnP0SegmentGeneration_ = generation;
+  replaySegmentGeneration_ = generation;
+  replayOperation_ = MapReplayOperation::MOVE;
+  replayTargetDistanceMm_ = static_cast<uint32_t>(lroundf(positionError));
+  replayTravelMm_ = 0U;
+  replayErrorMm_ = replayTargetDistanceMm_;
+  returnP0State_ = ReturnP0State::P0_POSITION_APPROACH;
+  if (!robot_.startReplayGuidedWaypoint(
+          target.xMm, target.yMm, segmentStart.xMm, segmentStart.yMm,
+          replaySpeed_, bearing, MAP_RETURN_P0_POSITION_TOLERANCE_MM,
+          generation)) {
+    replayOperation_ = MapReplayOperation::NONE;
+    replaySegmentGeneration_ = 0U;
+    returnP0SegmentGeneration_ = 0U;
+    return false;
+  }
+  debug_.print("MAP,RETURN_P0,P0_POSITION,START,ERR=");
+  debug_.print(positionError, 1);
+  debug_.print(",GEN=");
+  debug_.println(generation);
+  return true;
+}
+
+bool MapController::startReturnP0Heading() {
+  if (!returnP0InProgress()) return false;
+  Pose current;
+  if (!readPose(current)) return false;
+  const float headingError = shortestDeltaDeg(
+      homeContext_.p0WorldPose.headingDeg, current.headingDeg);
+  if (fabsf(headingError) <= MAP_RETURN_P0_HEADING_TOLERANCE_DEG) {
+    robot_.stopImmediately(true);
+    replayOperation_ = MapReplayOperation::NONE;
+    returnP0State_ = ReturnP0State::P0_HEADING_SETTLE;
+    returnP0SettleSinceMs_ = millis();
+    return true;
+  }
+  if (returnP0HeadingAttempts_ >= MAP_RETURN_P0_MAX_HEADING_ATTEMPTS) {
+    return false;
+  }
+  ++returnP0HeadingAttempts_;
+  const uint32_t generation = nextReplayGeneration();
+  returnP0Generation_ = generation;
+  returnP0SegmentGeneration_ = generation;
+  replaySegmentGeneration_ = generation;
+  replayOperation_ = MapReplayOperation::TURN;
+  returnP0TurnPending_ = true;
+  returnP0State_ = ReturnP0State::P0_HEADING_RESTORE;
+  if (!robot_.startReplayTurnRelative(
+          headingError > 0.0f, fabsf(headingError), replaySpeed_, generation,
+          AiTurnProfile::PRECISE)) {
+    replayOperation_ = MapReplayOperation::NONE;
+    replaySegmentGeneration_ = 0U;
+    returnP0SegmentGeneration_ = 0U;
+    returnP0TurnPending_ = false;
+    return false;
+  }
+  debug_.print("MAP,RETURN_P0,P0_HEADING,START,ERR=");
+  debug_.print(headingError, 2);
+  debug_.print(",TARGET=");
+  debug_.println(homeContext_.p0WorldPose.headingDeg, 2);
+  return true;
+}
+
+void MapController::updateReturnToP0() {
+  if (!returnP0InProgress() || returnP0State_ == ReturnP0State::HOLD ||
+      replayOperation_ != MapReplayOperation::NONE) {
+    return;
+  }
+  if (!homeContext_.valid || selectedSlot_ != homeContext_.slot ||
+      route_.header.generation != homeContext_.routeGeneration ||
+      odometry_.resetGeneration() != homeContext_.odometryResetGeneration ||
+      robot_.headingResetGeneration() != homeContext_.headingResetGeneration) {
+    invalidateHomeContext("RESET_BOUNDARY");
+    abortReturnToP0("RESET_BOUNDARY");
+    return;
+  }
+  if (!odometry_.ready() || !odometry_.healthy() || !fusion_.ready() ||
+      fusion_.health() == FusionHealth::NO_SOURCE) {
+    abortReturnToP0(!odometry_.healthy() ? "ENCODER_FAULT" : "HEADING_LOST");
+    return;
+  }
+  const uint32_t now = millis();
+  switch (returnP0State_) {
+    case ReturnP0State::REACQUIRE_ROUTE:
+      if (!startReturnReacquire()) abortReturnToP0("REACQUIRE_LIMIT");
+      break;
+    case ReturnP0State::RETURN_WAYPOINT:
+      if (!startReturnWaypoint()) abortReturnToP0("RETURN_START");
+      break;
+    case ReturnP0State::P0_POSITION_APPROACH:
+      if (!startReturnP0Position()) abortReturnToP0("P0_POSITION");
+      break;
+    case ReturnP0State::P0_POSITION_SETTLE: {
+      if (now - returnP0SettleSinceMs_ < MAP_RETURN_P0_SETTLE_MS) break;
+      Pose current;
+      if (!readPose(current)) {
+        abortReturnToP0("POSE");
+        break;
+      }
+      const float positionError = distanceMm(
+          current.xMm, current.yMm, homeContext_.p0WorldPose.xMm,
+          homeContext_.p0WorldPose.yMm);
+      if (positionError > MAP_RETURN_P0_POSITION_TOLERANCE_MM) {
+        if (returnP0PositionCorrectionAttempts_ >=
+            MAP_RETURN_P0_MAX_POSITION_CORRECTIONS) {
+          abortReturnToP0("P0_POSITION_LIMIT");
+        } else {
+          ++returnP0PositionCorrectionAttempts_;
+          returnP0State_ = ReturnP0State::P0_POSITION_APPROACH;
+          if (!startReturnP0Position()) abortReturnToP0("P0_POSITION");
+        }
+        break;
+      }
+      returnP0State_ = ReturnP0State::P0_HEADING_RESTORE;
+      if (!startReturnP0Heading()) abortReturnToP0("P0_HEADING");
+      break;
+    }
+    case ReturnP0State::P0_HEADING_RESTORE:
+      if (!startReturnP0Heading()) abortReturnToP0("P0_HEADING");
+      break;
+    case ReturnP0State::P0_HEADING_SETTLE: {
+      if (now - returnP0SettleSinceMs_ < MAP_RETURN_P0_SETTLE_MS) break;
+      Pose current;
+      if (!readPose(current)) {
+        abortReturnToP0("POSE");
+        break;
+      }
+      const float positionError = distanceMm(
+          current.xMm, current.yMm, homeContext_.p0WorldPose.xMm,
+          homeContext_.p0WorldPose.yMm);
+      const float headingError = fabsf(shortestDeltaDeg(
+          homeContext_.p0WorldPose.headingDeg, current.headingDeg));
+      const bool sensorSafe = ultrasonic_.isFresh() && ultrasonic_.healthy() &&
+                              ultrasonic_.overallZone() != ObstacleZone::UNKNOWN;
+      if (positionError <= MAP_RETURN_P0_POSITION_TOLERANCE_MM &&
+          headingError <= MAP_RETURN_P0_HEADING_TOLERANCE_DEG &&
+          robot_.motorsStopped() && !robot_.aiMotionActive() &&
+          robot_.motionOwner() == MotionOwner::NONE && odometry_.healthy() &&
+          fusion_.health() != FusionHealth::NO_SOURCE && sensorSafe) {
+        completeReturnToP0();
+      } else if (positionError > MAP_RETURN_P0_POSITION_TOLERANCE_MM) {
+        if (returnP0PositionCorrectionAttempts_ >=
+            MAP_RETURN_P0_MAX_POSITION_CORRECTIONS) {
+          abortReturnToP0("P0_POSITION_LIMIT");
+        } else {
+          ++returnP0PositionCorrectionAttempts_;
+          returnP0State_ = ReturnP0State::P0_POSITION_APPROACH;
+          if (!startReturnP0Position()) abortReturnToP0("P0_POSITION");
+        }
+      } else if (headingError > MAP_RETURN_P0_HEADING_TOLERANCE_DEG) {
+        returnP0State_ = ReturnP0State::P0_HEADING_RESTORE;
+        if (!startReturnP0Heading()) abortReturnToP0("P0_HEADING");
+      } else {
+        abortReturnToP0("FINAL_VERIFY");
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+void MapController::abortReturnToP0(const char* reason) {
+  robot_.stopImmediately(true);
+  nextReplayGeneration();
+  replaySegmentGeneration_ = 0U;
+  replayOperation_ = MapReplayOperation::NONE;
+  replayActive_ = false;
+  replayReason_ = reason != nullptr ? reason : "RETURN_ABORT";
+  returnP0SegmentGeneration_ = 0U;
+  returnP0TurnPending_ = false;
+  returnP0State_ = ReturnP0State::ABORTED;
+  mode_ = storeState_ == MapStoreState::SAVED ? MapControllerMode::SAVED
+                                               : MapControllerMode::READY;
+  debug_.print("MAP,RETURN_P0,ABORT,REASON=");
+  debug_.println(replayReason_);
+  statusDirty_ = true;
+}
+
+void MapController::completeReturnToP0() {
+  robot_.stopImmediately(true);
+  nextReplayGeneration();
+  replaySegmentGeneration_ = 0U;
+  replayOperation_ = MapReplayOperation::NONE;
+  replayActive_ = false;
+  replayReason_ = "RETURN_P0_COMPLETE";
+  returnP0SegmentGeneration_ = 0U;
+  returnP0TurnPending_ = false;
+  returnP0State_ = ReturnP0State::COMPLETE;
+  mode_ = MapControllerMode::REPLAY_COMPLETE;
+  debug_.println("MAP,RETURN_P0,COMPLETE");
+  statusDirty_ = true;
+}
+
+bool MapController::consumeReturnTurnResult(const AiTurnResult& result) {
+  if (!returnP0InProgress() ||
+      replayOperation_ != MapReplayOperation::TURN ||
+      result.motionGeneration != returnP0SegmentGeneration_) {
+    if (result.motionGeneration != 0U) {
+      debug_.print("MAP,RETURN_P0,DROP_STALE,GEN=");
+      debug_.println(result.motionGeneration);
+    }
+    return true;
+  }
+  replayOperation_ = MapReplayOperation::NONE;
+  if (result.code == AiTurnResultCode::DONE) {
+    if (returnP0State_ == ReturnP0State::P0_HEADING_RESTORE) {
+      returnP0TurnPending_ = false;
+      returnP0State_ = ReturnP0State::P0_HEADING_SETTLE;
+      returnP0SettleSinceMs_ = millis();
+    } else if (returnP0TurnPending_) {
+      returnP0TurnPending_ = false;
+      returnP0State_ = ReturnP0State::RETURN_WAYPOINT;
+    }
+    return true;
+  }
+  if (result.code == AiTurnResultCode::OBSTACLE) {
+    returnP0State_ = ReturnP0State::HOLD;
+    enterReplayHold(MapHoldReason::OBSTACLE, false);
+    return true;
+  }
+  abortReturnToP0(result.code == AiTurnResultCode::HEADING_LOST
+                      ? "HEADING_LOST"
+                      : "TURN_ERROR");
+  return true;
+}
+
+bool MapController::consumeReturnDistanceResult(
+    const AiDistanceResult& result) {
+  if (!returnP0InProgress() ||
+      (replayOperation_ != MapReplayOperation::MOVE) ||
+      result.motionGeneration != returnP0SegmentGeneration_) {
+    if (result.motionGeneration != 0U) {
+      debug_.print("MAP,RETURN_P0,DROP_STALE,GEN=");
+      debug_.println(result.motionGeneration);
+    }
+    return true;
+  }
+  replayOperation_ = MapReplayOperation::NONE;
+  replayTravelMm_ = result.travelledMm < 0.0f
+                        ? 0U
+                        : static_cast<uint32_t>(lroundf(result.travelledMm));
+  if (result.code == AiDistanceResultCode::REALIGN_REQUIRED) {
+    if (++returnP0ReacquireAttempts_ > MAP_RETURN_P0_MAX_REACQUIRE_ATTEMPTS) {
+      abortReturnToP0("REALIGN_LIMIT");
+      return true;
+    }
+    Pose current;
+    if (!readPose(current) || returnP0TargetIndex_ + 1U >=
+                                  route_.header.waypointCount) {
+      abortReturnToP0("POSE");
+      return true;
+    }
+    const Pose target = routePointWorldFromOrigin(
+        homeContext_.p0WorldPose, returnP0TargetIndex_);
+    const Pose segmentStart = routePointWorldFromOrigin(
+        homeContext_.p0WorldPose, returnP0TargetIndex_ + 1U);
+    const float desiredBearing = atan2f(target.yMm - segmentStart.yMm,
+                                        target.xMm - segmentStart.xMm) * kRadToDeg;
+    const float error = shortestDeltaDeg(desiredBearing, current.headingDeg);
+    const uint32_t generation = nextReplayGeneration();
+    returnP0Generation_ = generation;
+    returnP0SegmentGeneration_ = generation;
+    replaySegmentGeneration_ = generation;
+    replayOperation_ = MapReplayOperation::TURN;
+    returnP0TurnPending_ = true;
+    if (!robot_.startReplayTurnRelative(
+            error > 0.0f, fabsf(error), replaySpeed_, generation,
+            AiTurnProfile::MAP_COARSE)) {
+      abortReturnToP0("REALIGN_TURN");
+    }
+    return true;
+  }
+  if (result.code == AiDistanceResultCode::DONE) {
+    Pose current;
+    if (!readPose(current)) {
+      abortReturnToP0("POSE");
+      return true;
+    }
+    const Pose target = returnP0TargetIndex_ == 0U
+                            ? homeContext_.p0WorldPose
+                            : routePointWorldFromOrigin(
+                                  homeContext_.p0WorldPose,
+                                  returnP0TargetIndex_);
+    const float positionError = distanceMm(current.xMm, current.yMm,
+                                           target.xMm, target.yMm);
+    const float tolerance = returnP0TargetIndex_ == 0U
+                                ? static_cast<float>(
+                                      MAP_RETURN_P0_POSITION_TOLERANCE_MM)
+                                : static_cast<float>(
+                                      MAP_GUIDE_BACK_ARRIVAL_POSITION_TOLERANCE_MM);
+    if (positionError > tolerance) {
+      if (returnP0TargetIndex_ == 0U &&
+          returnP0PositionCorrectionAttempts_ <
+              MAP_RETURN_P0_MAX_POSITION_CORRECTIONS) {
+        ++returnP0PositionCorrectionAttempts_;
+        returnP0State_ = ReturnP0State::P0_POSITION_APPROACH;
+        if (!startReturnP0Position()) abortReturnToP0("P0_POSITION");
+      } else {
+        abortReturnToP0("POSITION_ERROR");
+      }
+      return true;
+    }
+    if (returnP0TargetIndex_ == 0U) {
+      returnP0State_ = ReturnP0State::P0_POSITION_SETTLE;
+      returnP0SettleSinceMs_ = millis();
+    } else {
+      replayCurrentIndex_ = returnP0TargetIndex_;
+      --returnP0TargetIndex_;
+      replayTargetIndex_ = returnP0TargetIndex_;
+      returnP0State_ = ReturnP0State::RETURN_WAYPOINT;
+    }
+    return true;
+  }
+  if (result.code == AiDistanceResultCode::OBSTACLE) {
+    returnP0State_ = ReturnP0State::HOLD;
+    enterReplayHold(MapHoldReason::OBSTACLE, false);
+    return true;
+  }
+  abortReturnToP0(result.code == AiDistanceResultCode::ENCODER_FAULT
+                      ? "ENCODER_FAULT"
+                      : result.code == AiDistanceResultCode::HEADING_LOST
+                          ? "HEADING_LOST"
+                          : "MOVE_ERROR");
+  return true;
+}
+
 MapController::Pose MapController::routePointWorld(uint16_t index) const {
   return routePointWorldFromOrigin(replayOrigin_, index);
 }
@@ -2958,6 +3809,12 @@ void MapController::enterReplayHold(MapHoldReason reason, bool allowResume) {
   replayReason_ = HoldReasonName(reason);
   holdReason_ = reason;
   replayResumeAllowed_ = allowResume;
+  if (returnP0InProgress() && reason != MapHoldReason::OBSTACLE) {
+    // Phase 2 deliberately keeps Return-to-P0 non-resumable after a user or
+    // external stop. Home remains valid for a fresh request.
+    returnP0State_ = ReturnP0State::HOLD;
+    replayResumeAllowed_ = false;
+  }
   obstacleClearSinceMs_ = 0U;
   replayHoldPoseValid_ = readPose(replayHoldPose_);
   mode_ = MapControllerMode::REPLAY_HOLD;
@@ -2994,6 +3851,7 @@ void MapController::enterReplayHold(MapHoldReason reason, bool allowResume) {
 }
 
 void MapController::abortReplay(const char* reason) {
+  const bool wasReturnP0 = returnP0InProgress();
   const bool wasPostTeachBack = postTeachBackActive_;
   robot_.stopImmediately(true);
   nextReplayGeneration();
@@ -3004,12 +3862,18 @@ void MapController::abortReplay(const char* reason) {
     invalidatePostTeachBack(reason != nullptr ? reason : "ERROR");
   }
   mode_ = MapControllerMode::SAVED;
+  if (wasReturnP0) {
+    returnP0State_ = ReturnP0State::ABORTED;
+    returnP0SegmentGeneration_ = 0U;
+    returnP0TurnPending_ = false;
+  }
   statusDirty_ = true;
   debug_.print("MAP,REPLAY=ABORT,REASON=");
   debug_.println(replayReason_);
 }
 
 void MapController::completeReplay() {
+  const bool wasReturnP0 = returnP0InProgress();
   const bool wasPostTeachBack = postTeachBackActive_;
   const uint32_t completedLap = replayLapCounter_;
   const uint32_t completedCycle = replayCycleCounter_;
@@ -3039,9 +3903,15 @@ void MapController::completeReplay() {
     debug_.print("MAP,PING,COMPLETE,CYCLES=");
     debug_.println(replayCycleCounter_);
   }
+  if (wasReturnP0) {
+    returnP0State_ = ReturnP0State::COMPLETE;
+    returnP0SegmentGeneration_ = 0U;
+    returnP0TurnPending_ = false;
+  }
 }
 
 void MapController::cancelReplay(const char* reason) {
+  const bool wasReturnP0 = returnP0InProgress();
   const bool wasPostTeachBack = postTeachBackActive_;
   const bool wasClosedLoop = routeMode_ == MapReplayMode::LOOP;
   const bool wasReturn = routeMode_ == MapReplayMode::RETURN;
@@ -3060,6 +3930,11 @@ void MapController::cancelReplay(const char* reason) {
   }
   mode_ = storeState_ == MapStoreState::SAVED ? MapControllerMode::SAVED
                                               : MapControllerMode::READY;
+  if (wasReturnP0) {
+    returnP0State_ = ReturnP0State::ABORTED;
+    returnP0SegmentGeneration_ = 0U;
+    returnP0TurnPending_ = false;
+  }
   statusDirty_ = true;
   ps2_.disarmMapInput();
   debug_.print("MAP,CANCEL,REASON=");
@@ -3377,6 +4252,7 @@ void MapController::inhibitAutonomousResume(const char* reason) {
 
 bool MapController::consumeReplayTurnResult(const AiTurnResult& result) {
   if (result.owner != MotionOwner::REPLAY) return false;
+  if (returnP0InProgress()) return consumeReturnTurnResult(result);
   if (obstacleDetourContextActive()) {
     return consumeObstacleDetourTurnResult(result);
   }
@@ -3422,6 +4298,7 @@ bool MapController::consumeReplayTurnResult(const AiTurnResult& result) {
 
 bool MapController::consumeReplayDistanceResult(const AiDistanceResult& result) {
   if (result.owner != MotionOwner::REPLAY) return false;
+  if (returnP0InProgress()) return consumeReturnDistanceResult(result);
   if (obstacleDetourContextActive()) {
     return consumeObstacleDetourDistanceResult(result);
   }
@@ -3608,12 +4485,14 @@ void MapController::serviceStorage() {
     deletePending_ = false;
     if (store_.erase(selectedSlot_)) {
       invalidatePostTeachBack("DELETE");
+      invalidateHomeContext("DELETE");
       loadedValid_ = false;
       storeState_ = MapStoreState::EMPTY;
       storageErrorReason_ = MapStorageErrorReason::NONE;
       mode_ = MapControllerMode::READY;
       log("DELETE=OK");
     } else {
+      invalidateHomeContext("STORAGE_ERROR");
       storeState_ = MapStoreState::STORAGE_ERROR;
       storageErrorReason_ = MapStorageErrorReason::GENERIC;
       mode_ = MapControllerMode::READY;
@@ -3637,12 +4516,14 @@ void MapController::serviceStorage() {
       normalizeRouteForRuntime(route_, runtimeMode);
       mode_ = MapControllerMode::SAVED;
       log("TEACH_SAVE=OK");
+      armHomeContextAfterSave();
       armPostTeachBackAfterSave();
     } else {
       // The previous active A/B record remains untouched on a failed erase,
       // program or read-back. Restore it into RAM when this Teach session
       // started from a valid route; otherwise discard the failed new route.
       invalidatePostTeachBack("STORAGE_ERROR");
+      invalidateHomeContext("STORAGE_ERROR");
       const bool restored = teachOldRouteAvailable_ && loadSelected();
       teachOldRouteAvailable_ = false;
       storageErrorReason_ = MapStorageErrorReason::TEACH_SAVE;
@@ -3667,6 +4548,7 @@ void MapController::serviceStorage() {
     route_.header.replayMode = static_cast<uint8_t>(routeMode_);
     updateRouteHeaderForSave(route_);
     if (!store_.save(selectedSlot_, route_)) {
+      invalidateHomeContext("STORAGE_ERROR");
       routeMode_ = modeBeforeSave_;
       normalizeRouteForRuntime(route_, routeMode_);
       storeState_ = MapStoreState::STORAGE_ERROR;
@@ -3674,6 +4556,7 @@ void MapController::serviceStorage() {
       mode_ = MapControllerMode::SAVED;
       log("REPLAY_MODE_SAVE=FAIL");
     } else {
+      invalidateHomeContext("ROUTE_GENERATION");
       storeState_ = MapStoreState::SAVED;
       storageErrorReason_ = MapStorageErrorReason::NONE;
       normalizeRouteForRuntime(route_, routeMode_);

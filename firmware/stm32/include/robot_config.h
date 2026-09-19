@@ -241,6 +241,20 @@ static constexpr float MAP_GUIDE_HEADING_DERIVATIVE_FILTER = 0.20f;
 static constexpr float MAP_GUIDE_CROSSTRACK_GAIN = 0.040f;
 static constexpr float MAP_GUIDE_MAX_CROSSTRACK_MM = 250.0f;
 static constexpr int16_t MAP_GUIDE_MIN_SPEED = 15;
+// Universal Return-to-P0 remains a bounded local MAP operation. These gates
+// are deliberately no wider than the existing guided corridor and are not
+// persisted in the MAP record.
+static constexpr float MAP_RETURN_P0_MAX_CROSSTRACK_MM = 250.0f;
+static constexpr float MAP_RETURN_P0_AMBIGUITY_MARGIN_MM = 30.0f;
+static constexpr uint32_t MAP_RETURN_P0_POSITION_TOLERANCE_MM = 30U;
+static constexpr float MAP_RETURN_P0_HEADING_TOLERANCE_DEG = 2.0f;
+static constexpr uint32_t MAP_RETURN_P0_SETTLE_MS = 100U;
+static constexpr uint8_t MAP_RETURN_P0_MAX_REACQUIRE_ATTEMPTS = 3U;
+static constexpr uint8_t MAP_RETURN_P0_MAX_POSITION_CORRECTIONS = 3U;
+static constexpr uint8_t MAP_RETURN_P0_MAX_HEADING_ATTEMPTS = 3U;
+static_assert(MAP_RETURN_P0_MAX_CROSSTRACK_MM <=
+                  MAP_GUIDE_MAX_CROSSTRACK_MM,
+              "Return-to-P0 corridor must stay within guided corridor");
 static_assert(MAP_GUIDE_SLOW_DISTANCE_MM >
                   MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM,
               "MAP guide slow distance must exceed arrival tolerance");

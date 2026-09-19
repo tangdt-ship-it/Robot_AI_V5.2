@@ -140,6 +140,30 @@ enum class MapMissionInitiator : uint8_t {
   AI_VOICE = 2U,
 };
 
+// Runtime-only Return-to-P0 request source. This is intentionally separate
+// from the persisted MAP record and is not wired to PS2/voice in Phase 2.
+enum class ReturnP0Source : uint8_t {
+  NONE = 0U,
+  PS2_START = 1U,
+  AI_VOICE = 2U,
+  INTERNAL = 3U,
+};
+
+enum class ReturnP0State : uint8_t {
+  IDLE = 0U,
+  VALIDATE_HOME = 1U,
+  LOCATE_ON_ROUTE = 2U,
+  REACQUIRE_ROUTE = 3U,
+  RETURN_WAYPOINT = 4U,
+  P0_POSITION_APPROACH = 5U,
+  P0_POSITION_SETTLE = 6U,
+  P0_HEADING_RESTORE = 7U,
+  P0_HEADING_SETTLE = 8U,
+  HOLD = 9U,
+  COMPLETE = 10U,
+  ABORTED = 11U,
+};
+
 enum MapWaypointFlags : uint8_t {
   MAP_WP_START = 1U << 0,
   MAP_WP_MANUAL_MARK = 1U << 1,
