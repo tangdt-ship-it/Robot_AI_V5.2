@@ -31,6 +31,8 @@ struct LcdDisplayData {
   const char* obstacleZone = "UNKNOWN";
   float frontLeftDistanceCm = 0.0f;
   float frontRightDistanceCm = 0.0f;
+  bool frontLeftEnabled = true;
+  bool frontRightEnabled = true;
   bool frontLeftFresh = false;
   bool frontRightFresh = false;
   bool frontLeftEchoValid = false;

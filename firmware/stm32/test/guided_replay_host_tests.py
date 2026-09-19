@@ -113,7 +113,12 @@ def realign_action(reason, distance_mm, incoming_heading_deg,
     preturn_tolerance = config_number("MAP_REPLAY_PRETURN_TOLERANCE_DEG")
     if reason == "ARRIVAL":
         if distance_mm > position_tolerance:
-            return "GUIDED"
+            if (distance_mm <= 10.0 and
+                    abs(shortest_delta(incoming_heading_deg,
+                                       current_heading_deg)) <=
+                    config_number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG")):
+                return "ADVANCE_RECOVERED"
+            return "ARRIVAL_COARSE_TURN"
         error = shortest_delta(incoming_heading_deg, current_heading_deg)
         return "ADVANCE" if abs(error) <= config_number(
             "MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"
@@ -128,6 +133,38 @@ def realign_action(reason, distance_mm, incoming_heading_deg,
             "MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG"
         ) else "ARRIVAL_COARSE_TURN"
     return "PATH_COARSE_TURN" if abs(error) > preturn_tolerance else "GUIDED"
+
+
+def guided_path_realign_action(live_target_bearing_deg, incoming_heading_deg,
+                               current_heading_deg):
+    """Mirror the production gate for a PATH REALIGN_REQUIRED result."""
+    live_error = shortest_delta(live_target_bearing_deg,
+                                current_heading_deg)
+    route_error = shortest_delta(incoming_heading_deg,
+                                 current_heading_deg)
+    threshold = config_number("MAP_GUIDE_REALIGN_THRESHOLD_DEG")
+    return "REALIGN" if (abs(live_error) >= threshold and
+                         abs(route_error) >= threshold) else "GUIDED"
+
+
+def arrival_recovery_action(distance_mm, incoming_heading_deg,
+                            current_heading_deg, target_along_route_mm,
+                            completed_turn_attempts):
+    """Model the bounded post-ARRIVAL-turn recovery policy."""
+    position_tolerance = config_number("MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM")
+    heading_tolerance = config_number("MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG")
+    heading_ok = abs(shortest_delta(incoming_heading_deg,
+                                    current_heading_deg)) <= heading_tolerance
+    if distance_mm <= position_tolerance and heading_ok:
+        return "ADVANCE"
+    if distance_mm <= 10.0 and heading_ok:
+        return "ADVANCE_RECOVERED"
+    if not heading_ok:
+        return ("REALIGN_STUCK" if completed_turn_attempts >= 2
+                else "ARRIVAL_COARSE_TURN")
+    if target_along_route_mm < -position_tolerance:
+        return "ARRIVAL_OVERSHOOT"
+    return "GUIDED"
 
 
 class GuidedReplayHostTests(unittest.TestCase):
@@ -213,6 +250,26 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertNotEqual(round(target_bearing, 3), 0.0)
         self.assertIn("const float liveTargetBearing = atan2f(dy, dx)", CTRL)
         self.assertIn("guidedHeadingErrorDeg_ = HeadingFusion::shortestDelta", CTRL)
+
+    def test_live_bearing_cannot_realign_same_waypoint_when_route_aligned(self):
+        # This reproduces the failed HIL shape: the point-pursuit bearing
+        # swings near the endpoint, while the chassis remains aligned with
+        # the immutable MAP edge.  It must not restart the same waypoint.
+        self.assertEqual(
+            guided_path_realign_action(-50.0, 0.0, 0.4), "GUIDED"
+        )
+        self.assertEqual(
+            guided_path_realign_action(-50.0, 0.0, 20.0), "REALIGN"
+        )
+        self.assertIn("const float routeHeadingError =", CTRL)
+        self.assertIn(
+            "fabsf(guidedHeadingErrorDeg_) >= MAP_GUIDE_REALIGN_THRESHOLD_DEG &&",
+            CTRL,
+        )
+        self.assertIn(
+            "fabsf(routeHeadingError) >= MAP_GUIDE_REALIGN_THRESHOLD_DEG",
+            CTRL,
+        )
 
     def test_cross_track_sign_points_back_to_line(self):
         left_of_line = cross_track((0.0, 0.0), (1000.0, 0.0), (400.0, 100.0))
@@ -429,12 +486,70 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertIn('"ADVANCE"', MAP)
         self.assertIn("replayRealignReason_ = ReplayRealignReason::NONE", MAP)
 
-    def test_arrival_turn_drift_resumes_guided_same_target(self):
-        self.assertEqual(realign_action("ARRIVAL", 75.0, 0.0, 0.0, 4.0), "GUIDED")
+    def test_arrival_turn_drift_corrects_heading_before_guided_same_target(self):
+        self.assertEqual(
+            arrival_recovery_action(75.0, 0.0, 4.0, 75.0, 0),
+            "ARRIVAL_COARSE_TURN",
+        )
         self.assertIn("if (!inArrivalZone)", MAP)
         self.assertIn('"GUIDED"', MAP)
         self.assertIn("startReplayGuidedWaypoint", MAP)
         self.assertIn("replayTarget_.xMm, replayTarget_.yMm", MAP)
+
+    def test_arrival_turn_small_drift_advances_without_forward_restart(self):
+        self.assertEqual(
+            realign_action("ARRIVAL", 6.5, 0.0, 0.0, 0.45),
+            "ADVANCE_RECOVERED",
+        )
+        self.assertEqual(
+            realign_action("ARRIVAL", 6.5, 0.0, 0.0, 2.0),
+            "ARRIVAL_COARSE_TURN",
+        )
+        self.assertIn("kPostTurnArrivalRecoveryToleranceMm = 10.0f", MAP)
+        recovery_start = MAP.find("if (actionReason == ReplayRealignReason::ARRIVAL)")
+        recovery_end = MAP.find(
+            "} else if (actionReason == ReplayRealignReason::PATH)",
+            recovery_start,
+        )
+        recovery_block = MAP[recovery_start:recovery_end]
+        self.assertIn('"ADVANCE_RECOVERED"', recovery_block)
+        self.assertIn("coarsePreturn = true", recovery_block)
+        self.assertNotIn(
+            'logGuideRealignDone(actionReason, replayTargetIndex_, targetDistance,\n'
+            '                          incomingBearing, current.headingDeg,\n'
+            '                          arrivalHeadingError, "GUIDED");\n'
+            '        desiredBearing = incomingBearing;',
+            recovery_block,
+        )
+
+    def test_arrival_realign_does_not_resume_forward_with_invalid_heading(self):
+        self.assertEqual(
+            arrival_recovery_action(25.0, 0.0, 4.0, 25.0, 0),
+            "ARRIVAL_COARSE_TURN",
+        )
+        recovery_start = MAP.find("if (actionReason == ReplayRealignReason::ARRIVAL)")
+        recovery_end = MAP.find(
+            "} else if (actionReason == ReplayRealignReason::PATH)",
+            recovery_start,
+        )
+        recovery_block = MAP[recovery_start:recovery_end]
+        self.assertIn("if (!arrivalHeadingWithinTolerance)", recovery_block)
+        self.assertIn("coarsePreturn = true", recovery_block)
+
+    def test_arrival_overshoot_never_restarts_forward_only_guidance(self):
+        self.assertEqual(
+            arrival_recovery_action(25.0, 0.0, 0.0, -25.0, 1),
+            "ARRIVAL_OVERSHOOT",
+        )
+        self.assertEqual(
+            arrival_recovery_action(25.0, 0.0, 4.0, 25.0, 2),
+            "REALIGN_STUCK",
+        )
+        self.assertIn("targetAlongRouteMm", MAP)
+        self.assertIn('abortReplay("ARRIVAL_OVERSHOOT")', MAP)
+        self.assertIn('abortReplay("REALIGN_STUCK")', MAP)
+        self.assertIn("kMaxArrivalTurnAttempts = 2U", MAP)
+        self.assertIn("replayArrivalTurnAttempts_", MAP_HEADER)
 
     def test_path_realign_uses_canonical_route_bearing(self):
         incoming = bearing((0.0, 0.0), (1000.0, 0.0))

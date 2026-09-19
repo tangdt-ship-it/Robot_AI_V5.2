@@ -9,11 +9,21 @@ void UltrasonicSensor::begin() {
   instance_=this;
   channels_[LEFT_MOUNT].trigPin=ULTRASONIC_TRIG_PIN;
   channels_[LEFT_MOUNT].echoPin=ULTRASONIC_ECHO_PIN;
+  channels_[LEFT_MOUNT].enabled=true;
   channels_[RIGHT_MOUNT].trigPin=ULTRASONIC_RIGHT_TRIG_PIN;
   channels_[RIGHT_MOUNT].echoPin=ULTRASONIC_RIGHT_ECHO_PIN;
+  channels_[RIGHT_MOUNT].enabled=ULTRASONIC_RIGHT_ENABLED;
   const uint32_t now=millis();
   for (uint8_t i=0; i<2; ++i) {
     Channel& c=channels_[i];
+    if(!c.enabled){
+      // Do not emit a trigger or attach an interrupt to a sector that is not
+      // part of the active safety model. The pull-down keeps an unplugged
+      // harness quiet without allowing it to affect the centred SR04.
+      pinMode(c.trigPin,INPUT_PULLDOWN);
+      pinMode(c.echoPin,INPUT_PULLDOWN);
+      continue;
+    }
     pinMode(c.trigPin,OUTPUT);
     digitalWrite(c.trigPin,LOW);
     // HC-SR04 Echo is push-pull, but the long harness can briefly float while
@@ -23,10 +33,12 @@ void UltrasonicSensor::begin() {
     pinMode(c.echoPin,INPUT_PULLDOWN);
     c.lastTriggerMs=now-ULTRASONIC_SAMPLE_PERIOD_MS;
   }
-  attachInterrupt(digitalPinToInterrupt(channels_[LEFT_MOUNT].echoPin),
-                  echoIsrMountLeft,CHANGE);
-  attachInterrupt(digitalPinToInterrupt(channels_[RIGHT_MOUNT].echoPin),
-                  echoIsrMountRight,CHANGE);
+  if(channels_[LEFT_MOUNT].enabled) attachInterrupt(
+      digitalPinToInterrupt(channels_[LEFT_MOUNT].echoPin),
+      echoIsrMountLeft,CHANGE);
+  if(channels_[RIGHT_MOUNT].enabled) attachInterrupt(
+      digitalPinToInterrupt(channels_[RIGHT_MOUNT].echoPin),
+      echoIsrMountRight,CHANGE);
   activeChannel_=0xFF;
   nextChannel_=LEFT_MOUNT;
   nextTriggerAllowedMs_=now;
@@ -35,6 +47,7 @@ void UltrasonicSensor::echoIsrMountLeft(){if(instance_)instance_->handleEchoEdge
 void UltrasonicSensor::echoIsrMountRight(){if(instance_)instance_->handleEchoEdge(RIGHT_MOUNT);}
 void UltrasonicSensor::handleEchoEdge(uint8_t i){
   Channel& c=channels_[i];
+  if(!c.enabled) return;
   const uint32_t us=micros();
   ++c.isrCount;
   if(activeChannel_ != i || c.state != TriggerState::WAIT_ECHO) return;
@@ -201,6 +214,13 @@ void UltrasonicSensor::acceptTimeout(uint8_t i,uint32_t now,bool noEcho){
 }
 void UltrasonicSensor::recomputeObstacleModel(uint32_t now){
   auto fill=[this,now](const Channel& c,UltrasonicReading& o){
+    o={};
+    o.enabled=c.enabled;
+    if(!c.enabled){
+      o.health=SensorHealth::DISABLED;
+      o.zone=ObstacleZone::UNKNOWN;
+      return;
+    }
     const bool recentValid=hasRecentValidEcho(c,now);
     const bool boundedNoEchoFar=hasBoundedNoEchoFar(c,now);
     const uint32_t validAge=c.lastValidEchoMs!=0U?now-c.lastValidEchoMs:0U;
@@ -224,29 +244,39 @@ void UltrasonicSensor::recomputeObstacleModel(uint32_t now){
   // Keep the presentation and telemetry names tied to the physical modules:
   // PC12/PC9 is the left SR04 and PC4/PC7 is the right SR04.
   fill(channels_[LEFT_MOUNT],frontLeft_);fill(channels_[RIGHT_MOUNT],frontRight_);
-  const bool l=hasRecentValidEcho(channels_[LEFT_MOUNT],now)&&frontLeft_.zone!=ObstacleZone::UNKNOWN;
-  const bool r=hasRecentValidEcho(channels_[RIGHT_MOUNT],now)&&frontRight_.zone!=ObstacleZone::UNKNOWN;
-  overallFresh_=frontLeft_.fresh&&frontRight_.fresh;
-  overallEchoValid_=frontLeft_.echoValid&&frontRight_.echoValid;
-  if(!frontLeft_.valid||!frontRight_.valid) overallHealth_=SensorHealth::UNKNOWN;
-  else if(!l&&!r) overallHealth_=SensorHealth::DISCONNECTED_OR_FAULT;
+  const bool leftEnabled=channels_[LEFT_MOUNT].enabled;
+  const bool rightEnabled=channels_[RIGHT_MOUNT].enabled;
+  const bool l=!leftEnabled || (hasRecentValidEcho(channels_[LEFT_MOUNT],now)&&frontLeft_.zone!=ObstacleZone::UNKNOWN);
+  const bool r=!rightEnabled || (hasRecentValidEcho(channels_[RIGHT_MOUNT],now)&&frontRight_.zone!=ObstacleZone::UNKNOWN);
+  overallFresh_=(!leftEnabled||frontLeft_.fresh)&&(!rightEnabled||frontRight_.fresh);
+  overallEchoValid_=(!leftEnabled||frontLeft_.echoValid)&&(!rightEnabled||frontRight_.echoValid);
+  const bool anyEnabled=leftEnabled||rightEnabled;
+  if(!anyEnabled || (!l&&!r)) overallHealth_=SensorHealth::DISCONNECTED_OR_FAULT;
   else if(!l||!r) overallHealth_=SensorHealth::TIMEOUT;
-  else if(frontLeft_.health==SensorHealth::HEALTHY&&frontRight_.health==SensorHealth::HEALTHY) overallHealth_=SensorHealth::HEALTHY;
+  else if((!leftEnabled||frontLeft_.health==SensorHealth::HEALTHY)&&
+          (!rightEnabled||frontRight_.health==SensorHealth::HEALTHY)) overallHealth_=SensorHealth::HEALTHY;
   else overallHealth_=SensorHealth::DEGRADED;
   // A failed/unknown channel can never produce a CLEAR decision. A recently
   // validated channel may retain its zone during a bounded dropout.
-  if(!l||!r){overallZone_=ObstacleZone::UNKNOWN;suggestion_=AvoidanceDirection::STOP;return;}
-  nearestDistanceCm_=min(frontLeft_.distanceCm,frontRight_.distanceCm);nearestRawDistanceCm_=min(frontLeft_.rawDistanceCm,frontRight_.rawDistanceCm);nearestRateCmS_=max(frontLeft_.rateCmS,frontRight_.rateCmS);
-  if(frontLeft_.zone==ObstacleZone::EMERGENCY||frontRight_.zone==ObstacleZone::EMERGENCY)overallZone_=ObstacleZone::EMERGENCY;else if(frontLeft_.zone==ObstacleZone::BLOCKED||frontRight_.zone==ObstacleZone::BLOCKED)overallZone_=ObstacleZone::BLOCKED;else if(frontLeft_.zone==ObstacleZone::CAUTION||frontRight_.zone==ObstacleZone::CAUTION)overallZone_=ObstacleZone::CAUTION;else overallZone_=ObstacleZone::CLEAR;
+  if(!anyEnabled||!l||!r){overallZone_=ObstacleZone::UNKNOWN;suggestion_=AvoidanceDirection::STOP;return;}
+  nearestDistanceCm_=leftEnabled?frontLeft_.distanceCm:frontRight_.distanceCm;
+  nearestRawDistanceCm_=leftEnabled?frontLeft_.rawDistanceCm:frontRight_.rawDistanceCm;
+  nearestRateCmS_=leftEnabled?frontLeft_.rateCmS:frontRight_.rateCmS;
+  if(rightEnabled){nearestDistanceCm_=min(frontLeft_.distanceCm,frontRight_.distanceCm);nearestRawDistanceCm_=min(frontLeft_.rawDistanceCm,frontRight_.rawDistanceCm);nearestRateCmS_=max(frontLeft_.rateCmS,frontRight_.rateCmS);}
+  if((leftEnabled&&frontLeft_.zone==ObstacleZone::EMERGENCY)||(rightEnabled&&frontRight_.zone==ObstacleZone::EMERGENCY))overallZone_=ObstacleZone::EMERGENCY;else if((leftEnabled&&frontLeft_.zone==ObstacleZone::BLOCKED)||(rightEnabled&&frontRight_.zone==ObstacleZone::BLOCKED))overallZone_=ObstacleZone::BLOCKED;else if((leftEnabled&&frontLeft_.zone==ObstacleZone::CAUTION)||(rightEnabled&&frontRight_.zone==ObstacleZone::CAUTION))overallZone_=ObstacleZone::CAUTION;else overallZone_=ObstacleZone::CLEAR;
+  if(!leftEnabled||!rightEnabled){suggestion_=AvoidanceDirection::STOP;return;}
   const float delta=frontLeft_.distanceCm-frontRight_.distanceCm;if(overallZone_>=ObstacleZone::EMERGENCY||fabsf(delta)<=AVOID_SIDE_HYSTERESIS_CM)suggestion_=AvoidanceDirection::STOP;else suggestion_=delta<0?AvoidanceDirection::RIGHT:AvoidanceDirection::LEFT;
 }
 bool UltrasonicSensor::degradedClearWindow(uint32_t nowMs) const{
+  bool anyEnabled=false;
   for(uint8_t i=0;i<2;++i){
     const Channel& c=channels_[i];
+    if(!c.enabled) continue;
+    anyEnabled=true;
     if(!c.filterReady || !hasRecentValidEcho(c,nowMs) ||
        c.filteredDistanceCm<=ULTRASONIC_DEGRADED_CLEAR_CM) return false;
   }
-  return true;
+  return anyEnabled;
 }
 bool UltrasonicSensor::hasRecentClearWindow(uint32_t nowMs) const {
   return degradedClearWindow(nowMs);
@@ -257,6 +287,7 @@ void UltrasonicSensor::update(){
     for(uint8_t n=0;n<2;n++) {
       const uint8_t i=(nextChannel_+n)%2;
       Channel& c=channels_[i];
+      if(!c.enabled) continue;
       if(ms-c.lastTriggerMs<ULTRASONIC_SAMPLE_PERIOD_MS) continue;
 
       // Check only the channel about to be triggered. A disconnected or
@@ -332,7 +363,17 @@ int16_t UltrasonicSensor::limitForwardCommand(int16_t cmd)const{
     // missing startup reading, close/stale reading, or repeated timeout still
     // fails closed at zero.
     if(!degradedClearWindow(millis()))return 0;
-    const float degradedNearest=min(channels_[LEFT_MOUNT].filteredDistanceCm,channels_[RIGHT_MOUNT].filteredDistanceCm);
+    // Disabled mounts have no filter history (zero by default) and must not
+    // participate in the nearest-distance calculation for single-front mode.
+    bool anyEnabled=false;
+    float degradedNearest=ULTRASONIC_MAX_CM;
+    for(uint8_t i=0;i<2;++i){
+      const Channel& channel=channels_[i];
+      if(!channel.enabled) continue;
+      anyEnabled=true;
+      degradedNearest=min(degradedNearest,channel.filteredDistanceCm);
+    }
+    if(!anyEnabled)return 0;
     if(degradedNearest<=stoppingDistanceCm(cmd) || degradedNearest<=OBSTACLE_CAUTION_CM)return 0;
     return min(cmd,ULTRASONIC_DEGRADED_MAX_FORWARD_COMMAND);
   }
@@ -343,5 +384,5 @@ int16_t UltrasonicSensor::limitForwardCommand(int16_t cmd)const{
   return min(cmd,limited);
 }
 const char* UltrasonicSensor::zoneText(ObstacleZone z){switch(z){case ObstacleZone::CLEAR:return "CLEAR";case ObstacleZone::CAUTION:return "CAUTION";case ObstacleZone::BLOCKED:return "BLOCKED";case ObstacleZone::EMERGENCY:return "EMERGENCY";default:return "UNKNOWN";}}
-const char* UltrasonicSensor::healthText(SensorHealth h){switch(h){case SensorHealth::HEALTHY:return "HEALTHY";case SensorHealth::STALE:return "STALE";case SensorHealth::TIMEOUT:return "TIMEOUT";case SensorHealth::INVALID:return "INVALID";case SensorHealth::DISCONNECTED_OR_FAULT:return "DISCONNECTED_OR_FAULT";case SensorHealth::DEGRADED:return "DEGRADED";default:return "UNKNOWN";}}
+const char* UltrasonicSensor::healthText(SensorHealth h){switch(h){case SensorHealth::HEALTHY:return "HEALTHY";case SensorHealth::STALE:return "STALE";case SensorHealth::TIMEOUT:return "TIMEOUT";case SensorHealth::INVALID:return "INVALID";case SensorHealth::DISCONNECTED_OR_FAULT:return "DISCONNECTED_OR_FAULT";case SensorHealth::DEGRADED:return "DEGRADED";case SensorHealth::DISABLED:return "DISABLED";default:return "UNKNOWN";}}
 const char* UltrasonicSensor::avoidanceText(AvoidanceDirection d){switch(d){case AvoidanceDirection::LEFT:return "LEFT";case AvoidanceDirection::RIGHT:return "RIGHT";case AvoidanceDirection::STOP:return "STOP";default:return "NONE";}}

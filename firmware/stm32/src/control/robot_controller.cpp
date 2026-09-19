@@ -365,8 +365,16 @@ void RobotController::applyMotorCommand() {
   const int16_t forward = static_cast<int16_t>((left + right) / 2);
   const int16_t turn = static_cast<int16_t>((left - right) / 2);
   if (!manualPs2 && forward > 0) {
-    const int16_t limitedForward =
-        ultrasonic_.limitForwardCommand(forward);
+    // MAP/Replay is fail-closed on sensor validity. The generic limiter keeps
+    // its existing bounded degraded-clear behavior for non-MAP AI commands,
+    // but a replay segment must never advance on stale/timeout/unknown data.
+    const bool replaySensorValid =
+        motionOwner_ != MotionOwner::REPLAY ||
+        (ultrasonic_.isFresh() && ultrasonic_.healthy() &&
+         ultrasonic_.overallZone() != ObstacleZone::UNKNOWN);
+    const int16_t limitedForward = replaySensorValid
+        ? ultrasonic_.limitForwardCommand(forward)
+        : 0;
     if (limitedForward < forward) {
       obstacleLimited_ = true;
       left = constrain(limitedForward + turn, -255, 255);
@@ -1029,6 +1037,8 @@ void RobotController::updateAiGuidedWaypoint(uint32_t nowMs) {
   // Arrival heading is the immutable incoming route-edge bearing supplied by
   // MapController. The live target bearing above remains the PATH steering
   // direction and must not replace the arrival heading at a side offset.
+  const float routeHeadingError = HeadingFusion::shortestDelta(
+      incomingBearing, currentHeadingDeg());
   const float arrivalHeadingError = HeadingFusion::shortestDelta(
       incomingBearing, currentHeadingDeg());
   if (remaining <= guidedArrivalPositionToleranceMm_ &&
@@ -1073,7 +1083,14 @@ void RobotController::updateAiGuidedWaypoint(uint32_t nowMs) {
   // A large live bearing error means the robot is no longer converging by a
   // gentle differential correction. Stop forward motion and let MapController
   // re-enter the shared coarse-turn primitive for this same waypoint.
-  if (fabsf(guidedHeadingErrorDeg_) >= MAP_GUIDE_REALIGN_THRESHOLD_DEG) {
+  // Near a waypoint, point-pursuit bearing can legitimately swing tens of
+  // degrees when the chassis has lateral or small endpoint error.  Treating
+  // that live bearing as a hard realign request repeatedly restarts the same
+  // MAP segment even though the chassis is still aligned with the immutable
+  // route edge.  A PATH realign is warranted only when the chassis heading
+  // itself is also outside the route-edge threshold.
+  if (fabsf(guidedHeadingErrorDeg_) >= MAP_GUIDE_REALIGN_THRESHOLD_DEG &&
+      fabsf(routeHeadingError) >= MAP_GUIDE_REALIGN_THRESHOLD_DEG) {
 #if ROBOT_DEBUG
     debug_.print("MAP,GUIDE,REALIGN,ERR=");
     debug_.println(guidedHeadingErrorDeg_, 2);
@@ -1200,10 +1217,11 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     return;
   }
 
-  // A turn-in-place does not add forward travel. Permit it when at least one
-  // fresh sector is explicitly clear, even if the other ultrasonic channel is
-  // temporarily unknown/timeout. Keep every caution/blocked/emergency result
-  // as a hard stop, and do not turn when no sector is trustworthy.
+  // A turn-in-place does not add forward travel. A single centred sensor can
+  // lose one echo while the chassis is rotating, so permit only its bounded
+  // recently-validated wide-clear window. This never treats startup, a close
+  // reading, or a sustained timeout as clear. Caution/blocked/emergency still
+  // stop immediately.
   const ObstacleZone turnZone = ultrasonic_.overallZone();
   const bool leftSectorClear =
       ultrasonic_.frontLeft().fresh &&
@@ -1211,12 +1229,15 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
   const bool rightSectorClear =
       ultrasonic_.frontRight().fresh &&
       ultrasonic_.frontRightZone() == ObstacleZone::CLEAR;
-  const bool oneSectorClear =
-      turnZone == ObstacleZone::CLEAR ||
-      (turnZone == ObstacleZone::UNKNOWN &&
-       (leftSectorClear || rightSectorClear));
-  const bool recentClearWindow =
-      ultrasonic_.hasRecentClearWindow(nowMs);
+  const bool mapSensorClear =
+      ultrasonic_.isFresh() && ultrasonic_.healthy() &&
+      turnZone == ObstacleZone::CLEAR;
+  const bool oneSectorClear = mapTurnProfile
+      ? mapSensorClear
+      : (turnZone == ObstacleZone::CLEAR ||
+         (turnZone == ObstacleZone::UNKNOWN &&
+          (leftSectorClear || rightSectorClear)));
+  const bool recentClearWindow = ultrasonic_.hasRecentClearWindow(nowMs);
   if (!oneSectorClear && !recentClearWindow) {
 #if ROBOT_DEBUG
     debug_.print("TURN,STOP=OBSTACLE,ZONE=");
@@ -1858,6 +1879,8 @@ void RobotController::updateDisplay() {
   data.obstacleZone = UltrasonicSensor::zoneText(ultrasonic_.zone());
   data.frontLeftDistanceCm = ultrasonic_.frontLeftDistanceCm();
   data.frontRightDistanceCm = ultrasonic_.frontRightDistanceCm();
+  data.frontLeftEnabled = ultrasonic_.frontLeftEnabled();
+  data.frontRightEnabled = ultrasonic_.frontRightEnabled();
   data.frontLeftFresh = ultrasonic_.frontLeft().fresh;
   data.frontRightFresh = ultrasonic_.frontRight().fresh;
   data.frontLeftEchoValid = ultrasonic_.frontLeft().echoValid;

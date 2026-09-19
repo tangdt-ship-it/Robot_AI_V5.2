@@ -18,6 +18,14 @@ constexpr float kClosedCandidateHeadingDeg = 20.0f;
 constexpr float kClosedClosureSkipDistanceMm = kDuplicateDistanceMm;
 constexpr float kWaypointToleranceMm =
     static_cast<float>(MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM);
+// A coarse ARRIVAL turn can translate the chassis by a few millimetres while
+// correcting heading.  This bounded recovery window is only for the
+// immediately-following ARRIVAL realign; the normal arrival gate remains the
+// configured waypoint tolerance above.  Never restart a forward Guided MOVE
+// for this small post-turn drift, because it can carry the chassis past the
+// target and make point-pursuit turn back toward the same waypoint.
+constexpr float kPostTurnArrivalRecoveryToleranceMm = 10.0f;
+constexpr uint8_t kMaxArrivalTurnAttempts = 2U;
 constexpr float kReplayPoseHoldToleranceMm = 100.0f;
 constexpr float kReplayPoseHoldToleranceDeg = 15.0f;
 constexpr float kMinimumSegmentMm = 20.0f;
@@ -93,9 +101,12 @@ const char* HoldReasonName(MapHoldReason reason) {
 MapController::MapController(RobotController& robot, Ps2Controller& ps2,
                              LcdDisplay& display, WheelOdometry& odometry,
                              HeadingFusion& fusion,
-                             UltrasonicSensor& ultrasonic, Print& debugStream)
+                             UltrasonicSensor& ultrasonic,
+                             ObstacleClassifier& obstacleClassifier,
+                             Print& debugStream)
     : robot_(robot), ps2_(ps2), display_(display), odometry_(odometry),
-      fusion_(fusion), ultrasonic_(ultrasonic), debug_(debugStream) {}
+      fusion_(fusion), ultrasonic_(ultrasonic),
+      obstacleClassifier_(obstacleClassifier), debug_(debugStream) {}
 
 const char* MapController::storageErrorReasonName(
     MapStorageErrorReason reason) {
@@ -250,6 +261,10 @@ void MapController::update() {
     }
   }
 
+  // Track the obstacle clear window while held. This never restarts replay;
+  // it only arms the explicit START resume gate after a stable clear period.
+  serviceObstacleHold();
+
   if (postTeachBack_.valid && !postTeachBackActive_) {
     const bool resetChanged =
         odometry_.resetGeneration() != postTeachBack_.odometryResetGeneration ||
@@ -268,12 +283,44 @@ void MapController::update() {
     if (odometry_.resetGeneration() != replayOriginResetGeneration_ ||
         robot_.headingResetGeneration() != replayOriginHeadingResetGeneration_ ||
         route_.header.generation != replayOriginRouteGeneration_) {
-      abortReplay("RESET_BOUNDARY");
+      // This is intentionally diagnostic-only. The three origin snapshots
+      // remain the exact safety gate below; emitting both sides of the
+      // comparison lets a field HIL log identify which boundary changed.
+      debug_.print("MAP,RESET_BOUNDARY,ODOM_ORIGIN=");
+      debug_.print(replayOriginResetGeneration_);
+      debug_.print(",ODOM_NOW=");
+      debug_.print(odometry_.resetGeneration());
+      debug_.print(",HEADING_ORIGIN=");
+      debug_.print(replayOriginHeadingResetGeneration_);
+      debug_.print(",HEADING_NOW=");
+      debug_.print(robot_.headingResetGeneration());
+      debug_.print(",ROUTE_ORIGIN=");
+      debug_.print(replayOriginRouteGeneration_);
+      debug_.print(",ROUTE_NOW=");
+      debug_.println(route_.header.generation);
+      if (obstacleDetourContextActive()) {
+        abortObstacleDetour("RESET_BOUNDARY");
+      } else {
+        abortReplay("RESET_BOUNDARY");
+      }
     } else if (ps2_.state().r3) {
-      cancelReplay("R3");
+      if (obstacleDetourContextActive()) {
+        abortObstacleDetour("R3");
+      } else {
+        cancelReplay("R3");
+      }
+    } else if (obstacleDetourContextActive()) {
+      if (ps2_.motionCommandActive()) {
+        abortObstacleDetour("PS2_TAKEOVER");
+      } else if (obstacleDetourInProgress()) {
+        updateObstacleDetour();
+      }
     } else if (robot_.motionOwner() != MotionOwner::REPLAY &&
                !robot_.aiMotionActive() &&
-               replayOperation_ != MapReplayOperation::NONE) {
+               replayOperation_ != MapReplayOperation::NONE &&
+               !(mode_ == MapControllerMode::REPLAY_HOLD &&
+                 holdReason_ == MapHoldReason::OBSTACLE &&
+                 replayOperation_ == MapReplayOperation::HOLD)) {
       // External STOP/mission arbitration removed the owner without producing
       // a replay result. Do not infer success from a stopped motor.
       enterReplayHold(MapHoldReason::EXTERNAL_STOP, false);
@@ -685,11 +732,32 @@ void MapController::handleStart() {
     }
     return;
   }
-  if (replayActive_) {
+  if (replayActive_ && mode_ != MapControllerMode::REPLAY_HOLD) {
     logStartReject("REPLAY_ACTIVE");
     return;
   }
   if (mode_ == MapControllerMode::REPLAY_HOLD) {
+    if (holdReason_ == MapHoldReason::OBSTACLE &&
+        obstacleDetourPhase_ != ObstacleDetourPhase::IDLE) {
+      debug_.print("OBS,DETOUR,START,REJECT=PHASE_");
+      debug_.println(static_cast<unsigned>(obstacleDetourPhase_));
+      logStartReject(obstacleDetourPhase_ == ObstacleDetourPhase::ABORTED
+                         ? "DETOUR_ABORTED"
+                         : "DETOUR_COMPLETE_HOLD");
+      return;
+    }
+    if (holdReason_ == MapHoldReason::OBSTACLE &&
+        obstacleClassifier_.stable() &&
+        (obstacleClassifier_.decision() == ObstacleDecision::AVOID_LEFT ||
+         obstacleClassifier_.decision() == ObstacleDecision::AVOID_RIGHT)) {
+      const char* detourReason = nullptr;
+      if (armObstacleDetour(detourReason)) return;
+      debug_.print("OBS,DETOUR,NOT_ALLOWED,REASON=");
+      debug_.println(detourReason != nullptr ? detourReason : "ENTRY_GATE");
+      logStartReject(detourReason != nullptr ? detourReason
+                                             : "DETOUR_NOT_ALLOWED");
+      return;
+    }
     debug_.println("MAP,START,ACTION=RESUME");
     debug_.print("MAP,RESUME,REQUEST,WP=");
     debug_.print(static_cast<unsigned>(replayTargetIndex_));
@@ -706,6 +774,9 @@ void MapController::handleStart() {
       mode_ = MapControllerMode::REPLAY_RUNNING;
       replayOperation_ = MapReplayOperation::NONE;
       replayReason_ = "RESUME";
+      if (holdReason_ == MapHoldReason::OBSTACLE) {
+        debug_.println("OBS,HOLD,RESUME");
+      }
       holdReason_ = MapHoldReason::NONE;
       statusDirty_ = true;
       debug_.print("MAP,RESUME,ACCEPT,WP=");
@@ -886,7 +957,11 @@ void MapController::handleCross() {
     statusDirty_ = true;
   } else if (replayActive_) {
     // X-down is the immediate safety stop and enters a resumable USER HOLD.
-    enterReplayHold(MapHoldReason::USER, true);
+    if (obstacleDetourInProgress()) {
+      abortObstacleDetour("USER_STOP");
+    } else if (!obstacleDetourContextActive()) {
+      enterReplayHold(MapHoldReason::USER, true);
+    }
   } else if (mode_ == MapControllerMode::REPLAY_HOLD) {
     // A new short X while already held leaves the hold in place. The long
     // event for this press is handled separately by handleCrossLong().
@@ -909,6 +984,12 @@ void MapController::handleCrossLong() {
   if (postTeachBack_.valid && !postTeachBackActive_) {
     debug_.println("MAP,BACK_P0,DISMISS_LONG");
     invalidatePostTeachBack("DISMISS_LONG");
+    return;
+  }
+  if (obstacleDetourInProgress()) {
+    // A long X is still a highest-priority production stop. Keep the detour
+    // generation fenced before the existing cancel path is considered.
+    abortObstacleDetour("X_LONG");
     return;
   }
   if (replayActive_) {
@@ -1165,6 +1246,9 @@ bool MapController::startPostTeachBack(const char*& reason) {
   replayOriginValid_ = true;
   replayRealignReason_ = ReplayRealignReason::NONE;
   replayArrivalHeadingViolationSinceMs_ = 0U;
+  replayArrivalTurnPending_ = false;
+  replayArrivalTurnWaypoint_ = 0U;
+  replayArrivalTurnAttempts_ = 0U;
   replayContextSlot_ = postTeachBack_.slot;
   replayOriginResetGeneration_ = postTeachBack_.odometryResetGeneration;
   replayOriginHeadingResetGeneration_ = postTeachBack_.headingResetGeneration;
@@ -1794,6 +1878,9 @@ bool MapController::prepareReplay(const char*& rejectReason) {
   replayOriginValid_ = true;
   replayRealignReason_ = ReplayRealignReason::NONE;
   replayArrivalHeadingViolationSinceMs_ = 0U;
+  replayArrivalTurnPending_ = false;
+  replayArrivalTurnWaypoint_ = 0U;
+  replayArrivalTurnAttempts_ = 0U;
   replayContextSlot_ = selectedSlot_;
   replayOriginResetGeneration_ = odometry_.resetGeneration();
   replayOriginHeadingResetGeneration_ = robot_.headingResetGeneration();
@@ -1877,6 +1964,475 @@ void MapController::updateReplay() {
     }
     (void)startNextReplaySegment();
   }
+}
+
+bool MapController::obstacleDetourContextActive() const {
+  return obstacleDetourPhase_ != ObstacleDetourPhase::IDLE;
+}
+
+bool MapController::obstacleDetourInProgress() const {
+  return obstacleDetourPhase_ != ObstacleDetourPhase::IDLE &&
+         obstacleDetourPhase_ != ObstacleDetourPhase::COMPLETE_HOLD &&
+         obstacleDetourPhase_ != ObstacleDetourPhase::ABORTED;
+}
+
+bool MapController::obstacleDetourSensorsReady() const {
+  // Directional detour is intentionally unavailable with the single centred
+  // SR04. Normal MAP obstacle STOP/HOLD/resume continues through the
+  // aggregate ultrasonic safety gate.
+  if (!ultrasonic_.directionalSensingAvailable()) return false;
+  const auto valid = [](const UltrasonicReading& reading) {
+    return reading.fresh && reading.health == SensorHealth::HEALTHY &&
+           reading.valid && reading.echoValid && isfinite(reading.distanceCm) &&
+           reading.distanceCm >= ULTRASONIC_MIN_CM &&
+           reading.distanceCm <= ULTRASONIC_MAX_CM &&
+           reading.zone != ObstacleZone::UNKNOWN;
+  };
+  const UltrasonicReading& left = ultrasonic_.frontLeft();
+  const UltrasonicReading& right = ultrasonic_.frontRight();
+  return valid(left) && valid(right) && left.zone != ObstacleZone::EMERGENCY &&
+         right.zone != ObstacleZone::EMERGENCY;
+}
+
+bool MapController::obstacleDetourPathClear() const {
+  const UltrasonicReading& left = ultrasonic_.frontLeft();
+  const UltrasonicReading& right = ultrasonic_.frontRight();
+  const bool strictClear =
+      obstacleDetourSensorsReady() && ultrasonic_.isFresh() &&
+      ultrasonic_.healthy() && ultrasonic_.overallZone() == ObstacleZone::CLEAR;
+  // Once Phase 2 has selected a direction from strict evidence, a short
+  // dropout during the already bounded detour may use the sensor subsystem's
+  // existing qualified clear window. This is still fail-closed: a channel
+  // must not be UNKNOWN/BLOCKED/EMERGENCY, and the window itself enforces
+  // prior real Echo, distance, timeout-count, and age limits.
+  const auto boundedClearZone = [](const UltrasonicReading& reading) {
+    return reading.zone != ObstacleZone::UNKNOWN &&
+           reading.zone != ObstacleZone::BLOCKED &&
+           reading.zone != ObstacleZone::EMERGENCY;
+  };
+  const bool boundedDegradedClear =
+      ultrasonic_.hasRecentClearWindow(millis()) &&
+      boundedClearZone(left) && boundedClearZone(right) &&
+      ultrasonic_.overallZone() != ObstacleZone::UNKNOWN &&
+      ultrasonic_.overallZone() != ObstacleZone::BLOCKED &&
+      ultrasonic_.overallZone() != ObstacleZone::EMERGENCY;
+  return strictClear || boundedDegradedClear;
+}
+
+bool MapController::obstacleDetourEntryGates(const char*& rejectReason) const {
+  rejectReason = nullptr;
+  if (!replayActive_ || mode_ != MapControllerMode::REPLAY_HOLD ||
+      holdReason_ != MapHoldReason::OBSTACLE) {
+    rejectReason = "OBSTACLE_HOLD";
+    return false;
+  }
+  if (obstacleDetourContextActive()) {
+    rejectReason = "DETOUR_ALREADY_HANDLED";
+    return false;
+  }
+  if (!replayResumeAllowed_ || replayOperation_ != MapReplayOperation::HOLD) {
+    rejectReason = "REPLAY_CONTEXT";
+    return false;
+  }
+  if (!robot_.motorsStopped() || robot_.aiMotionActive() ||
+      robot_.motionOwner() != MotionOwner::NONE) {
+    rejectReason = "MOTION_OWNER";
+    return false;
+  }
+  const uint32_t now = millis();
+  if (!ps2_.state().frameFresh || ps2_.frameTimedOut(now) ||
+      ps2_.motionCommandActive() || ps2_.state().r3) {
+    rejectReason = "PS2_NOT_NEUTRAL";
+    return false;
+  }
+  if (!loadedValid_ || !replayOriginValid_ ||
+      !validateRoute(route_, rejectReason)) {
+    if (rejectReason == nullptr) rejectReason = "ROUTE_CONTEXT";
+    return false;
+  }
+  if (selectedSlot_ != replayContextSlot_ ||
+      route_.header.generation != replayOriginRouteGeneration_) {
+    rejectReason = "ROUTE_CONTEXT";
+    return false;
+  }
+  if (replayCurrentIndex_ >= route_.header.waypointCount ||
+      replayTargetIndex_ >= route_.header.waypointCount ||
+      replayTargetIndex_ == replayCurrentIndex_ ||
+      (replayDirection_ != 1 && replayDirection_ != -1)) {
+    rejectReason = "TARGET_WAYPOINT";
+    return false;
+  }
+  if (odometry_.resetGeneration() != replayOriginResetGeneration_) {
+    rejectReason = "RESET_BOUNDARY";
+    return false;
+  }
+  if (robot_.headingResetGeneration() != replayOriginHeadingResetGeneration_) {
+    rejectReason = "HEADING_RESET_BOUNDARY";
+    return false;
+  }
+  if (!odometry_.ready() || !odometry_.healthy()) {
+    rejectReason = "ODOMETRY";
+    return false;
+  }
+  if (!fusion_.ready() || fusion_.health() == FusionHealth::NO_SOURCE) {
+    rejectReason = "HEADING";
+    return false;
+  }
+  if (!obstacleClassifier_.stable() ||
+      (obstacleClassifier_.decision() != ObstacleDecision::AVOID_LEFT &&
+       obstacleClassifier_.decision() != ObstacleDecision::AVOID_RIGHT)) {
+    rejectReason = "CLASSIFIER_NOT_STABLE_AVOID";
+    return false;
+  }
+  if (!obstacleDetourSensorsReady()) {
+    rejectReason = "OBSTACLE_SENSOR";
+    return false;
+  }
+  if (obstacleDetourAttempts_ >= OBSTACLE_DETOUR_MAX_ATTEMPTS) {
+    rejectReason = "MAX_ATTEMPTS";
+    return false;
+  }
+  Pose pose;
+  if (!readPose(pose)) {
+    rejectReason = "POSE";
+    return false;
+  }
+  rejectReason = "OK";
+  return true;
+}
+
+bool MapController::armObstacleDetour(const char*& rejectReason) {
+  // Keep the capability boundary at the arm point as well as at the sensor
+  // readiness gate. Future callers cannot accidentally make a left/right
+  // detour actionable while production has only one centred SR04.
+  if (!ultrasonic_.directionalSensingAvailable()) {
+    rejectReason = "DIRECTIONAL_SENSORS_DISABLED";
+    return false;
+  }
+  if (!obstacleDetourEntryGates(rejectReason)) return false;
+
+  Pose pose;
+  if (!readPose(pose)) {
+    rejectReason = "POSE";
+    return false;
+  }
+  obstacleDetourStartPose_ = pose;
+  obstacleDetourOriginalCurrentIndex_ = replayCurrentIndex_;
+  obstacleDetourOriginalTargetIndex_ = replayTargetIndex_;
+  obstacleDetourOriginalDirection_ = replayDirection_;
+  obstacleDetourOriginalRouteGeneration_ = route_.header.generation;
+  obstacleDetourOriginalReplayGeneration_ = replayGeneration_;
+  obstacleDetourDecision_ = obstacleClassifier_.decision();
+  obstacleDetourAwayRight_ =
+      obstacleDetourDecision_ == ObstacleDecision::AVOID_RIGHT;
+  obstacleDetourAttempts_ = 1U;
+  obstacleDetourStartMs_ = millis();
+  obstacleDetourClearSinceMs_ = 0U;
+  obstacleDetourGeneration_ = 0U;
+  obstacleDetourTravelBudgetUsedMm_ = 0U;
+  obstacleDetourTurnBudgetUsedDeg_ = 0.0f;
+  obstacleDetourPhase_ = ObstacleDetourPhase::ARMED;
+  replayResumeAllowed_ = false;
+  replayOperation_ = MapReplayOperation::NONE;
+  mode_ = MapControllerMode::REPLAY_RUNNING;
+  holdReason_ = MapHoldReason::NONE;
+  debug_.print("OBS,DETOUR,ARM,SIDE=");
+  debug_.print(obstacleDetourAwayRight_ ? "RIGHT" : "LEFT");
+  debug_.print(",WP=");
+  debug_.println(static_cast<unsigned>(obstacleDetourOriginalTargetIndex_));
+
+  const bool awayLeft = !obstacleDetourAwayRight_;
+  if (!startObstacleDetourTurn(awayLeft, ObstacleDetourPhase::TURN_AWAY,
+                               "TURN_AWAY")) {
+    rejectReason = "TURN_AWAY_START";
+    abortObstacleDetour(rejectReason);
+    return false;
+  }
+  return true;
+}
+
+bool MapController::startObstacleDetourTurn(bool left,
+                                             ObstacleDetourPhase phase,
+                                             const char* phaseName) {
+  const uint32_t now = millis();
+  if (obstacleDetourStartMs_ == 0U ||
+      now - obstacleDetourStartMs_ >= OBSTACLE_DETOUR_TIMEOUT_MS ||
+      obstacleDetourTurnBudgetUsedDeg_ + OBSTACLE_DETOUR_TURN_AWAY_DEG >
+          OBSTACLE_DETOUR_MAX_TOTAL_TURN_DEG) {
+    return false;
+  }
+  const uint32_t generation = nextReplayGeneration();
+  replaySegmentGeneration_ = generation;
+  obstacleDetourGeneration_ = generation;
+  replayOperation_ = MapReplayOperation::TURN;
+  replayTargetDeg_ = static_cast<int16_t>(
+      lroundf(OBSTACLE_DETOUR_TURN_AWAY_DEG));
+  if (!robot_.startReplayTurnRelative(
+          left, OBSTACLE_DETOUR_TURN_AWAY_DEG, OBSTACLE_DETOUR_SPEED,
+          generation, AiTurnProfile::MAP_COARSE)) {
+    replayOperation_ = MapReplayOperation::NONE;
+    replaySegmentGeneration_ = 0U;
+    obstacleDetourGeneration_ = 0U;
+    return false;
+  }
+  obstacleDetourTurnBudgetUsedDeg_ += OBSTACLE_DETOUR_TURN_AWAY_DEG;
+  obstacleDetourPhase_ = phase;
+  debug_.print("OBS,DETOUR,");
+  debug_.print(phaseName != nullptr ? phaseName : "TURN");
+  debug_.print(",GEN=");
+  debug_.println(generation);
+  statusDirty_ = true;
+  return true;
+}
+
+bool MapController::startObstacleDetourDistance(uint32_t distanceMm,
+                                                 ObstacleDetourPhase phase,
+                                                 const char* phaseName) {
+  const uint32_t now = millis();
+  if (obstacleDetourStartMs_ == 0U ||
+      now - obstacleDetourStartMs_ >= OBSTACLE_DETOUR_TIMEOUT_MS ||
+      distanceMm == 0U ||
+      obstacleDetourTravelBudgetUsedMm_ + distanceMm >
+          OBSTACLE_DETOUR_MAX_TOTAL_DISTANCE_MM) {
+    return false;
+  }
+  const uint32_t generation = nextReplayGeneration();
+  replaySegmentGeneration_ = generation;
+  obstacleDetourGeneration_ = generation;
+  replayOperation_ = MapReplayOperation::MOVE;
+  replayTargetDistanceMm_ = distanceMm;
+  replayTravelMm_ = 0U;
+  replayErrorMm_ = distanceMm;
+  if (!robot_.startReplayDistance(true, distanceMm, OBSTACLE_DETOUR_SPEED,
+                                  generation)) {
+    replayOperation_ = MapReplayOperation::NONE;
+    replaySegmentGeneration_ = 0U;
+    obstacleDetourGeneration_ = 0U;
+    return false;
+  }
+  obstacleDetourTravelBudgetUsedMm_ += distanceMm;
+  obstacleDetourPhase_ = phase;
+  debug_.print("OBS,DETOUR,");
+  debug_.print(phaseName != nullptr ? phaseName : "MOVE");
+  debug_.print(",MM=");
+  debug_.print(distanceMm);
+  debug_.print(",GEN=");
+  debug_.println(generation);
+  statusDirty_ = true;
+  return true;
+}
+
+void MapController::updateObstacleDetour() {
+  if (!obstacleDetourInProgress()) return;
+  const uint32_t now = millis();
+  if (obstacleDetourStartMs_ == 0U ||
+      now - obstacleDetourStartMs_ >= OBSTACLE_DETOUR_TIMEOUT_MS) {
+    abortObstacleDetour("TIMEOUT");
+    return;
+  }
+
+  const bool turnPhase = obstacleDetourPhase_ == ObstacleDetourPhase::TURN_AWAY ||
+                         obstacleDetourPhase_ == ObstacleDetourPhase::TURN_PARALLEL;
+  const bool movePhase = obstacleDetourPhase_ == ObstacleDetourPhase::MOVE_AWAY ||
+                         obstacleDetourPhase_ == ObstacleDetourPhase::MOVE_BYPASS;
+  if (turnPhase &&
+      (replayOperation_ != MapReplayOperation::TURN ||
+       !robot_.aiTurnActive() || robot_.motionOwner() != MotionOwner::REPLAY)) {
+    abortObstacleDetour("EXTERNAL_STOP");
+    return;
+  }
+  if (movePhase &&
+      (replayOperation_ != MapReplayOperation::MOVE ||
+       !robot_.aiDistanceActive() ||
+       robot_.motionOwner() != MotionOwner::REPLAY)) {
+    abortObstacleDetour("EXTERNAL_STOP");
+    return;
+  }
+  if (!turnPhase && !movePhase &&
+      (replayOperation_ != MapReplayOperation::NONE ||
+       robot_.aiMotionActive() || robot_.motionOwner() != MotionOwner::NONE ||
+       !robot_.motorsStopped())) {
+    abortObstacleDetour("EXTERNAL_STOP");
+    return;
+  }
+
+  if (obstacleDetourPhase_ != ObstacleDetourPhase::WAIT_AWAY_CLEAR &&
+      obstacleDetourPhase_ != ObstacleDetourPhase::WAIT_BYPASS_CLEAR) {
+    return;
+  }
+  if (!obstacleDetourPathClear()) {
+    obstacleDetourClearSinceMs_ = 0U;
+    return;
+  }
+  if (obstacleDetourClearSinceMs_ == 0U) {
+    obstacleDetourClearSinceMs_ = now;
+    return;
+  }
+  if (now - obstacleDetourClearSinceMs_ < OBSTACLE_DETOUR_CLEAR_STABLE_MS) {
+    return;
+  }
+  obstacleDetourClearSinceMs_ = 0U;
+  if (obstacleDetourPhase_ == ObstacleDetourPhase::WAIT_AWAY_CLEAR) {
+    if (!startObstacleDetourDistance(OBSTACLE_DETOUR_MOVE_AWAY_MM,
+                                     ObstacleDetourPhase::MOVE_AWAY,
+                                     "MOVE_AWAY")) {
+      abortObstacleDetour("MOVE_AWAY_START");
+    }
+  } else if (!startObstacleDetourDistance(
+                 OBSTACLE_DETOUR_BYPASS_MM,
+                 ObstacleDetourPhase::MOVE_BYPASS, "MOVE_BYPASS")) {
+    abortObstacleDetour("MOVE_BYPASS_START");
+  }
+}
+
+bool MapController::consumeObstacleDetourTurnResult(
+    const AiTurnResult& result) {
+  if (result.owner != MotionOwner::REPLAY) return false;
+  const bool expected =
+      (obstacleDetourPhase_ == ObstacleDetourPhase::TURN_AWAY ||
+       obstacleDetourPhase_ == ObstacleDetourPhase::TURN_PARALLEL) &&
+      replayOperation_ == MapReplayOperation::TURN &&
+      result.motionGeneration != 0U &&
+      result.motionGeneration == obstacleDetourGeneration_;
+  if (!expected) {
+    debug_.print("OBS,DETOUR,STALE_RESULT,TYPE=TURN,GEN=");
+    debug_.print(result.motionGeneration);
+    debug_.print(",EXPECTED=");
+    debug_.println(obstacleDetourGeneration_);
+    return true;
+  }
+  replayOperation_ = MapReplayOperation::NONE;
+  replaySegmentGeneration_ = 0U;
+  obstacleDetourGeneration_ = 0U;
+  if (result.code == AiTurnResultCode::DONE) {
+    obstacleDetourClearSinceMs_ = 0U;
+    if (obstacleDetourPhase_ == ObstacleDetourPhase::TURN_AWAY) {
+      obstacleDetourPhase_ = ObstacleDetourPhase::WAIT_AWAY_CLEAR;
+      debug_.println("OBS,DETOUR,WAIT_AWAY_CLEAR");
+    } else {
+      obstacleDetourPhase_ = ObstacleDetourPhase::WAIT_BYPASS_CLEAR;
+      debug_.println("OBS,DETOUR,WAIT_BYPASS_CLEAR");
+    }
+    statusDirty_ = true;
+    return true;
+  }
+  if (result.code == AiTurnResultCode::CANCELLED &&
+      ps2_.motionCommandActive()) {
+    abortObstacleDetour("PS2_TAKEOVER");
+  } else if (result.code == AiTurnResultCode::HEADING_LOST) {
+    abortObstacleDetour("HEADING_LOST");
+  } else if (result.code == AiTurnResultCode::MOTION_FAULT) {
+    abortObstacleDetour("MOTION_FAULT");
+  } else if (result.code == AiTurnResultCode::OBSTACLE) {
+    abortObstacleDetour("OBSTACLE");
+  } else if (result.code == AiTurnResultCode::TIMEOUT) {
+    abortObstacleDetour("TIMEOUT");
+  } else if (result.code == AiTurnResultCode::CANCELLED) {
+    abortObstacleDetour("CANCELLED");
+  } else {
+    abortObstacleDetour("UNEXPECTED_TURN_RESULT");
+  }
+  return true;
+}
+
+bool MapController::consumeObstacleDetourDistanceResult(
+    const AiDistanceResult& result) {
+  if (result.owner != MotionOwner::REPLAY) return false;
+  const bool expected =
+      (obstacleDetourPhase_ == ObstacleDetourPhase::MOVE_AWAY ||
+       obstacleDetourPhase_ == ObstacleDetourPhase::MOVE_BYPASS) &&
+      replayOperation_ == MapReplayOperation::MOVE &&
+      result.motionGeneration != 0U &&
+      result.motionGeneration == obstacleDetourGeneration_;
+  if (!expected) {
+    debug_.print("OBS,DETOUR,STALE_RESULT,TYPE=DISTANCE,GEN=");
+    debug_.print(result.motionGeneration);
+    debug_.print(",EXPECTED=");
+    debug_.println(obstacleDetourGeneration_);
+    return true;
+  }
+  replayOperation_ = MapReplayOperation::NONE;
+  replaySegmentGeneration_ = 0U;
+  obstacleDetourGeneration_ = 0U;
+  replayTravelMm_ = result.travelledMm < 0.0f
+                        ? 0U
+                        : static_cast<uint32_t>(lroundf(result.travelledMm));
+  if (result.code == AiDistanceResultCode::DONE) {
+    if (obstacleDetourPhase_ == ObstacleDetourPhase::MOVE_AWAY) {
+      const bool parallelLeft = obstacleDetourAwayRight_;
+      if (!startObstacleDetourTurn(parallelLeft,
+                                   ObstacleDetourPhase::TURN_PARALLEL,
+                                   "TURN_PARALLEL")) {
+        abortObstacleDetour("TURN_PARALLEL_START");
+      }
+    } else {
+      completeObstacleDetour();
+    }
+    return true;
+  }
+  if (result.code == AiDistanceResultCode::CANCELLED &&
+      ps2_.motionCommandActive()) {
+    abortObstacleDetour("PS2_TAKEOVER");
+  } else if (result.code == AiDistanceResultCode::OBSTACLE) {
+    abortObstacleDetour("OBSTACLE");
+  } else if (result.code == AiDistanceResultCode::ENCODER_FAULT) {
+    abortObstacleDetour("ENCODER_FAULT");
+  } else if (result.code == AiDistanceResultCode::HEADING_LOST) {
+    abortObstacleDetour("HEADING_LOST");
+  } else if (result.code == AiDistanceResultCode::TIMEOUT) {
+    abortObstacleDetour("TIMEOUT");
+  } else if (result.code == AiDistanceResultCode::CANCELLED) {
+    abortObstacleDetour("CANCELLED");
+  } else {
+    abortObstacleDetour("UNEXPECTED_DISTANCE_RESULT");
+  }
+  return true;
+}
+
+void MapController::completeObstacleDetour() {
+  robot_.stopImmediately(true);
+  nextReplayGeneration();
+  replaySegmentGeneration_ = 0U;
+  obstacleDetourGeneration_ = 0U;
+  replayOperation_ = MapReplayOperation::HOLD;
+  replayActive_ = true;
+  replayResumeAllowed_ = false;
+  mode_ = MapControllerMode::REPLAY_HOLD;
+  holdReason_ = MapHoldReason::OBSTACLE;
+  obstacleDetourPhase_ = ObstacleDetourPhase::COMPLETE_HOLD;
+  obstacleDetourClearSinceMs_ = 0U;
+  replayReason_ = "DETOUR_COMPLETE_HOLD";
+  ps2_.holdMapInput();
+  debug_.print("OBS,DETOUR,COMPLETE_HOLD,SIDE=");
+  debug_.print(obstacleDetourAwayRight_ ? "RIGHT" : "LEFT");
+  debug_.print(",WP=");
+  debug_.print(static_cast<unsigned>(obstacleDetourOriginalTargetIndex_));
+  debug_.print(",TARGET=");
+  debug_.print(static_cast<unsigned>(obstacleDetourOriginalTargetIndex_));
+  debug_.print(",DIST_TOTAL=");
+  debug_.print(obstacleDetourTravelBudgetUsedMm_);
+  debug_.print(",TURN_TOTAL=");
+  debug_.println(obstacleDetourTurnBudgetUsedDeg_, 1);
+  statusDirty_ = true;
+}
+
+void MapController::abortObstacleDetour(const char* reason) {
+  robot_.stopImmediately(true);
+  nextReplayGeneration();
+  replaySegmentGeneration_ = 0U;
+  obstacleDetourGeneration_ = 0U;
+  replayOperation_ = MapReplayOperation::HOLD;
+  replayActive_ = loadedValid_ && replayOriginValid_;
+  replayResumeAllowed_ = false;
+  mode_ = MapControllerMode::REPLAY_HOLD;
+  holdReason_ = MapHoldReason::OBSTACLE;
+  obstacleDetourPhase_ = ObstacleDetourPhase::ABORTED;
+  obstacleDetourClearSinceMs_ = 0U;
+  replayReason_ = reason != nullptr ? reason : "DETOUR_ABORTED";
+  ps2_.holdMapInput();
+  debug_.print("OBS,DETOUR,ABORT,REASON=");
+  debug_.println(replayReason_);
+  statusDirty_ = true;
 }
 
 MapController::Pose MapController::routePointWorld(uint16_t index) const {
@@ -1991,6 +2547,10 @@ bool MapController::startNextReplaySegment() {
   const bool inArrivalZone = targetDistance <= waypointToleranceMm;
   const bool arrivalHeadingWithinTolerance =
       fabsf(arrivalHeadingError) <= MAP_GUIDE_ARRIVAL_HEADING_TOLERANCE_DEG;
+  const float routeRad = incomingBearing * kDegToRad;
+  const float targetAlongRouteMm =
+      (replayTarget_.xMm - current.xMm) * cosf(routeRad) +
+      (replayTarget_.yMm - current.yMm) * sinf(routeRad);
   const uint32_t nowMs = millis();
   bool arrivalHeadingViolationStable = false;
   if (!inArrivalZone || arrivalHeadingWithinTolerance) {
@@ -2014,14 +2574,52 @@ bool MapController::startNextReplaySegment() {
     desiredBearing = incomingBearing;
     desiredHeadingError = arrivalHeadingError;
     if (!inArrivalZone) {
-      // The chassis may move slightly while turning. Once it leaves the
-      // arrival zone, resume guidance to the same target from the live pose.
-      replayRealignReason_ = ReplayRealignReason::NONE;
-      logGuideRealignDone(actionReason, replayTargetIndex_, targetDistance,
-                          incomingBearing, current.headingDeg,
-                          arrivalHeadingError, "GUIDED");
-      desiredBearing = incomingBearing;
-      desiredHeadingError = routeHeadingError;
+      const bool postTurnRecovery =
+          targetDistance <= kPostTurnArrivalRecoveryToleranceMm;
+      if (postTurnRecovery && arrivalHeadingWithinTolerance) {
+        // A heading correction may move the chassis just outside the strict
+        // 5 mm gate.  It is already at the same waypoint and correctly
+        // aligned, so advancing is safer than restarting forward guidance.
+        replayRealignReason_ = ReplayRealignReason::NONE;
+        logGuideRealignDone(actionReason, replayTargetIndex_, targetDistance,
+                            incomingBearing, current.headingDeg,
+                            arrivalHeadingError, "ADVANCE_RECOVERED");
+        advanceReplayAfterTarget();
+        return true;
+      }
+      if (postTurnRecovery) {
+        // Stay on the arrival correction path.  Do not issue a forward MOVE
+        // while the target is only a few millimetres away.
+        coarsePreturn = true;
+      } else {
+        if (!arrivalHeadingWithinTolerance) {
+          // The old path resumed forward guidance here even though the
+          // arrival heading was still invalid.  Keep this waypoint in the
+          // in-place correction path until its heading is valid.
+          coarsePreturn = true;
+        } else if (targetAlongRouteMm < -kWaypointToleranceMm) {
+          // Guided waypoint motion is forward-only.  If an arrival turn has
+          // carried the chassis beyond the target, restarting it would drive
+          // away from the same waypoint and can create a REALIGN loop.
+          debug_.print("MAP,GUIDE,REALIGN,ABORT,WP=");
+          debug_.print(static_cast<unsigned>(replayTargetIndex_));
+          debug_.print(",REASON=ARRIVAL_OVERSHOOT,DIST_MM=");
+          debug_.println(targetDistance, 1);
+          abortReplay("ARRIVAL_OVERSHOOT");
+          return false;
+        } else {
+          // The target is still ahead and the route heading is valid, so a
+          // bounded forward recovery to the same waypoint is safe.
+          replayRealignReason_ = ReplayRealignReason::NONE;
+          replayArrivalTurnPending_ = false;
+          replayArrivalTurnAttempts_ = 0U;
+          logGuideRealignDone(actionReason, replayTargetIndex_, targetDistance,
+                              incomingBearing, current.headingDeg,
+                              arrivalHeadingError, "GUIDED");
+          desiredBearing = incomingBearing;
+          desiredHeadingError = routeHeadingError;
+        }
+      }
     } else if (arrivalHeadingWithinTolerance) {
       replayRealignReason_ = ReplayRealignReason::NONE;
       logGuideRealignDone(actionReason, replayTargetIndex_, targetDistance,
@@ -2093,6 +2691,24 @@ bool MapController::startNextReplaySegment() {
   }
 
   if (realignAction && coarsePreturn) {
+    if (actionReason == ReplayRealignReason::ARRIVAL) {
+      if (replayArrivalTurnPending_ &&
+          replayArrivalTurnWaypoint_ == replayTargetIndex_ &&
+          replayArrivalTurnAttempts_ >= kMaxArrivalTurnAttempts) {
+        debug_.print("MAP,GUIDE,REALIGN,ABORT,WP=");
+        debug_.print(static_cast<unsigned>(replayTargetIndex_));
+        debug_.println(",REASON=REALIGN_STUCK");
+        abortReplay("REALIGN_STUCK");
+        return false;
+      }
+      if (!replayArrivalTurnPending_ ||
+          replayArrivalTurnWaypoint_ != replayTargetIndex_) {
+        replayArrivalTurnPending_ = true;
+        replayArrivalTurnWaypoint_ = replayTargetIndex_;
+        replayArrivalTurnAttempts_ = 0U;
+      }
+      ++replayArrivalTurnAttempts_;
+    }
     logGuideRealign(actionReason, replayTargetIndex_, targetDistance,
                     desiredBearing, current.headingDeg, desiredHeadingError);
   }
@@ -2140,6 +2756,9 @@ void MapController::advanceReplayAfterTarget() {
   const uint16_t fromIndex = replayCurrentIndex_;
   const uint16_t targetIndex = replayTargetIndex_;
   replayArrivalHeadingViolationSinceMs_ = 0U;
+  replayArrivalTurnPending_ = false;
+  replayArrivalTurnWaypoint_ = 0U;
+  replayArrivalTurnAttempts_ = 0U;
   const uint16_t count = route_.header.waypointCount;
   const bool logicalClosingEdge =
       IsClosingMode(routeMode_) && replayDirection_ > 0 &&
@@ -2256,13 +2875,31 @@ void MapController::enterReplayHold(MapHoldReason reason, bool allowResume) {
   // changes no braking strategy and guarantees owner release before HOLD is
   // exposed to the rest of the loop.
   robot_.stopImmediately(true);
+  if (reason == MapHoldReason::OBSTACLE &&
+      !obstacleDetourContextActive()) {
+    // A fresh production obstacle result starts a new one-attempt detour
+    // lifecycle.  An ABORTED/COMPLETE detour is deliberately not reset here;
+    // it can only be replaced by a new replay/obstacle event.
+    obstacleDetourAttempts_ = 0U;
+    obstacleDetourDecision_ = ObstacleDecision::HOLD;
+    obstacleDetourStartMs_ = 0U;
+    obstacleDetourClearSinceMs_ = 0U;
+    obstacleDetourGeneration_ = 0U;
+    obstacleDetourTravelBudgetUsedMm_ = 0U;
+    obstacleDetourTurnBudgetUsedDeg_ = 0.0f;
+  }
   nextReplayGeneration();
   replaySegmentGeneration_ = 0U;
-  replayActive_ = false;
+  // Keep the valid MAP mission active while an obstacle is held.  This makes
+  // the Phase 3 entry contract explicit without allowing normal replay to
+  // advance: HOLD remains the current replay operation until START decides
+  // between the Phase 1 resume path and the bounded detour.
+  replayActive_ = reason == MapHoldReason::OBSTACLE;
   replayOperation_ = MapReplayOperation::HOLD;
   replayReason_ = HoldReasonName(reason);
   holdReason_ = reason;
   replayResumeAllowed_ = allowResume;
+  obstacleClearSinceMs_ = 0U;
   replayHoldPoseValid_ = readPose(replayHoldPose_);
   mode_ = MapControllerMode::REPLAY_HOLD;
   statusDirty_ = true;
@@ -2391,7 +3028,11 @@ void MapController::clearReplayResumeContext() {
   replayOriginValid_ = false;
   replayRealignReason_ = ReplayRealignReason::NONE;
   replayArrivalHeadingViolationSinceMs_ = 0U;
+  replayArrivalTurnPending_ = false;
+  replayArrivalTurnWaypoint_ = 0U;
+  replayArrivalTurnAttempts_ = 0U;
   holdReason_ = MapHoldReason::NONE;
+  obstacleClearSinceMs_ = 0U;
   replayOperation_ = MapReplayOperation::NONE;
   replayCurrentIndex_ = 0U;
   replayTargetIndex_ = 1U;
@@ -2410,9 +3051,48 @@ void MapController::clearReplayResumeContext() {
   replayErrorMm_ = 0U;
   replayLapCounter_ = 0U;
   replayCycleCounter_ = 0U;
+  obstacleDetourPhase_ = ObstacleDetourPhase::IDLE;
+  obstacleDetourDecision_ = ObstacleDecision::HOLD;
+  obstacleDetourAwayRight_ = false;
+  obstacleDetourAttempts_ = 0U;
+  obstacleDetourStartMs_ = 0U;
+  obstacleDetourClearSinceMs_ = 0U;
+  obstacleDetourGeneration_ = 0U;
+  obstacleDetourTravelBudgetUsedMm_ = 0U;
+  obstacleDetourTurnBudgetUsedDeg_ = 0.0f;
+  obstacleDetourStartPose_ = {};
+  obstacleDetourOriginalCurrentIndex_ = 0U;
+  obstacleDetourOriginalTargetIndex_ = 0U;
+  obstacleDetourOriginalDirection_ = 1;
+  obstacleDetourOriginalRouteGeneration_ = 0U;
+  obstacleDetourOriginalReplayGeneration_ = 0U;
 }
 
-bool MapController::canResumeReplay(const char*& rejectReason) const {
+void MapController::serviceObstacleHold() {
+  if (mode_ != MapControllerMode::REPLAY_HOLD ||
+      holdReason_ != MapHoldReason::OBSTACLE) {
+    obstacleClearSinceMs_ = 0U;
+    return;
+  }
+
+  const uint32_t now = millis();
+  const bool obstacleLiveClear =
+      ultrasonic_.isFresh() && ultrasonic_.healthy() &&
+      ultrasonic_.overallZone() == ObstacleZone::CLEAR;
+  if (!obstacleLiveClear) {
+    if (obstacleClearSinceMs_ != 0U) {
+      debug_.println("OBS,HOLD,WAIT");
+    }
+    obstacleClearSinceMs_ = 0U;
+    return;
+  }
+  if (obstacleClearSinceMs_ == 0U) {
+    obstacleClearSinceMs_ = now;
+    debug_.println("OBS,HOLD,CLEAR_PENDING");
+  }
+}
+
+bool MapController::canResumeReplay(const char*& rejectReason) {
   rejectReason = nullptr;
   if (!loadedValid_) {
     rejectReason = "NOT_SAVED";
@@ -2476,12 +3156,28 @@ bool MapController::canResumeReplay(const char*& rejectReason) const {
   const bool obstacleLiveClear =
       ultrasonic_.isFresh() && ultrasonic_.healthy() &&
       ultrasonic_.overallZone() == ObstacleZone::CLEAR;
-  const bool obstacleGraceClear =
-      ultrasonic_.overallZone() == ObstacleZone::CLEAR &&
-      ultrasonic_.hasRecentClearWindow(now);
-  if (!obstacleLiveClear && !obstacleGraceClear) {
-    rejectReason = "OBSTACLE_NOT_CLEAR";
-    return false;
+  if (holdReason_ == MapHoldReason::OBSTACLE) {
+    if (!obstacleLiveClear) {
+      obstacleClearSinceMs_ = 0U;
+      rejectReason = "OBSTACLE_NOT_CLEAR";
+      return false;
+    }
+    if (obstacleClearSinceMs_ == 0U) {
+      obstacleClearSinceMs_ = now;
+      debug_.println("OBS,HOLD,CLEAR_PENDING");
+    }
+    if ((now - obstacleClearSinceMs_) < OBSTACLE_CLEAR_STABLE_MS) {
+      rejectReason = "OBSTACLE_NOT_CLEAR";
+      return false;
+    }
+  } else {
+    const bool obstacleGraceClear =
+        ultrasonic_.overallZone() == ObstacleZone::CLEAR &&
+        ultrasonic_.hasRecentClearWindow(now);
+    if (!obstacleLiveClear && !obstacleGraceClear) {
+      rejectReason = "OBSTACLE_NOT_CLEAR";
+      return false;
+    }
   }
   Pose pose;
   if (!replayHoldPoseValid_ || !readPose(pose)) {
@@ -2501,6 +3197,9 @@ bool MapController::canResumeReplay(const char*& rejectReason) const {
 
 bool MapController::consumeReplayTurnResult(const AiTurnResult& result) {
   if (result.owner != MotionOwner::REPLAY) return false;
+  if (obstacleDetourContextActive()) {
+    return consumeObstacleDetourTurnResult(result);
+  }
   if (!replayActive_ || replayOperation_ != MapReplayOperation::TURN ||
       result.motionGeneration != replaySegmentGeneration_) {
     if (result.motionGeneration != 0U) {
@@ -2543,6 +3242,9 @@ bool MapController::consumeReplayTurnResult(const AiTurnResult& result) {
 
 bool MapController::consumeReplayDistanceResult(const AiDistanceResult& result) {
   if (result.owner != MotionOwner::REPLAY) return false;
+  if (obstacleDetourContextActive()) {
+    return consumeObstacleDetourDistanceResult(result);
+  }
   if (!replayActive_ || replayOperation_ != MapReplayOperation::MOVE ||
       result.motionGeneration != replaySegmentGeneration_) {
     if (result.motionGeneration != 0U) {
@@ -2578,8 +3280,13 @@ bool MapController::consumeReplayDistanceResult(const AiDistanceResult& result) 
     const float incomingBearing =
         replayIncomingBearing(replayCurrentIndex_, replayTargetIndex_);
     const bool inArrivalZone = targetDistance <= waypointToleranceMm;
-    replayRealignReason_ = inArrivalZone ? ReplayRealignReason::ARRIVAL
+  replayRealignReason_ = inArrivalZone ? ReplayRealignReason::ARRIVAL
                                          : ReplayRealignReason::PATH;
+    if (replayRealignReason_ != ReplayRealignReason::ARRIVAL) {
+      replayArrivalTurnPending_ = false;
+      replayArrivalTurnWaypoint_ = 0U;
+      replayArrivalTurnAttempts_ = 0U;
+    }
     // A guided result must never reintroduce a live-pose-to-target bearing:
     // that geometry is displaced by the accumulated cross-track error and
     // would make the next MAP or BACK corner turn short.  Both PATH and
@@ -2615,11 +3322,17 @@ bool MapController::consumeReplayDistanceResult(const AiDistanceResult& result) 
       logGuideDone(to, positionError, arrivalBearing, current.headingDeg,
                    arrivalHeadingError);
       replayRealignReason_ = ReplayRealignReason::NONE;
+      replayArrivalTurnPending_ = false;
+      replayArrivalTurnWaypoint_ = 0U;
+      replayArrivalTurnAttempts_ = 0U;
       advanceReplayAfterTarget();
     } else if (positionError <= waypointToleranceMm) {
       // Do not let a distance-complete result bypass the arrival heading
       // gate. The next cycle performs ARRIVAL coarse correction.
       replayRealignReason_ = ReplayRealignReason::ARRIVAL;
+      replayArrivalTurnPending_ = false;
+      replayArrivalTurnWaypoint_ = to;
+      replayArrivalTurnAttempts_ = 0U;
       logGuideRealign(replayRealignReason_, to, positionError, arrivalBearing,
                       current.headingDeg, arrivalHeadingError);
     } else {
@@ -2627,6 +3340,9 @@ bool MapController::consumeReplayDistanceResult(const AiDistanceResult& result) 
       // before this result is consumed. Re-enter PATH guidance to the same
       // target instead of advancing on a stale completion.
       replayRealignReason_ = ReplayRealignReason::PATH;
+      replayArrivalTurnPending_ = false;
+      replayArrivalTurnWaypoint_ = 0U;
+      replayArrivalTurnAttempts_ = 0U;
       const float routeHeadingError =
           shortestDeltaDeg(arrivalBearing, current.headingDeg);
       logGuideRealign(replayRealignReason_, to, positionError, arrivalBearing,

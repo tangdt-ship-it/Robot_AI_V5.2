@@ -46,6 +46,13 @@ static constexpr uint32_t ULTRASONIC_TRIG_PIN = 44U;       // PC12
 static constexpr uint32_t ULTRASONIC_ECHO_PIN = 41U;       // PC9
 static constexpr uint32_t ULTRASONIC_RIGHT_TRIG_PIN = 36U; // PC4
 static constexpr uint32_t ULTRASONIC_RIGHT_ECHO_PIN = 39U; // PC7
+// The two front SR04 modules are mechanically adjacent on this robot. A
+// close reflector in one cone can starve the other module of Echo despite the
+// serialized trigger scheduler. Run the proven left module as the single
+// centre-front safety sensor until a separated two-sector installation is
+// available. PC4/PC7 are left electrically inactive; this is not a failed
+// sensor masquerading as CLEAR.
+static constexpr bool ULTRASONIC_RIGHT_ENABLED = false;
 
 static constexpr uint32_t LCD_SCL_PIN = PB7;
 static constexpr uint32_t LCD_SDA_PIN = PB6;
@@ -248,6 +255,11 @@ static_assert(MAP_GUIDE_BACK_ARRIVAL_POSITION_TOLERANCE_MM > 0U &&
 // HOLD, CANCEL and obstacle braking always bypass this ramp.
 static constexpr uint32_t MAP_GUIDE_ACCEL_RAMP_MS = 400U;
 static constexpr uint32_t MAP_GUIDE_TELEMETRY_MS = 250U;
+// An obstacle hold may resume only after both SR04 channels have remained
+// fresh, healthy and CLEAR for a complete bounded observation window. This is
+// deliberately longer than one alternating sensor sample (60 ms) and does
+// not alter any obstacle threshold or automatic-detour policy.
+static constexpr uint32_t OBSTACLE_CLEAR_STABLE_MS = 400U;
 
 // All MAP long-press gestures share one deliberate threshold. X still enters
 // HOLD on its down edge; this value only controls escalation to CANCEL.
@@ -331,8 +343,40 @@ static constexpr float OBSTACLE_STOP_PER_COMMAND_CM = 0.10f;
 static constexpr float OBSTACLE_APPROACH_LOOKAHEAD_S = 0.15f;
 static constexpr float OBSTACLE_SLOW_BAND_CM = 18.0f;
 static constexpr int16_t OBSTACLE_MIN_FORWARD_COMMAND = 8;
+// Phase 2 is diagnostic/decision-only.  These constants classify the two
+// existing front sectors and never change the established stop thresholds.
+// The 100 mm balance window is deliberately conservative for two separated
+// forward-facing beams; a close, asymmetric pair remains BOTH_BLOCKED unless
+// the clearance margin provides evidence for a side recommendation.
+static constexpr float OBSTACLE_CLASS_CENTER_BALANCE_MM = 100.0f;
+static constexpr float OBSTACLE_CLASS_SIDE_CLEARANCE_MARGIN_MM = 80.0f;
+static constexpr uint32_t OBSTACLE_CLASS_STABLE_MS = 240U;
 static constexpr float AVOID_MIN_CLEARANCE_CM = 30.0f;
 static constexpr float AVOID_SIDE_HYSTERESIS_CM = 8.0f;
+
+// Phase 3 is a deliberately bounded, one-attempt detour from an obstacle
+// hold.  These are commissioning values only; the detour never mutates the
+// saved MAP route and never retries the opposite side automatically.
+static constexpr float OBSTACLE_DETOUR_TURN_AWAY_DEG = 45.0f;
+static constexpr uint32_t OBSTACLE_DETOUR_MOVE_AWAY_MM = 250U;
+static constexpr uint32_t OBSTACLE_DETOUR_BYPASS_MM = 450U;
+static constexpr int16_t OBSTACLE_DETOUR_SPEED = 15;
+static constexpr uint32_t OBSTACLE_DETOUR_CLEAR_STABLE_MS = 400U;
+static constexpr uint32_t OBSTACLE_DETOUR_TIMEOUT_MS = 20000U;
+static constexpr uint8_t OBSTACLE_DETOUR_MAX_ATTEMPTS = 1U;
+static constexpr uint32_t OBSTACLE_DETOUR_MAX_TOTAL_DISTANCE_MM = 700U;
+static constexpr float OBSTACLE_DETOUR_MAX_TOTAL_TURN_DEG = 90.0f;
+static_assert(OBSTACLE_DETOUR_SPEED >= ROBOT_AI_SPEED_MIN &&
+                  OBSTACLE_DETOUR_SPEED <= ROBOT_AI_SPEED_MAX,
+              "Obstacle detour speed must stay in the AI/replay range");
+static_assert(OBSTACLE_DETOUR_MOVE_AWAY_MM + OBSTACLE_DETOUR_BYPASS_MM <=
+                  OBSTACLE_DETOUR_MAX_TOTAL_DISTANCE_MM,
+              "Obstacle detour distance budget exceeded");
+static_assert(2.0f * OBSTACLE_DETOUR_TURN_AWAY_DEG <=
+                  OBSTACLE_DETOUR_MAX_TOTAL_TURN_DEG,
+              "Obstacle detour turn budget exceeded");
+static_assert(OBSTACLE_DETOUR_MAX_ATTEMPTS == 1U,
+              "Phase 3 permits exactly one detour attempt per event");
 
 static constexpr uint32_t PS2_POLL_MS = 2;
 static constexpr uint32_t PS2_RECONNECT_MS = 1000;

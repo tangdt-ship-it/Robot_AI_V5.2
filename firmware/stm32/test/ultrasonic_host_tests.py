@@ -40,6 +40,52 @@ class UltrasonicHostTests(unittest.TestCase):
         self.assertIn("activeChannel_=i", SENSOR_TEXT)
         self.assertIn("activeChannel_!=0xFF", SENSOR_TEXT)
 
+    def test_single_center_sensor_disables_the_right_hardware_channel(self):
+        self.assertIn("ULTRASONIC_RIGHT_ENABLED = false", CONFIG_TEXT)
+        self.assertIn(
+            "channels_[RIGHT_MOUNT].enabled=ULTRASONIC_RIGHT_ENABLED;",
+            SENSOR_TEXT,
+        )
+        self.assertIn("if(!c.enabled) continue;", SENSOR_TEXT)
+        self.assertIn("o.health=SensorHealth::DISABLED;", SENSOR_TEXT)
+        self.assertIn("if(!leftEnabled||!rightEnabled){suggestion_=AvoidanceDirection::STOP;return;}", SENSOR_TEXT)
+
+    def test_single_channel_clear_and_fault_state_remain_fail_closed(self):
+        self.assertIn("overallFresh_=(!leftEnabled||frontLeft_.fresh)&&(!rightEnabled||frontRight_.fresh);", SENSOR_TEXT)
+        self.assertIn("if(!anyEnabled||!l||!r){overallZone_=ObstacleZone::UNKNOWN", SENSOR_TEXT)
+        self.assertIn("bool anyEnabled=false;", SENSOR_TEXT)
+        self.assertIn("return anyEnabled;", SENSOR_TEXT)
+
+    def test_disabled_right_mount_is_excluded_from_degraded_forward_limit(self):
+        # A disabled right sensor retains the default filter value zero.  That
+        # must not clamp a known-clear centre sensor to zero during a bounded
+        # dropout.
+        self.assertNotIn(
+            "const float degradedNearest=min(channels_[LEFT_MOUNT].filteredDistanceCm,channels_[RIGHT_MOUNT].filteredDistanceCm);",
+            SENSOR_TEXT,
+        )
+        self.assertIn("if(!channel.enabled) continue;", SENSOR_TEXT)
+        self.assertIn("float degradedNearest=ULTRASONIC_MAX_CM;", SENSOR_TEXT)
+        self.assertIn("if(!anyEnabled)return 0;", SENSOR_TEXT)
+
+    def test_map_turn_accepts_only_bounded_single_front_timeout_grace(self):
+        # Regression: a real, recently validated >50 cm centre reading may
+        # bridge a short no-Echo interval while MAP rotates in place.  A close
+        # reading, startup/no evidence, or a timeout beyond the grace window
+        # remains fail-closed.
+        def map_turn_allowed(fresh_healthy_clear, recent_wide_clear):
+            return fresh_healthy_clear or recent_wide_clear
+
+        self.assertTrue(map_turn_allowed(False, True))
+        self.assertFalse(map_turn_allowed(False, False))
+        self.assertFalse(map_turn_allowed(False, False))  # prior close echo
+        self.assertTrue(map_turn_allowed(True, False))
+
+        self.assertIn("const bool mapSensorClear", (STM32_ROOT / "src" / "control" / "robot_controller.cpp").read_text(encoding="utf-8"))
+        controller_text = (STM32_ROOT / "src" / "control" / "robot_controller.cpp").read_text(encoding="utf-8")
+        self.assertIn("const bool recentClearWindow = ultrasonic_.hasRecentClearWindow(nowMs);", controller_text)
+        self.assertNotIn("const bool recentClearWindow = !mapTurnProfile", controller_text)
+
     def test_echo_lines_must_be_quiet_before_next_trigger(self):
         self.assertIn("if(digitalRead(c.echoPin)==HIGH) {", SENSOR_TEXT)
         self.assertIn("c.displayNoEchoFar=false;", SENSOR_TEXT)

@@ -12,6 +12,7 @@
 #include <map/semantic_route_optimizer.h>
 #include <map/route_store.h>
 #include <ps2/ps2_controller.h>
+#include <sensors/obstacle_classifier.h>
 #include <sensors/ultrasonic_sensor.h>
 
 // STM32-local Teach/Replay controller. It observes PS2, odometry, Heading and
@@ -22,7 +23,7 @@ class MapController {
   MapController(RobotController& robot, Ps2Controller& ps2,
                 LcdDisplay& display, WheelOdometry& odometry,
                 HeadingFusion& fusion, UltrasonicSensor& ultrasonic,
-                Print& debugStream);
+                ObstacleClassifier& obstacleClassifier, Print& debugStream);
 
   void begin();
   // Drain only the physical MAP input boundary. Main calls this before
@@ -48,6 +49,18 @@ class MapController {
     NONE = 0U,
     OUTBOUND = 1U,
     INBOUND = 2U,
+  };
+  enum class ObstacleDetourPhase : uint8_t {
+    IDLE = 0U,
+    ARMED = 1U,
+    TURN_AWAY = 2U,
+    WAIT_AWAY_CLEAR = 3U,
+    MOVE_AWAY = 4U,
+    TURN_PARALLEL = 5U,
+    WAIT_BYPASS_CLEAR = 6U,
+    MOVE_BYPASS = 7U,
+    COMPLETE_HOLD = 8U,
+    ABORTED = 9U,
   };
   enum class MapStorageErrorReason : uint8_t {
     NONE = 0U,
@@ -149,6 +162,22 @@ class MapController {
   bool replayPrecheck(const MapRouteData& route, const char*& reason) const;
   void updateReplay();
   bool startNextReplaySegment();
+  bool obstacleDetourContextActive() const;
+  bool obstacleDetourInProgress() const;
+  bool armObstacleDetour(const char*& rejectReason);
+  bool obstacleDetourEntryGates(const char*& rejectReason) const;
+  bool obstacleDetourSensorsReady() const;
+  bool obstacleDetourPathClear() const;
+  bool startObstacleDetourTurn(bool left, ObstacleDetourPhase phase,
+                               const char* phaseName);
+  bool startObstacleDetourDistance(uint32_t distanceMm,
+                                   ObstacleDetourPhase phase,
+                                   const char* phaseName);
+  void updateObstacleDetour();
+  bool consumeObstacleDetourTurnResult(const AiTurnResult& result);
+  bool consumeObstacleDetourDistanceResult(const AiDistanceResult& result);
+  void completeObstacleDetour();
+  void abortObstacleDetour(const char* reason);
   bool currentReplayPose(Pose& pose) const;
   Pose routePointWorld(uint16_t index) const;
   Pose routePointWorldFromOrigin(const Pose& origin, uint16_t index) const;
@@ -158,7 +187,8 @@ class MapController {
   void abortReplay(const char* reason);
   void completeReplay();
   void cancelReplay(const char* reason = "CANCELLED");
-  bool canResumeReplay(const char*& rejectReason) const;
+  void serviceObstacleHold();
+  bool canResumeReplay(const char*& rejectReason);
   void clearReplayResumeContext();
   uint32_t nextReplayGeneration();
   void beginCancelTrace();
@@ -203,6 +233,7 @@ class MapController {
   WheelOdometry& odometry_;
   HeadingFusion& fusion_;
   UltrasonicSensor& ultrasonic_;
+  ObstacleClassifier& obstacleClassifier_;
   Print& debug_;
   MapRouteStore store_;
 
@@ -269,6 +300,9 @@ class MapController {
   bool replayOriginValid_ = false;
   ReplayRealignReason replayRealignReason_ = ReplayRealignReason::NONE;
   uint32_t replayArrivalHeadingViolationSinceMs_ = 0U;
+  bool replayArrivalTurnPending_ = false;
+  uint16_t replayArrivalTurnWaypoint_ = 0U;
+  uint8_t replayArrivalTurnAttempts_ = 0U;
   Pose replayOrigin_{};
   Pose replayTarget_{};
   Pose replayHoldPose_{};
@@ -282,6 +316,22 @@ class MapController {
   uint32_t replayCycleCounter_ = 0U;
   const char* replayReason_ = "NONE";
   MapHoldReason holdReason_ = MapHoldReason::NONE;
+  uint32_t obstacleClearSinceMs_ = 0U;
+  ObstacleDetourPhase obstacleDetourPhase_ = ObstacleDetourPhase::IDLE;
+  ObstacleDecision obstacleDetourDecision_ = ObstacleDecision::HOLD;
+  bool obstacleDetourAwayRight_ = false;
+  uint8_t obstacleDetourAttempts_ = 0U;
+  uint32_t obstacleDetourStartMs_ = 0U;
+  uint32_t obstacleDetourClearSinceMs_ = 0U;
+  uint32_t obstacleDetourGeneration_ = 0U;
+  uint32_t obstacleDetourTravelBudgetUsedMm_ = 0U;
+  float obstacleDetourTurnBudgetUsedDeg_ = 0.0f;
+  Pose obstacleDetourStartPose_{};
+  uint16_t obstacleDetourOriginalCurrentIndex_ = 0U;
+  uint16_t obstacleDetourOriginalTargetIndex_ = 0U;
+  int8_t obstacleDetourOriginalDirection_ = 1;
+  uint32_t obstacleDetourOriginalRouteGeneration_ = 0U;
+  uint32_t obstacleDetourOriginalReplayGeneration_ = 0U;
   uint32_t closeCandidateDistanceMm_ = 0U;
   int16_t closeCandidateHeadingDeg_ = 0;
   bool cancelTraceActive_ = false;

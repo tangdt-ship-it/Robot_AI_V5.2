@@ -327,6 +327,66 @@ class ClosedReplayModel:
         self.held = False
 
 
+class ObstacleHoldModel:
+    """Safety model for MAP obstacle STOP/HOLD/resume sequencing."""
+
+    CLEAR_STABLE_MS = 400
+
+    def __init__(self, current=1, target=2, route_mode="ONCE"):
+        self.current = current
+        self.target = target
+        self.route_mode = route_mode
+        self.state = "RUNNING"
+        self.operation = "MOVE"
+        self.hold_reason = None
+        self.generation = 7
+        self.clear_since = None
+        self.motor = (20, 20)
+        self.hold_entries = 0
+        self.completed = False
+
+    def obstacle(self):
+        if self.state != "HOLD":
+            self.hold_entries += 1
+            self.generation += 1
+        self.state = "HOLD"
+        self.operation = "NONE"
+        self.hold_reason = "OBSTACLE"
+        self.motor = (0, 0)
+        self.clear_since = None
+
+    def sensor(self, now, fresh=True, healthy=True, zone="CLEAR"):
+        if self.state != "HOLD" or self.hold_reason != "OBSTACLE":
+            return
+        live_clear = fresh and healthy and zone == "CLEAR"
+        if not live_clear:
+            self.clear_since = None
+        elif self.clear_since is None:
+            self.clear_since = now
+
+    def start(self, now):
+        if self.state != "HOLD" or self.hold_reason != "OBSTACLE":
+            return False
+        if self.clear_since is None or now - self.clear_since < self.CLEAR_STABLE_MS:
+            return False
+        self.state = "RUNNING"
+        self.operation = "MOVE"
+        self.hold_reason = None
+        self.generation += 1
+        self.motor = (20, 20)
+        self.clear_since = None
+        return True
+
+    def stale_result(self, generation):
+        return generation != self.generation
+
+    def manual_stop(self):
+        self.state = "USER_STOP"
+        self.operation = "NONE"
+        self.hold_reason = "USER"
+        self.motor = (0, 0)
+
+
 class MultiModeReplayModel:
     """State-machine model for one canonical route and four replay modes."""
 
@@ -955,6 +1015,80 @@ class MapHostTests(unittest.TestCase):
         self.assertEqual(model.edge(), (2, 0))
         self.assertEqual(model.lap, 0)
 
+    def test_obstacle_hold_stops_once_and_preserves_waypoint(self):
+        model = ObstacleHoldModel()
+        edge = (model.current, model.target)
+        generation = model.generation
+        model.obstacle()
+        model.obstacle()
+        self.assertEqual(model.hold_entries, 1)
+        self.assertEqual((model.current, model.target), edge)
+        self.assertEqual(model.generation, generation + 1)
+        self.assertEqual(model.operation, "NONE")
+        self.assertEqual(model.motor, (0, 0))
+        self.assertFalse(model.completed)
+
+    def test_ten_repeated_obstacle_events_are_idempotent(self):
+        model = ObstacleHoldModel()
+        edge = (model.current, model.target)
+        for _ in range(10):
+            model.obstacle()
+        self.assertEqual(model.hold_entries, 1)
+        self.assertEqual((model.current, model.target), edge)
+        self.assertEqual(model.motor, (0, 0))
+        self.assertFalse(model.completed)
+
+    def test_obstacle_hold_requires_fresh_healthy_clear_window(self):
+        model = ObstacleHoldModel()
+        model.obstacle()
+        model.sensor(100, fresh=False, healthy=False, zone="UNKNOWN")
+        self.assertFalse(model.start(1000))
+        model.sensor(1100, fresh=True, healthy=True, zone="CLEAR")
+        self.assertFalse(model.start(1100))
+        self.assertFalse(model.start(1499))
+        self.assertTrue(model.start(1500))
+        self.assertEqual((model.current, model.target), (1, 2))
+        self.assertEqual(model.operation, "MOVE")
+
+    def test_obstacle_hold_clear_window_resets_on_invalid_sample(self):
+        model = ObstacleHoldModel()
+        model.obstacle()
+        model.sensor(100, fresh=True, healthy=True, zone="CLEAR")
+        model.sensor(300, fresh=False, healthy=False, zone="UNKNOWN")
+        model.sensor(301, fresh=True, healthy=True, zone="CLEAR")
+        self.assertFalse(model.start(699))
+        self.assertTrue(model.start(701))
+
+    def test_obstacle_hold_resume_uses_fresh_generation_and_drops_stale_result(self):
+        model = ObstacleHoldModel()
+        model.obstacle()
+        old_generation = model.generation
+        model.sensor(1000)
+        self.assertTrue(model.start(1400))
+        self.assertTrue(model.stale_result(old_generation))
+        self.assertFalse(model.stale_result(model.generation))
+
+    def test_manual_stop_after_obstacle_hold_never_auto_resumes(self):
+        model = ObstacleHoldModel()
+        model.obstacle()
+        model.sensor(100)
+        model.manual_stop()
+        self.assertEqual(model.motor, (0, 0))
+        self.assertFalse(model.start(1000))
+
+    def test_obstacle_phase_source_contract(self):
+        self.assertIn("OBSTACLE_CLEAR_STABLE_MS = 400U", CONFIG_TEXT)
+        self.assertIn("void MapController::serviceObstacleHold()", MAP_TEXT)
+        self.assertIn("holdReason_ != MapHoldReason::OBSTACLE", MAP_TEXT)
+        self.assertIn("ultrasonic_.isFresh() && ultrasonic_.healthy()", MAP_TEXT)
+        self.assertIn("OBS,HOLD,CLEAR_PENDING", MAP_TEXT)
+        self.assertIn("OBS,HOLD,WAIT", MAP_TEXT)
+        self.assertIn("OBS,HOLD,RESUME", MAP_TEXT)
+        self.assertIn("(now - obstacleClearSinceMs_) < OBSTACLE_CLEAR_STABLE_MS", MAP_TEXT)
+        self.assertIn("replayOperation_ = MapReplayOperation::NONE", MAP_TEXT)
+        self.assertIn("enterReplayHold(MapHoldReason::OBSTACLE, true)", MAP_TEXT)
+        self.assertIn("result.motionGeneration != replaySegmentGeneration_", MAP_TEXT)
+
     def test_closed_loop_index_and_counter_boundaries(self):
         edges = closed_route_edges(128, laps=3)
         self.assertTrue(all(0 <= source < 128 and 0 <= target < 128
@@ -1320,6 +1454,31 @@ class MapHostTests(unittest.TestCase):
         self.assertIn("replayOriginResetGeneration_", MAP_TEXT)
         self.assertIn("resetGeneration() != replayOriginResetGeneration_", MAP_TEXT)
         self.assertIn("RESET_BOUNDARY", MAP_TEXT)
+
+    def test_reset_boundary_diagnostics_do_not_change_safety_gate(self):
+        start = MAP_TEXT.index("if (replayActive_) {")
+        end = MAP_TEXT.index("    } else if (ps2_.state().r3)", start)
+        reset_gate = MAP_TEXT[start:end]
+        for field in (
+            "MAP,RESET_BOUNDARY,ODOM_ORIGIN=",
+            ",ODOM_NOW=",
+            ",HEADING_ORIGIN=",
+            ",HEADING_NOW=",
+            ",ROUTE_ORIGIN=",
+            ",ROUTE_NOW=",
+        ):
+            self.assertIn(field, reset_gate)
+        self.assertIn("odometry_.resetGeneration() != replayOriginResetGeneration_", reset_gate)
+        self.assertIn(
+            "robot_.headingResetGeneration() != replayOriginHeadingResetGeneration_",
+            reset_gate,
+        )
+        self.assertIn("route_.header.generation != replayOriginRouteGeneration_", reset_gate)
+        self.assertIn('abortReplay("RESET_BOUNDARY")', reset_gate)
+        self.assertIn('abortObstacleDetour("RESET_BOUNDARY")', reset_gate)
+        self.assertNotIn("resetWheelCounts(", reset_gate)
+        self.assertNotIn("resetHeadingReference(", reset_gate)
+        self.assertNotIn("route_ =", reset_gate)
 
     def test_result_owner_and_mcp_routing(self):
         self.assertIn(
