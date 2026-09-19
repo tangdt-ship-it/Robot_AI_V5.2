@@ -217,6 +217,11 @@ class SensorGateModel:
 
 
 class ObstacleDetourHostTests(unittest.TestCase):
+    def test_directional_detour_is_locked_when_only_the_center_sensor_is_active(self):
+        self.assertIn("if (!ultrasonic_.directionalSensingAvailable()) return false;", MAP)
+        self.assertIn('rejectReason = "DIRECTIONAL_SENSORS_DISABLED";', MAP)
+        self.assertIn("if (!ultrasonic_.directionalSensingAvailable()) {", MAP)
+
     def test_left_obstacle_avoid_right_turns_right(self):
         model = DetourModel("AVOID_RIGHT")
         self.assertTrue(model.arm())

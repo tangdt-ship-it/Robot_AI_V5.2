@@ -40,6 +40,22 @@ class UltrasonicHostTests(unittest.TestCase):
         self.assertIn("activeChannel_=i", SENSOR_TEXT)
         self.assertIn("activeChannel_!=0xFF", SENSOR_TEXT)
 
+    def test_single_center_sensor_disables_the_right_hardware_channel(self):
+        self.assertIn("ULTRASONIC_RIGHT_ENABLED = false", CONFIG_TEXT)
+        self.assertIn(
+            "channels_[RIGHT_MOUNT].enabled=ULTRASONIC_RIGHT_ENABLED;",
+            SENSOR_TEXT,
+        )
+        self.assertIn("if(!c.enabled) continue;", SENSOR_TEXT)
+        self.assertIn("o.health=SensorHealth::DISABLED;", SENSOR_TEXT)
+        self.assertIn("if(!leftEnabled||!rightEnabled){suggestion_=AvoidanceDirection::STOP;return;}", SENSOR_TEXT)
+
+    def test_single_channel_clear_and_fault_state_remain_fail_closed(self):
+        self.assertIn("overallFresh_=(!leftEnabled||frontLeft_.fresh)&&(!rightEnabled||frontRight_.fresh);", SENSOR_TEXT)
+        self.assertIn("if(!anyEnabled||!l||!r){overallZone_=ObstacleZone::UNKNOWN", SENSOR_TEXT)
+        self.assertIn("bool anyEnabled=false;", SENSOR_TEXT)
+        self.assertIn("return anyEnabled;", SENSOR_TEXT)
+
     def test_echo_lines_must_be_quiet_before_next_trigger(self):
         self.assertIn("if(digitalRead(c.echoPin)==HIGH) {", SENSOR_TEXT)
         self.assertIn("c.displayNoEchoFar=false;", SENSOR_TEXT)

@@ -13,9 +13,11 @@ enum class SensorHealth : uint8_t {
   INVALID,
   DISCONNECTED_OR_FAULT,
   DEGRADED,
+  DISABLED,
 };
 struct UltrasonicReading {
   float distanceCm=0, rawDistanceCm=0, rateCmS=0;
+  bool enabled=false;
   bool valid=false, fresh=false, echoValid=false, displayFar=false;
   // True when the LCD can safely present the last real Echo during the
   // bounded dropout hold, or the established no-Echo/out-of-range display
@@ -43,6 +45,14 @@ class UltrasonicSensor {
   uint32_t zoneSequence() const { return zoneSequence_; }
   const UltrasonicReading& frontLeft() const { return frontLeft_; }
   const UltrasonicReading& frontRight() const { return frontRight_; }
+  bool frontLeftEnabled() const { return channels_[0].enabled; }
+  bool frontRightEnabled() const { return channels_[1].enabled; }
+  // Directional avoidance needs two independently observed sectors. A single
+  // centred sensor remains fully active for stop/hold safety, but it cannot
+  // safely select left versus right for an autonomous detour.
+  bool directionalSensingAvailable() const {
+    return frontLeftEnabled() && frontRightEnabled();
+  }
   float frontLeftDistanceCm() const { return frontLeft_.distanceCm; }
   float frontRightDistanceCm() const { return frontRight_.distanceCm; }
   uint32_t frontLeftTriggerCount() const { return channels_[0].triggerCount; }
@@ -73,6 +83,7 @@ class UltrasonicSensor {
   enum class TriggerState : uint8_t { IDLE, WAIT_ECHO };
   struct Channel {
     uint32_t trigPin=0, echoPin=0;
+    bool enabled=false;
     volatile uint32_t echoRiseUs=0, echoPulseUs=0, lastRiseDelayUs=0;
     volatile bool echoPulseReady=false;
     volatile TriggerState state=TriggerState::IDLE;

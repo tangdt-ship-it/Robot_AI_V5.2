@@ -46,6 +46,13 @@ static constexpr uint32_t ULTRASONIC_TRIG_PIN = 44U;       // PC12
 static constexpr uint32_t ULTRASONIC_ECHO_PIN = 41U;       // PC9
 static constexpr uint32_t ULTRASONIC_RIGHT_TRIG_PIN = 36U; // PC4
 static constexpr uint32_t ULTRASONIC_RIGHT_ECHO_PIN = 39U; // PC7
+// The two front SR04 modules are mechanically adjacent on this robot. A
+// close reflector in one cone can starve the other module of Echo despite the
+// serialized trigger scheduler. Run the proven left module as the single
+// centre-front safety sensor until a separated two-sector installation is
+// available. PC4/PC7 are left electrically inactive; this is not a failed
+// sensor masquerading as CLEAR.
+static constexpr bool ULTRASONIC_RIGHT_ENABLED = false;
 
 static constexpr uint32_t LCD_SCL_PIN = PB7;
 static constexpr uint32_t LCD_SDA_PIN = PB6;

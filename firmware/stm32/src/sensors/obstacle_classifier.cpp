@@ -26,6 +26,17 @@ ObstacleClassificationInput ObstacleClassifier::snapshot(
   input.rightValid = right.valid && right.echoValid;
   input.rightDistanceCm = right.distanceCm;
   input.rightZone = right.zone;
+  if (!sensor.directionalSensingAvailable()) {
+    // With one centred sensor, mirror its evidence into the second logical
+    // sector. A detected obstacle therefore becomes CENTER/HOLD, never an
+    // invented left/right direction. The centred sensor still provides the
+    // normal fail-closed stop/hold gate.
+    input.rightFresh = input.leftFresh;
+    input.rightHealthy = input.leftHealthy;
+    input.rightValid = input.leftValid;
+    input.rightDistanceCm = input.leftDistanceCm;
+    input.rightZone = input.leftZone;
+  }
   return input;
 }
 

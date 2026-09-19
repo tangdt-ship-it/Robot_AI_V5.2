@@ -1879,6 +1879,8 @@ void RobotController::updateDisplay() {
   data.obstacleZone = UltrasonicSensor::zoneText(ultrasonic_.zone());
   data.frontLeftDistanceCm = ultrasonic_.frontLeftDistanceCm();
   data.frontRightDistanceCm = ultrasonic_.frontRightDistanceCm();
+  data.frontLeftEnabled = ultrasonic_.frontLeftEnabled();
+  data.frontRightEnabled = ultrasonic_.frontRightEnabled();
   data.frontLeftFresh = ultrasonic_.frontLeft().fresh;
   data.frontRightFresh = ultrasonic_.frontRight().fresh;
   data.frontLeftEchoValid = ultrasonic_.frontLeft().echoValid;

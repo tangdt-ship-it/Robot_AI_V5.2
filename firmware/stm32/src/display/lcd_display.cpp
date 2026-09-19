@@ -195,8 +195,12 @@ void LcdDisplay::buildRobotLines() {
   const bool rightDisplayValid = data_.frontRightDisplayDistanceValid;
   char leftDistance[5] = "----";
   char rightDistance[5] = "----";
-  auto formatDistance = [](char (&output)[5], bool displayValid, bool displayFar,
+  auto formatDistance = [](char (&output)[5], bool enabled, bool displayValid, bool displayFar,
                            float distanceCm) {
+    if (!enabled) {
+      snprintf(output, sizeof(output), "OFF");
+      return;
+    }
     if (!displayValid) return;
     if (displayFar) {
       snprintf(output, sizeof(output), " OK ");
@@ -214,9 +218,9 @@ void LcdDisplay::buildRobotLines() {
                static_cast<int>(lroundf(distanceCm)));
     }
   };
-  formatDistance(leftDistance, leftDisplayValid, data_.frontLeftDisplayFar,
+  formatDistance(leftDistance, data_.frontLeftEnabled, leftDisplayValid, data_.frontLeftDisplayFar,
                  data_.frontLeftDistanceCm);
-  formatDistance(rightDistance, rightDisplayValid, data_.frontRightDisplayFar,
+  formatDistance(rightDistance, data_.frontRightEnabled, rightDisplayValid, data_.frontRightDisplayFar,
                  data_.frontRightDistanceCm);
 
   // Fixed 20-column main page. Keep the two SR04 channels independent:

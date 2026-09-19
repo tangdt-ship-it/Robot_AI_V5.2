@@ -1977,6 +1977,10 @@ bool MapController::obstacleDetourInProgress() const {
 }
 
 bool MapController::obstacleDetourSensorsReady() const {
+  // Directional detour is intentionally unavailable with the single centred
+  // SR04. Normal MAP obstacle STOP/HOLD/resume continues through the
+  // aggregate ultrasonic safety gate.
+  if (!ultrasonic_.directionalSensingAvailable()) return false;
   const auto valid = [](const UltrasonicReading& reading) {
     return reading.fresh && reading.health == SensorHealth::HEALTHY &&
            reading.valid && reading.echoValid && isfinite(reading.distanceCm) &&
@@ -2098,6 +2102,13 @@ bool MapController::obstacleDetourEntryGates(const char*& rejectReason) const {
 }
 
 bool MapController::armObstacleDetour(const char*& rejectReason) {
+  // Keep the capability boundary at the arm point as well as at the sensor
+  // readiness gate. Future callers cannot accidentally make a left/right
+  // detour actionable while production has only one centred SR04.
+  if (!ultrasonic_.directionalSensingAvailable()) {
+    rejectReason = "DIRECTIONAL_SENSORS_DISABLED";
+    return false;
+  }
   if (!obstacleDetourEntryGates(rejectReason)) return false;
 
   Pose pose;

@@ -131,6 +131,20 @@ class ObstacleClassifierHostTests(unittest.TestCase):
                                   Sample(distance_cm=29, zone="CAUTION")),
                          ("CENTER", "AVOID_RIGHT"))
 
+    def test_single_center_sensor_classifies_obstacle_as_center_hold(self):
+        # The production snapshot mirrors the one active centre sensor into
+        # the second logical sector. This intentionally forbids fabricating a
+        # left/right detour from one range reading.
+        self.assertEqual(classify(Sample(), Sample()), ("CLEAR", "NONE"))
+        for zone in ("CAUTION", "BLOCKED", "EMERGENCY"):
+            centered = Sample(distance_cm=20, zone=zone)
+            self.assertEqual(classify(centered, centered), ("CENTER", "HOLD"))
+        unavailable = Sample(fresh=False, healthy=False, valid=False)
+        self.assertEqual(classify(unavailable, unavailable), ("UNKNOWN", "HOLD"))
+        self.assertIn("if (!sensor.directionalSensingAvailable())", CLASSIFIER_CC)
+        self.assertIn("input.rightDistanceCm = input.leftDistanceCm;", CLASSIFIER_CC)
+        self.assertIn("input.rightZone = input.leftZone;", CLASSIFIER_CC)
+
     def test_invalid_left_is_unknown_hold(self):
         self.assertEqual(classify(Sample(fresh=False), Sample()), ("UNKNOWN", "HOLD"))
 
