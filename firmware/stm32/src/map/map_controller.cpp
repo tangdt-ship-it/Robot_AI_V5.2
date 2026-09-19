@@ -96,6 +96,15 @@ const char* HoldReasonName(MapHoldReason reason) {
   }
   return "NONE";
 }
+
+const char* MissionInitiatorName(MapMissionInitiator initiator) {
+  switch (initiator) {
+    case MapMissionInitiator::PS2: return "PS2";
+    case MapMissionInitiator::AI_VOICE: return "AI";
+    case MapMissionInitiator::NONE: return "NONE";
+  }
+  return "NONE";
+}
 }  // namespace
 
 MapController::MapController(RobotController& robot, Ps2Controller& ps2,
@@ -233,6 +242,19 @@ void MapController::processInput() {
   if (ps2_.takeMapEvent(event)) handleEvent(event);
 }
 
+void MapController::notifyExternalStop() {
+  // RobotLink STOP has already reached RobotController::stopImmediately() in
+  // main.cpp. This notification is only the MAP safety boundary: it latches
+  // autonomous resume off and never creates a new motion command.
+  inhibitAutonomousResume("EXTERNAL_STOP");
+  debug_.println("MAP,STOP,EXTERNAL,LATCH=1");
+  if (obstacleDetourContextActive()) {
+    abortObstacleDetour("EXTERNAL_STOP");
+  } else if (replayActive_ && mode_ != MapControllerMode::REPLAY_HOLD) {
+    enterReplayHold(MapHoldReason::EXTERNAL_STOP, false);
+  }
+}
+
 void MapController::update() {
   processInput();
 
@@ -261,8 +283,9 @@ void MapController::update() {
     }
   }
 
-  // Track the obstacle clear window while held. This never restarts replay;
-  // it only arms the explicit START resume gate after a stable clear period.
+  // Track the obstacle clear window while held. Manual replay still requires
+  // an explicit START; an accepted AI mission may pass the independent
+  // autonomous-resume gate after the stricter clear period.
   serviceObstacleHold();
 
   if (postTeachBack_.valid && !postTeachBackActive_) {
@@ -323,7 +346,10 @@ void MapController::update() {
                  replayOperation_ == MapReplayOperation::HOLD)) {
       // External STOP/mission arbitration removed the owner without producing
       // a replay result. Do not infer success from a stopped motor.
-      enterReplayHold(MapHoldReason::EXTERNAL_STOP, false);
+      enterReplayHold(ps2_.motionCommandActive()
+                          ? MapHoldReason::PS2_TAKEOVER
+                          : MapHoldReason::EXTERNAL_STOP,
+                      false);
     } else {
       updateReplay();
     }
@@ -677,21 +703,33 @@ void MapController::handleSettingsInput(Ps2MapAction action) {
 }
 
 void MapController::handleStart() {
+  (void)requestStart(MapMissionInitiator::PS2);
+}
+
+bool MapController::requestStart(MapMissionInitiator initiator) {
+  if (initiator == MapMissionInitiator::NONE) {
+    logStartReject("INITIATOR");
+    return false;
+  }
   if (storageErrorReason_ != MapStorageErrorReason::NONE) {
     robot_.stopImmediately(true);
     debug_.print("MAP,START,REJECT,REASON=");
     debug_.println(storageErrorReason_ == MapStorageErrorReason::STORAGE_INIT
                        ? "STORAGE_INIT"
                        : "STORAGE_ERROR");
-    return;
+    return false;
   }
   if (mode_ == MapControllerMode::SETTINGS) {
+    if (initiator != MapMissionInitiator::PS2) {
+      logStartReject("SETTINGS");
+      return false;
+    }
     saveSettingsAndExit();
-    return;
+    return true;
   }
   if (mode_ == MapControllerMode::HELP ||
       mode_ == MapControllerMode::DELETE_CONFIRM) {
-    return;
+    return false;
   }
   if (mode_ == MapControllerMode::TEACHING ||
       mode_ == MapControllerMode::DELETE_CONFIRM ||
@@ -701,9 +739,13 @@ void MapController::handleStart() {
                        : mode_ == MapControllerMode::DELETE_CONFIRM
                            ? "DELETE_CONFIRM"
                            : "CLOSED_CONFIRM");
-    return;
+    return false;
   }
   if (postTeachBack_.valid && !postTeachBackActive_) {
+    if (initiator != MapMissionInitiator::PS2) {
+      logStartReject("POST_TEACH_BACK_PS2_ONLY");
+      return false;
+    }
     const char* backReason = nullptr;
     if (!postTeachBackAvailable(backReason)) {
       const char* reason = backReason != nullptr ? backReason : "UNAVAILABLE";
@@ -716,7 +758,7 @@ void MapController::handleStart() {
         debug_.print(reason);
         debug_.println(",RETRY=1");
       }
-      return;
+      return false;
     }
     if (!startPostTeachBack(backReason)) {
       const char* reason = backReason != nullptr ? backReason : "START";
@@ -729,14 +771,22 @@ void MapController::handleStart() {
         debug_.print(reason);
         debug_.println(",RETRY=1");
       }
+      return false;
     }
-    return;
+    missionInitiator_ = MapMissionInitiator::PS2;
+    debug_.print("MAP,MISSION,INITIATOR=");
+    debug_.println(MissionInitiatorName(missionInitiator_));
+    return true;
   }
   if (replayActive_ && mode_ != MapControllerMode::REPLAY_HOLD) {
     logStartReject("REPLAY_ACTIVE");
-    return;
+    return false;
   }
   if (mode_ == MapControllerMode::REPLAY_HOLD) {
+    if (initiator != MapMissionInitiator::PS2) {
+      logStartReject("AI_START_WHILE_HOLD");
+      return false;
+    }
     if (holdReason_ == MapHoldReason::OBSTACLE &&
         obstacleDetourPhase_ != ObstacleDetourPhase::IDLE) {
       debug_.print("OBS,DETOUR,START,REJECT=PHASE_");
@@ -744,19 +794,19 @@ void MapController::handleStart() {
       logStartReject(obstacleDetourPhase_ == ObstacleDetourPhase::ABORTED
                          ? "DETOUR_ABORTED"
                          : "DETOUR_COMPLETE_HOLD");
-      return;
+      return false;
     }
     if (holdReason_ == MapHoldReason::OBSTACLE &&
         obstacleClassifier_.stable() &&
         (obstacleClassifier_.decision() == ObstacleDecision::AVOID_LEFT ||
          obstacleClassifier_.decision() == ObstacleDecision::AVOID_RIGHT)) {
       const char* detourReason = nullptr;
-      if (armObstacleDetour(detourReason)) return;
+      if (armObstacleDetour(detourReason)) return true;
       debug_.print("OBS,DETOUR,NOT_ALLOWED,REASON=");
       debug_.println(detourReason != nullptr ? detourReason : "ENTRY_GATE");
       logStartReject(detourReason != nullptr ? detourReason
                                              : "DETOUR_NOT_ALLOWED");
-      return;
+      return false;
     }
     debug_.println("MAP,START,ACTION=RESUME");
     debug_.print("MAP,RESUME,REQUEST,WP=");
@@ -764,21 +814,9 @@ void MapController::handleStart() {
     debug_.print(",GEN=");
     debug_.println(replayGeneration_);
     const char* rejectReason = nullptr;
-    if (canResumeReplay(rejectReason)) {
-      // Keep the original route origin and route coordinates. The next
-      // segment computes its target from the current live pose, so coast after
-      // HOLD never turns an old remaining-distance value into ground truth.
-      nextReplayGeneration();
-      replaySegmentGeneration_ = 0U;
-      replayActive_ = true;
-      mode_ = MapControllerMode::REPLAY_RUNNING;
-      replayOperation_ = MapReplayOperation::NONE;
-      replayReason_ = "RESUME";
-      if (holdReason_ == MapHoldReason::OBSTACLE) {
-        debug_.println("OBS,HOLD,RESUME");
-      }
-      holdReason_ = MapHoldReason::NONE;
-      statusDirty_ = true;
+    const bool resumed =
+        resumeReplayFromHold(ReplayResumeSource::PS2_START, rejectReason);
+    if (resumed) {
       debug_.print("MAP,RESUME,ACCEPT,WP=");
       debug_.print(static_cast<unsigned>(replayTargetIndex_));
       debug_.print(",GEN=");
@@ -812,11 +850,19 @@ void MapController::handleStart() {
       debug_.println(reason);
       logStartReject(reason);
     }
-    return;
+    return resumed;
   }
   debug_.println("MAP,START,ACTION=RUN");
   const char* reason = nullptr;
-  if (prepareReplay(reason)) {
+  const bool started = prepareReplay(reason, initiator);
+  if (started) {
+    missionInitiator_ = initiator;
+    if (initiator == MapMissionInitiator::AI_VOICE) {
+      // This is the only latch-clear boundary in Phase 1.
+      autonomousResumeInhibited_ = false;
+    }
+    debug_.print("MAP,MISSION,INITIATOR=");
+    debug_.println(MissionInitiatorName(missionInitiator_));
     debug_.print("MAP,START,ACCEPT,GEN=");
     debug_.println(replayGeneration_);
     if (routeMode_ == MapReplayMode::LOOP) {
@@ -837,6 +883,7 @@ void MapController::handleStart() {
   } else {
     logStartReject(reason != nullptr ? reason : "PRECHECK");
   }
+  return started;
 }
 
 void MapController::handleTriangle() {
@@ -1240,7 +1287,7 @@ bool MapController::postTeachBackAvailable(const char*& reason) const {
 
 bool MapController::startPostTeachBack(const char*& reason) {
   if (!postTeachBackAvailable(reason)) return false;
-  if (!replayPrecheck(route_, reason)) return false;
+  if (!replayPrecheck(route_, reason, MapMissionInitiator::PS2)) return false;
 
   replayOrigin_ = postTeachBack_.teachOrigin;
   replayOriginValid_ = true;
@@ -1853,7 +1900,8 @@ uint32_t MapController::nextReplayGeneration() {
   return replayGeneration_;
 }
 
-bool MapController::prepareReplay(const char*& rejectReason) {
+bool MapController::prepareReplay(const char*& rejectReason,
+                                  MapMissionInitiator initiator) {
   rejectReason = nullptr;
   invalidatePostTeachBack("NORMAL_REPLAY");
   if (!loadSelected()) {
@@ -1861,7 +1909,7 @@ bool MapController::prepareReplay(const char*& rejectReason) {
     return false;
   }
   const char* reason = nullptr;
-  if (!replayPrecheck(route_, reason)) {
+  if (!replayPrecheck(route_, reason, initiator)) {
     mode_ = MapControllerMode::SAVED;
     replayReason_ = reason != nullptr ? reason : "PRECHECK";
     rejectReason = replayReason_;
@@ -1914,7 +1962,8 @@ bool MapController::prepareReplay(const char*& rejectReason) {
 }
 
 bool MapController::replayPrecheck(const MapRouteData& route,
-                                   const char*& reason) const {
+                                   const char*& reason,
+                                   MapMissionInitiator initiator) const {
   if (!validateRoute(route, reason)) return false;
   const uint32_t now = millis();
   if (!robot_.motorsStopped() || robot_.aiMotionActive() ||
@@ -1926,9 +1975,16 @@ bool MapController::replayPrecheck(const MapRouteData& route,
     reason = "BRAKE";
     return false;
   }
-  if (!ps2_.state().frameFresh || ps2_.frameTimedOut(now) ||
-      ps2_.motionCommandActive()) {
-    reason = "PS2_NOT_NEUTRAL";
+  if (initiator == MapMissionInitiator::PS2) {
+    if (!ps2_.state().frameFresh || ps2_.frameTimedOut(now) ||
+        ps2_.motionCommandActive()) {
+      reason = "PS2_NOT_NEUTRAL";
+      return false;
+    }
+  } else if (ps2_.motionCommandActive() || ps2_.state().r3) {
+    // AI may start without a fresh receiver frame, but never while the
+    // operator has taken over the chassis or asserted the PS2 stop boundary.
+    reason = "PS2_TAKEOVER";
     return false;
   }
   if (!odometry_.ready() || !odometry_.healthy()) {
@@ -2875,6 +2931,9 @@ void MapController::enterReplayHold(MapHoldReason reason, bool allowResume) {
   // changes no braking strategy and guarantees owner release before HOLD is
   // exposed to the rest of the loop.
   robot_.stopImmediately(true);
+  if (reason != MapHoldReason::OBSTACLE) {
+    inhibitAutonomousResume(HoldReasonName(reason));
+  }
   if (reason == MapHoldReason::OBSTACLE &&
       !obstacleDetourContextActive()) {
     // A fresh production obstacle result starts a new one-attempt detour
@@ -3051,6 +3110,8 @@ void MapController::clearReplayResumeContext() {
   replayErrorMm_ = 0U;
   replayLapCounter_ = 0U;
   replayCycleCounter_ = 0U;
+  missionInitiator_ = MapMissionInitiator::NONE;
+  autonomousResumeInhibited_ = true;
   obstacleDetourPhase_ = ObstacleDetourPhase::IDLE;
   obstacleDetourDecision_ = ObstacleDecision::HOLD;
   obstacleDetourAwayRight_ = false;
@@ -3076,6 +3137,49 @@ void MapController::serviceObstacleHold() {
   }
 
   const uint32_t now = millis();
+  const bool aiAutoResume =
+      missionInitiator_ == MapMissionInitiator::AI_VOICE;
+  if (aiAutoResume && (!odometry_.ready() || !odometry_.healthy())) {
+    inhibitAutonomousResume("ODOMETRY");
+  } else if (aiAutoResume &&
+             (!fusion_.ready() || fusion_.health() == FusionHealth::NO_SOURCE)) {
+    inhibitAutonomousResume("FUSION");
+  } else if (aiAutoResume &&
+             odometry_.resetGeneration() != replayOriginResetGeneration_) {
+    inhibitAutonomousResume("RESET_BOUNDARY");
+  } else if (aiAutoResume && robot_.headingResetGeneration() !=
+                                 replayOriginHeadingResetGeneration_) {
+    inhibitAutonomousResume("HEADING_RESET_BOUNDARY");
+  } else if (aiAutoResume && route_.header.generation !=
+                                 replayOriginRouteGeneration_) {
+    inhibitAutonomousResume("ROUTE_CHANGED");
+  } else if (aiAutoResume && selectedSlot_ != replayContextSlot_) {
+    inhibitAutonomousResume("SLOT_CHANGED");
+  } else if (aiAutoResume &&
+             (!robot_.motorsStopped() || robot_.aiMotionActive() ||
+              robot_.motionOwner() != MotionOwner::NONE ||
+              robot_.brakeEnabled())) {
+    inhibitAutonomousResume("MOTION_CONTEXT");
+  } else if (aiAutoResume && !replayHoldPoseValid_) {
+    inhibitAutonomousResume("POSE");
+  } else if (aiAutoResume) {
+    Pose current;
+    if (!readPose(current) ||
+        distanceMm(current.xMm, current.yMm, replayHoldPose_.xMm,
+                   replayHoldPose_.yMm) > kReplayPoseHoldToleranceMm ||
+        fabsf(shortestDeltaDeg(current.headingDeg,
+                               replayHoldPose_.headingDeg)) >
+            kReplayPoseHoldToleranceDeg) {
+      inhibitAutonomousResume("POSE_DRIFT");
+    }
+  }
+  if (aiAutoResume && !ultrasonic_.isFresh()) {
+    inhibitAutonomousResume("SENSOR_STALE");
+  } else if (aiAutoResume && !ultrasonic_.healthy()) {
+    inhibitAutonomousResume("SENSOR_UNHEALTHY");
+  } else if (aiAutoResume && ultrasonic_.overallZone() == ObstacleZone::UNKNOWN) {
+    inhibitAutonomousResume("SENSOR_UNKNOWN");
+  }
   const bool obstacleLiveClear =
       ultrasonic_.isFresh() && ultrasonic_.healthy() &&
       ultrasonic_.overallZone() == ObstacleZone::CLEAR;
@@ -3089,10 +3193,26 @@ void MapController::serviceObstacleHold() {
   if (obstacleClearSinceMs_ == 0U) {
     obstacleClearSinceMs_ = now;
     debug_.println("OBS,HOLD,CLEAR_PENDING");
+    if (aiAutoResume && !autonomousResumeInhibited_) {
+      debug_.println("OBS,HOLD,AI_AUTO_CLEAR_PENDING");
+    }
+  }
+  if (aiAutoResume && !autonomousResumeInhibited_ &&
+      (now - obstacleClearSinceMs_) >= AI_OBSTACLE_AUTO_RESUME_CLEAR_MS) {
+    const char* rejectReason = nullptr;
+    if (!resumeReplayFromHold(ReplayResumeSource::AI_AUTO, rejectReason)) {
+      inhibitAutonomousResume(rejectReason != nullptr ? rejectReason
+                                                       : "AUTO_RESUME_REJECT");
+    }
   }
 }
 
 bool MapController::canResumeReplay(const char*& rejectReason) {
+  return canResumeReplay(ReplayResumeSource::PS2_START, rejectReason);
+}
+
+bool MapController::canResumeReplay(ReplayResumeSource source,
+                                    const char*& rejectReason) {
   rejectReason = nullptr;
   if (!loadedValid_) {
     rejectReason = "NOT_SAVED";
@@ -3101,6 +3221,20 @@ bool MapController::canResumeReplay(const char*& rejectReason) {
   if (!replayResumeAllowed_ || mode_ != MapControllerMode::REPLAY_HOLD) {
     rejectReason = "HOLD_NOT_RESUMABLE";
     return false;
+  }
+  if (source == ReplayResumeSource::AI_AUTO) {
+    if (missionInitiator_ != MapMissionInitiator::AI_VOICE) {
+      rejectReason = "INITIATOR";
+      return false;
+    }
+    if (autonomousResumeInhibited_) {
+      rejectReason = "AUTO_RESUME_INHIBITED";
+      return false;
+    }
+    if (holdReason_ != MapHoldReason::OBSTACLE) {
+      rejectReason = "HOLD_REASON";
+      return false;
+    }
   }
   if (selectedSlot_ != replayContextSlot_) {
     rejectReason = "SLOT_CHANGED";
@@ -3140,9 +3274,16 @@ bool MapController::canResumeReplay(const char*& rejectReason) {
     return false;
   }
   const uint32_t now = millis();
-  if (!ps2_.state().frameFresh || ps2_.frameTimedOut(now) ||
-      ps2_.motionCommandActive()) {
-    rejectReason = "PS2_NOT_NEUTRAL";
+  if (source == ReplayResumeSource::PS2_START) {
+    if (!ps2_.state().frameFresh || ps2_.frameTimedOut(now) ||
+        ps2_.motionCommandActive()) {
+      rejectReason = "PS2_NOT_NEUTRAL";
+      return false;
+    }
+  } else if (ps2_.motionCommandActive() || ps2_.state().r3) {
+    // AI resume is independent of receiver freshness, but never outranks an
+    // operator takeover or the PS2 STOP boundary.
+    rejectReason = "PS2_TAKEOVER";
     return false;
   }
   if (!odometry_.ready() || !odometry_.healthy()) {
@@ -3166,7 +3307,11 @@ bool MapController::canResumeReplay(const char*& rejectReason) {
       obstacleClearSinceMs_ = now;
       debug_.println("OBS,HOLD,CLEAR_PENDING");
     }
-    if ((now - obstacleClearSinceMs_) < OBSTACLE_CLEAR_STABLE_MS) {
+    const uint32_t requiredClearMs =
+        source == ReplayResumeSource::AI_AUTO
+            ? AI_OBSTACLE_AUTO_RESUME_CLEAR_MS
+            : OBSTACLE_CLEAR_STABLE_MS;
+    if ((now - obstacleClearSinceMs_) < requiredClearMs) {
       rejectReason = "OBSTACLE_NOT_CLEAR";
       return false;
     }
@@ -3193,6 +3338,41 @@ bool MapController::canResumeReplay(const char*& rejectReason) {
   }
   rejectReason = "OK";
   return true;
+}
+
+bool MapController::resumeReplayFromHold(ReplayResumeSource source,
+                                         const char*& rejectReason) {
+  if (!canResumeReplay(source, rejectReason)) return false;
+  // Keep the original route origin and route coordinates. The next segment
+  // computes its target from the current live pose, so coast after HOLD never
+  // turns an old remaining-distance value into ground truth.
+  const bool obstacleHold = holdReason_ == MapHoldReason::OBSTACLE;
+  nextReplayGeneration();
+  replaySegmentGeneration_ = 0U;
+  replayActive_ = true;
+  mode_ = MapControllerMode::REPLAY_RUNNING;
+  replayOperation_ = MapReplayOperation::NONE;
+  replayReason_ = "RESUME";
+  holdReason_ = MapHoldReason::NONE;
+  obstacleClearSinceMs_ = 0U;
+  statusDirty_ = true;
+  if (obstacleHold && source == ReplayResumeSource::AI_AUTO) {
+    debug_.print("OBS,HOLD,AI_AUTO_RESUME,WP=");
+    debug_.print(static_cast<unsigned>(replayTargetIndex_));
+    debug_.print(",GEN=");
+    debug_.println(replayGeneration_);
+  } else if (obstacleHold) {
+    debug_.println("OBS,HOLD,RESUME");
+  }
+  rejectReason = "OK";
+  return true;
+}
+
+void MapController::inhibitAutonomousResume(const char* reason) {
+  if (autonomousResumeInhibited_) return;
+  autonomousResumeInhibited_ = true;
+  debug_.print("OBS,HOLD,AI_AUTO_INHIBIT,REASON=");
+  debug_.println(reason != nullptr ? reason : "UNKNOWN");
 }
 
 bool MapController::consumeReplayTurnResult(const AiTurnResult& result) {

@@ -264,6 +264,7 @@ void loop() {
     // controller requires a fresh, deliberate PS2 motion frame before
     // Manual can energize the motors again.
     robot.stopImmediately(true);
+    mapController.notifyExternalStop();
     stopCompletionPending = true;
   }
   if (stopCompletionPending && motors.leftSpeed() == 0 &&

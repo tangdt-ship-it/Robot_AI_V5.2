@@ -132,6 +132,14 @@ enum class MapHoldReason : uint8_t {
   PS2_TAKEOVER = 4U
 };
 
+// Runtime-only mission context. It is deliberately not persisted in the MAP
+// record: a saved route may be started by PS2 or, in a future phase, AI voice.
+enum class MapMissionInitiator : uint8_t {
+  NONE = 0U,
+  PS2 = 1U,
+  AI_VOICE = 2U,
+};
+
 enum MapWaypointFlags : uint8_t {
   MAP_WP_START = 1U << 0,
   MAP_WP_MANUAL_MARK = 1U << 1,

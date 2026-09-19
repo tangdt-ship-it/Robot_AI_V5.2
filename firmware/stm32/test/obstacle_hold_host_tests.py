@@ -58,15 +58,25 @@ class ObstacleHoldHostTests(unittest.TestCase):
 
     def test_one_clear_sample_does_not_resume_and_start_is_required(self):
         self.assertIn("serviceObstacleHold();", MAP)
-        self.assertIn("if ((now - obstacleClearSinceMs_) < OBSTACLE_CLEAR_STABLE_MS)", MAP)
-        start = MAP.index("void MapController::handleStart")
-        resume = MAP.index("if (mode_ == MapControllerMode::REPLAY_HOLD)", start)
-        self.assertIn("if (canResumeReplay(rejectReason))", MAP[resume:])
-        self.assertNotIn("replayActive_ = true", MAP[MAP.index("void MapController::serviceObstacleHold"):resume])
+        self.assertIn("const uint32_t requiredClearMs", MAP)
+        self.assertIn("source == ReplayResumeSource::AI_AUTO", MAP)
+        self.assertIn("AI_OBSTACLE_AUTO_RESUME_CLEAR_MS", MAP)
+        self.assertIn(
+            "resumeReplayFromHold(ReplayResumeSource::AI_AUTO, rejectReason)",
+            MAP,
+        )
+        self.assertIn(
+            "resumeReplayFromHold(ReplayResumeSource::PS2_START, rejectReason)",
+            MAP,
+        )
+        service = MAP[MAP.index("void MapController::serviceObstacleHold"):
+                      MAP.index("bool MapController::canResumeReplay", MAP.index(
+                          "void MapController::serviceObstacleHold"))]
+        self.assertNotIn("replayActive_ = true", service)
 
     def test_resume_starts_a_new_operation_without_advancing_waypoint(self):
-        start = MAP.index("if (canResumeReplay(rejectReason))")
-        end = MAP.index("} else {", start)
+        start = MAP.index("bool MapController::resumeReplayFromHold")
+        end = MAP.index("void MapController::inhibitAutonomousResume", start)
         accepted = MAP[start:end]
         self.assertIn("replayOperation_ = MapReplayOperation::NONE", accepted)
         self.assertIn("replayTargetIndex_", accepted)

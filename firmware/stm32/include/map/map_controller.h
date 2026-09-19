@@ -32,6 +32,13 @@ class MapController {
   void processInput();
   void update();
 
+  // Unified MAP mission entry. Phase 1 exposes the AI initiator for host
+  // tests/future integration only; main.cpp and RobotLink do not call it yet.
+  bool requestStart(MapMissionInitiator initiator);
+  // Called at the existing RobotLink STOP boundary after the electrical stop
+  // has been consumed. It never starts motion or changes the wire protocol.
+  void notifyExternalStop();
+
   // Main uses these hooks to consume REPLAY results internally. Returning
   // false leaves normal MCP SID/OP RobotLink routing unchanged.
   bool consumeReplayTurnResult(const AiTurnResult& result);
@@ -44,6 +51,7 @@ class MapController {
   MapUserMode userMode() const { return userMode_; }
 
  private:
+  enum class ReplayResumeSource : uint8_t { PS2_START, AI_AUTO };
   enum class ReplayRealignReason : uint8_t { NONE, PATH, ARRIVAL };
   enum class ReplayReturnPhase : uint8_t {
     NONE = 0U,
@@ -158,8 +166,10 @@ class MapController {
                                 MapReplayMode runtimeMode) const;
 
   void cycleReplayMode();
-  bool prepareReplay(const char*& rejectReason);
-  bool replayPrecheck(const MapRouteData& route, const char*& reason) const;
+  bool prepareReplay(const char*& rejectReason,
+                     MapMissionInitiator initiator);
+  bool replayPrecheck(const MapRouteData& route, const char*& reason,
+                      MapMissionInitiator initiator) const;
   void updateReplay();
   bool startNextReplaySegment();
   bool obstacleDetourContextActive() const;
@@ -189,6 +199,11 @@ class MapController {
   void cancelReplay(const char* reason = "CANCELLED");
   void serviceObstacleHold();
   bool canResumeReplay(const char*& rejectReason);
+  bool canResumeReplay(ReplayResumeSource source,
+                       const char*& rejectReason);
+  bool resumeReplayFromHold(ReplayResumeSource source,
+                            const char*& rejectReason);
+  void inhibitAutonomousResume(const char* reason);
   void clearReplayResumeContext();
   uint32_t nextReplayGeneration();
   void beginCancelTrace();
@@ -242,6 +257,8 @@ class MapController {
   MapRouteType routeType_ = MapRouteType::OPEN;
   MapUserMode userMode_ = MapUserMode::ONCE;
   MapReplayMode routeMode_ = MapReplayMode::ONCE;
+  MapMissionInitiator missionInitiator_ = MapMissionInitiator::NONE;
+  bool autonomousResumeInhibited_ = true;
   int16_t replaySpeed_ = MAP_REPLAY_SPEED_DEFAULT;
   uint8_t loopTarget_ = MAP_LOOP_TARGET_MIN;
   MapTeachMode teachMode_ = MapTeachMode::MANUAL_KEYFRAME;

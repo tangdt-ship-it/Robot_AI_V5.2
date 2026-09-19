@@ -260,6 +260,9 @@ static constexpr uint32_t MAP_GUIDE_TELEMETRY_MS = 250U;
 // deliberately longer than one alternating sensor sample (60 ms) and does
 // not alter any obstacle threshold or automatic-detour policy.
 static constexpr uint32_t OBSTACLE_CLEAR_STABLE_MS = 400U;
+// AI autonomous MAP replay uses a stricter independent clear window. The
+// existing 400 ms window remains the manual START compatibility gate.
+static constexpr uint32_t AI_OBSTACLE_AUTO_RESUME_CLEAR_MS = 1000U;
 
 // All MAP long-press gestures share one deliberate threshold. X still enters
 // HOLD on its down edge; this value only controls escalation to CANCEL.
