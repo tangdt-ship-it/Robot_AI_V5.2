@@ -1217,10 +1217,11 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
     return;
   }
 
-  // A turn-in-place does not add forward travel. Permit it when at least one
-  // fresh sector is explicitly clear, even if the other ultrasonic channel is
-  // temporarily unknown/timeout. Keep every caution/blocked/emergency result
-  // as a hard stop, and do not turn when no sector is trustworthy.
+  // A turn-in-place does not add forward travel. A single centred sensor can
+  // lose one echo while the chassis is rotating, so permit only its bounded
+  // recently-validated wide-clear window. This never treats startup, a close
+  // reading, or a sustained timeout as clear. Caution/blocked/emergency still
+  // stop immediately.
   const ObstacleZone turnZone = ultrasonic_.overallZone();
   const bool leftSectorClear =
       ultrasonic_.frontLeft().fresh &&
@@ -1236,8 +1237,7 @@ void RobotController::updateAiTurn(uint32_t nowMs) {
       : (turnZone == ObstacleZone::CLEAR ||
          (turnZone == ObstacleZone::UNKNOWN &&
           (leftSectorClear || rightSectorClear)));
-  const bool recentClearWindow = !mapTurnProfile &&
-      ultrasonic_.hasRecentClearWindow(nowMs);
+  const bool recentClearWindow = ultrasonic_.hasRecentClearWindow(nowMs);
   if (!oneSectorClear && !recentClearWindow) {
 #if ROBOT_DEBUG
     debug_.print("TURN,STOP=OBSTACLE,ZONE=");

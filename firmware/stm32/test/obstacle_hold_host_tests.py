@@ -92,13 +92,18 @@ class ObstacleHoldHostTests(unittest.TestCase):
         self.assertIn("AiDistanceResultCode::OBSTACLE", CTRL)
         self.assertIn("AiTurnResultCode::OBSTACLE", CTRL)
 
-    def test_map_turn_is_fail_closed_when_sensor_is_not_fully_valid(self):
+    def test_map_turn_uses_only_bounded_recent_clear_grace_on_timeout(self):
         turn_start = CTRL.index("void RobotController::updateAiTurn")
         turn_end = CTRL.index("void RobotController::updateFast", turn_start)
         turn = CTRL[turn_start:turn_end]
         self.assertIn("const bool mapSensorClear", turn)
         self.assertIn("const bool oneSectorClear = mapTurnProfile", turn)
-        self.assertIn("const bool recentClearWindow = !mapTurnProfile", turn)
+        self.assertIn(
+            "const bool recentClearWindow = ultrasonic_.hasRecentClearWindow(nowMs);",
+            turn,
+        )
+        self.assertIn("if (!oneSectorClear && !recentClearWindow)", turn)
+        self.assertIn("finishAiTurn(AiTurnResultCode::OBSTACLE)", turn)
 
 
 if __name__ == "__main__":

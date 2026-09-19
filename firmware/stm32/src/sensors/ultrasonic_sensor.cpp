@@ -363,7 +363,17 @@ int16_t UltrasonicSensor::limitForwardCommand(int16_t cmd)const{
     // missing startup reading, close/stale reading, or repeated timeout still
     // fails closed at zero.
     if(!degradedClearWindow(millis()))return 0;
-    const float degradedNearest=min(channels_[LEFT_MOUNT].filteredDistanceCm,channels_[RIGHT_MOUNT].filteredDistanceCm);
+    // Disabled mounts have no filter history (zero by default) and must not
+    // participate in the nearest-distance calculation for single-front mode.
+    bool anyEnabled=false;
+    float degradedNearest=ULTRASONIC_MAX_CM;
+    for(uint8_t i=0;i<2;++i){
+      const Channel& channel=channels_[i];
+      if(!channel.enabled) continue;
+      anyEnabled=true;
+      degradedNearest=min(degradedNearest,channel.filteredDistanceCm);
+    }
+    if(!anyEnabled)return 0;
     if(degradedNearest<=stoppingDistanceCm(cmd) || degradedNearest<=OBSTACLE_CAUTION_CM)return 0;
     return min(cmd,ULTRASONIC_DEGRADED_MAX_FORWARD_COMMAND);
   }
