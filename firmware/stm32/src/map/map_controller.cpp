@@ -283,6 +283,21 @@ void MapController::update() {
     if (odometry_.resetGeneration() != replayOriginResetGeneration_ ||
         robot_.headingResetGeneration() != replayOriginHeadingResetGeneration_ ||
         route_.header.generation != replayOriginRouteGeneration_) {
+      // This is intentionally diagnostic-only. The three origin snapshots
+      // remain the exact safety gate below; emitting both sides of the
+      // comparison lets a field HIL log identify which boundary changed.
+      debug_.print("MAP,RESET_BOUNDARY,ODOM_ORIGIN=");
+      debug_.print(replayOriginResetGeneration_);
+      debug_.print(",ODOM_NOW=");
+      debug_.print(odometry_.resetGeneration());
+      debug_.print(",HEADING_ORIGIN=");
+      debug_.print(replayOriginHeadingResetGeneration_);
+      debug_.print(",HEADING_NOW=");
+      debug_.print(robot_.headingResetGeneration());
+      debug_.print(",ROUTE_ORIGIN=");
+      debug_.print(replayOriginRouteGeneration_);
+      debug_.print(",ROUTE_NOW=");
+      debug_.println(route_.header.generation);
       if (obstacleDetourContextActive()) {
         abortObstacleDetour("RESET_BOUNDARY");
       } else {

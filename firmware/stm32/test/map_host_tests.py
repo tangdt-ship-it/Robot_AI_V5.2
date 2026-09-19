@@ -1455,6 +1455,31 @@ class MapHostTests(unittest.TestCase):
         self.assertIn("resetGeneration() != replayOriginResetGeneration_", MAP_TEXT)
         self.assertIn("RESET_BOUNDARY", MAP_TEXT)
 
+    def test_reset_boundary_diagnostics_do_not_change_safety_gate(self):
+        start = MAP_TEXT.index("if (replayActive_) {")
+        end = MAP_TEXT.index("    } else if (ps2_.state().r3)", start)
+        reset_gate = MAP_TEXT[start:end]
+        for field in (
+            "MAP,RESET_BOUNDARY,ODOM_ORIGIN=",
+            ",ODOM_NOW=",
+            ",HEADING_ORIGIN=",
+            ",HEADING_NOW=",
+            ",ROUTE_ORIGIN=",
+            ",ROUTE_NOW=",
+        ):
+            self.assertIn(field, reset_gate)
+        self.assertIn("odometry_.resetGeneration() != replayOriginResetGeneration_", reset_gate)
+        self.assertIn(
+            "robot_.headingResetGeneration() != replayOriginHeadingResetGeneration_",
+            reset_gate,
+        )
+        self.assertIn("route_.header.generation != replayOriginRouteGeneration_", reset_gate)
+        self.assertIn('abortReplay("RESET_BOUNDARY")', reset_gate)
+        self.assertIn('abortObstacleDetour("RESET_BOUNDARY")', reset_gate)
+        self.assertNotIn("resetWheelCounts(", reset_gate)
+        self.assertNotIn("resetHeadingReference(", reset_gate)
+        self.assertNotIn("route_ =", reset_gate)
+
     def test_result_owner_and_mcp_routing(self):
         self.assertIn(
             "MotionOwner owner", _read(INCLUDE_ROOT / "control" / "robot_controller.h")
