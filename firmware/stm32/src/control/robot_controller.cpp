@@ -617,12 +617,22 @@ bool RobotController::startReplayGuidedWaypoint(
     uint32_t arrivalPositionToleranceMm,
     uint32_t motionGeneration) {
   const uint32_t now = millis();
+  // Ordinary guided MAP segments use the 5 mm waypoint tolerance.  The
+  // universal Return-to-P0 final-position phase deliberately uses its own
+  // 30 mm completion contract, so the common guided primitive must accept
+  // that bounded value too.  This only widens the input validation gate;
+  // each caller still supplies and enforces its existing tolerance.
+  const uint32_t maxArrivalPositionToleranceMm =
+      MAP_RETURN_P0_POSITION_TOLERANCE_MM >
+              MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM
+          ? MAP_RETURN_P0_POSITION_TOLERANCE_MM
+          : MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM;
   if (!canStartReplayMotion(now) || !odometry_.ready() ||
       !odometry_.healthy() || !headingAvailable() ||
       !isfinite(targetXMm) || !isfinite(targetYMm) ||
       !isfinite(segmentStartXMm) || !isfinite(segmentStartYMm) ||
       !isfinite(arrivalBearingDeg) || arrivalPositionToleranceMm == 0U ||
-      arrivalPositionToleranceMm > MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM) {
+      arrivalPositionToleranceMm > maxArrivalPositionToleranceMm) {
     return false;
   }
   const float initialDistance = hypotf(targetXMm - segmentStartXMm,

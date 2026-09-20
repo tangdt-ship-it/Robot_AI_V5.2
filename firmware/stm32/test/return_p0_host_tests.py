@@ -17,6 +17,8 @@ MAP_H = (ROOT / "include" / "map" / "map_controller.h").read_text(encoding="utf-
 TYPES = (ROOT / "include" / "map" / "map_types.h").read_text(encoding="utf-8")
 CONFIG = (ROOT / "include" / "robot_config.h").read_text(encoding="utf-8")
 ROUTE_STORE = (ROOT / "include" / "map" / "route_store.h").read_text(encoding="utf-8")
+ROBOT_CONTROLLER = (ROOT / "src" / "control" / "robot_controller.cpp").read_text(
+    encoding="utf-8")
 
 
 def constant(name):
@@ -37,6 +39,13 @@ def projection(start, end, point):
     projected = (start[0] + t * dx, start[1] + t * dy)
     return t, projected, math.hypot(point[0] - projected[0],
                                     point[1] - projected[1])
+
+
+def guided_arrival_tolerance_allowed(tolerance_mm):
+    """Model the explicit start gate shared by Map Replay and Return P0."""
+    maximum = max(constant("MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM"),
+                  constant("MAP_RETURN_P0_POSITION_TOLERANCE_MM"))
+    return 0 < tolerance_mm <= maximum
 
 
 ROUTE = [(0.0, 0.0), (1000.0, 0.0), (1000.0, 700.0), (0.0, 700.0)]
@@ -262,6 +271,19 @@ class ReturnP0HostTests(unittest.TestCase):
         model = ReturnModel(); model.arm(); model.complete_position(30.0, 2.0)
         self.assertEqual(model.motor, (0, 0))
         self.assertIn("robot_.motorsStopped()", MAP)
+
+    def test_40a_return_p0_tolerance_is_accepted_by_guided_start(self):
+        # Regression: Return P0 used its contractual 30 mm tolerance, but
+        # the common guided-start input gate only admitted normal 5 mm MAP
+        # tolerance and caused MAP,RETURN_P0,ABORT,REASON=RETURN_START.
+        self.assertTrue(guided_arrival_tolerance_allowed(
+            constant("MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM")))
+        self.assertTrue(guided_arrival_tolerance_allowed(
+            constant("MAP_RETURN_P0_POSITION_TOLERANCE_MM")))
+        self.assertFalse(guided_arrival_tolerance_allowed(
+            constant("MAP_RETURN_P0_POSITION_TOLERANCE_MM") + 1.0))
+        self.assertIn("maxArrivalPositionToleranceMm", ROBOT_CONTROLLER)
+        self.assertIn("MAP_RETURN_P0_POSITION_TOLERANCE_MM", ROBOT_CONTROLLER)
 
     # SAFETY 41-49
     def test_41_obstacle_during_return_holds(self):
