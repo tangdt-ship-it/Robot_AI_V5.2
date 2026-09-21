@@ -62,16 +62,19 @@ class ObstacleHoldHostTests(unittest.TestCase):
         self.assertIn("source == ReplayResumeSource::AI_AUTO", MAP)
         self.assertIn("AI_OBSTACLE_AUTO_RESUME_CLEAR_MS", MAP)
         self.assertIn(
-            "resumeReplayFromHold(ReplayResumeSource::AI_AUTO, rejectReason)",
+            "resumeReturnP0FromObstacleHold(rejectReason)",
             MAP,
         )
+        self.assertIn("resumeReplayFromHold", MAP)
+        self.assertIn("ReplayResumeSource::AI_AUTO", MAP)
         self.assertIn(
             "resumeReplayFromHold(ReplayResumeSource::PS2_START, rejectReason)",
             MAP,
         )
-        service = MAP[MAP.index("void MapController::serviceObstacleHold"):
-                      MAP.index("bool MapController::canResumeReplay", MAP.index(
-                          "void MapController::serviceObstacleHold"))]
+        service_start = MAP.index("void MapController::serviceObstacleHold")
+        service = MAP[service_start:MAP.index(
+            "bool MapController::resumeReturnP0FromObstacleHold", service_start
+        )]
         self.assertNotIn("replayActive_ = true", service)
 
     def test_resume_starts_a_new_operation_without_advancing_waypoint(self):

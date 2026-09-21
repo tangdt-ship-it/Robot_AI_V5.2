@@ -32,10 +32,10 @@ class MapController {
   void processInput();
   void update();
 
-  // Unified MAP mission entry. Phase 1 exposes the AI initiator for host
-  // tests/future integration only; main.cpp and RobotLink do not call it yet.
+  // Unified MAP mission entry for physical PS2 and authenticated AI voice.
   bool requestStart(MapMissionInitiator initiator);
-  // Phase 2 core API only. PS2/voice integration is intentionally deferred.
+  bool requestRunMap(uint8_t slot, MapMissionInitiator initiator,
+                     const char*& reason);
   bool requestReturnToP0(ReturnP0Source source, const char*& reason);
   // Called at the existing RobotLink STOP boundary after the electrical stop
   // has been consumed. It never starts motion or changes the wire protocol.
@@ -243,6 +243,7 @@ class MapController {
                        const char*& rejectReason);
   bool resumeReplayFromHold(ReplayResumeSource source,
                             const char*& rejectReason);
+  bool resumeReturnP0FromObstacleHold(const char*& rejectReason);
   void inhibitAutonomousResume(const char* reason);
   void clearReplayResumeContext();
   uint32_t nextReplayGeneration();
@@ -405,6 +406,9 @@ class MapController {
   uint8_t returnP0PositionCorrectionAttempts_ = 0U;
   uint8_t returnP0HeadingAttempts_ = 0U;
   bool returnP0TurnPending_ = false;
+  ReturnP0State returnP0HeldState_ = ReturnP0State::IDLE;
+  uint16_t returnP0HeldTargetIndex_ = 0U;
+  uint16_t returnP0HeldSegmentStartIndex_ = 0U;
   uint32_t returnP0SettleSinceMs_ = 0U;
   RouteProjection returnP0Projection_{};
   uint32_t closeCandidateDistanceMm_ = 0U;

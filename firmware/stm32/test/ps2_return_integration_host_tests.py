@@ -162,7 +162,8 @@ class Ps2ReturnIntegrationTests(unittest.TestCase):
         self.assertIn("ReturnP0State::HOLD", return_body)
 
     def test_30_obstacle_return_does_not_auto_resume(self):
-        self.assertIn("Return obstacle HOLD is intentionally non-resumable", MAP)
+        self.assertIn("returnP0Source_ != ReturnP0Source::AI_VOICE", MAP)
+        self.assertIn("resumeReturnP0FromObstacleHold", MAP)
 
     def test_31_normal_saved_start_still_prepares_replay(self):
         block = start_block()
@@ -179,7 +180,8 @@ class Ps2ReturnIntegrationTests(unittest.TestCase):
 
     def test_34_ai_is_not_wired_to_ps2_back(self):
         block = start_block()
-        self.assertNotIn("ReturnP0Source::AI_VOICE", block)
+        self.assertIn("requestReturnToP0(ReturnP0Source::PS2_START", block)
+        self.assertNotIn("requestReturnToP0(ReturnP0Source::AI_VOICE", block)
 
     def test_35_robotlink_is_not_changed_by_map_integration(self):
         self.assertIn("requestReturnToP0", MAP_HEADER)

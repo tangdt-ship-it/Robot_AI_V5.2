@@ -51,7 +51,7 @@ def main() -> int:
 
     require(version, "5.2.2", "V5.2.2 version")
 
-    # Canonical AI-visible motion tools must still exist in board registration.
+    # Canonical AI-visible tools must still exist in board registration.
     for name in (
         "self.robot.stop",
         "self.robot.move_distance",
@@ -61,6 +61,7 @@ def main() -> int:
         "self.robot.set_home",
         "self.robot.return_home",
         "self.robot.scan_obstacle",
+        "self.robot.map_route",
     ):
         require(board, f'"{name}"', f"registered canonical tool {name}")
 
@@ -82,6 +83,17 @@ def main() -> int:
         require(board, f'"{name}"', f"legacy source retained {name}")
 
     require(header, "legacy_motion_tool_disabled", "fail-closed legacy callback")
+    require(board, 'Property("action", kPropertyTypeString)',
+            "map_route action schema")
+    for action in ("run_map1", "run_map2", "return_p0"):
+        require(board, action, f"map_route action {action}")
+    require(board, "robot_uart_.RunMap", "RobotLink MAP run API")
+    require(board, "robot_uart_.ReturnToP0", "RobotLink P0 API")
+    require(uart_source, "MAP,CMD,RUN", "RobotLink MAP run framing")
+    require(uart_source, "MAP,CMD,RETURN_P0", "RobotLink P0 framing")
+    require(header, "P0 phải dùng self.robot.map_route", "HOME/P0 disambiguation")
+    if '"completed":true' in board[board.find('"self.robot.map_route"'):board.find('"self.robot.map_route"') + 5000]:
+        raise AssertionError("map_route reports completed=true on acceptance")
     require(header, "1 bước=5 cm=50 mm", "voice step conversion policy")
     require(header, "Quay đầu", "180-degree turn language policy")
     require(header, "PHYSICAL MOTION", "body-scan motion warning")

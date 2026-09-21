@@ -272,8 +272,27 @@ void loop() {
     robotLink.completeStopRequest();
     stopCompletionPending = false;
   } else if (!stopCompletionPending) {
+    bool mapRequestHandled = false;
+    RobotLinkMapRequest mapRequest;
+    if (robotLink.takeMapRequest(mapRequest)) {
+      mapRequestHandled = true;
+      const char* reason = nullptr;
+      bool accepted = false;
+      if (mapRequest.type == RobotLinkMapRequestType::RUN) {
+        accepted = mapController.requestRunMap(
+            mapRequest.slot, MapMissionInitiator::AI_VOICE, reason);
+      } else if (mapRequest.type == RobotLinkMapRequestType::RETURN_P0) {
+        accepted = mapController.requestReturnToP0(
+            ReturnP0Source::AI_VOICE, reason);
+      } else {
+        reason = "INVALID_ACTION";
+      }
+      robotLink.completeMapRequest(mapRequest, accepted,
+                                   reason != nullptr ? reason : "REJECTED");
+    }
+
     RobotLinkMotionRequest request;
-    if (robotLink.takeMotionRequest(request)) {
+    if (!mapRequestHandled && robotLink.takeMotionRequest(request)) {
       const int16_t speed = request.speed;
       bool started = false;
       switch (request.motion) {

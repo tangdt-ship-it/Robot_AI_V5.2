@@ -556,7 +556,8 @@ private:
                     tool_name == "self.robot.turn_right" ||
                     tool_name == "self.robot.turn_relative" ||
                     tool_name == "self.robot.turn_revolutions" ||
-                    tool_name == "self.robot.turn_to_heading") {
+                    tool_name == "self.robot.turn_to_heading" ||
+                    tool_name == "self.robot.map_route") {
                     return robot_uart_.MotionCancellationToken();
                 }
                 return 0U;
@@ -704,6 +705,45 @@ private:
                 return std::string(json);
             });
 #endif
+        mcp_server.AddTool(
+            "self.robot.map_route",
+            "Điều khiển MAP trên STM32 bằng một hành động chính xác. action chỉ nhận đúng run_map1 (chạy map 1, chạy bản đồ 1, thực hiện map 1, chạy tuyến 1), run_map2 (chạy map 2, chạy bản đồ 2, thực hiện map 2, chạy tuyến 2), hoặc return_p0 (về P0, quay về P0, trở về P0, về điểm P0, về điểm bắt đầu của map, về vị trí ban đầu của map, trở về điểm bắt đầu đã teach). Đây là mission dài hạn: accepted=true chỉ nghĩa là STM32 đã nhận lệnh, completed luôn là false lúc bắt đầu. Không dùng cho HOME/breadcrumb; HOME dùng self.robot.return_home.",
+            PropertyList({Property("action", kPropertyTypeString)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                const std::string action = properties["action"].value<std::string>();
+                RobotMapCommandResult result = RobotMapCommandResult::REJECTED;
+                uint8_t slot = 0U;
+                bool is_run = false;
+                if (action == "run_map1") {
+                    slot = 1U;
+                    is_run = true;
+                } else if (action == "run_map2") {
+                    slot = 2U;
+                    is_run = true;
+                } else if (action == "return_p0") {
+                    is_run = false;
+                } else {
+                    return std::string(
+                        "{\"accepted\":false,\"completed\":false,\"error\":\"invalid_action\"}");
+                }
+                result = is_run ? robot_uart_.RunMap(slot, 1500)
+                                : robot_uart_.ReturnToP0(1500);
+                if (result == RobotMapCommandResult::ACCEPTED) {
+                    if (is_run) {
+                        char json[128];
+                        snprintf(json, sizeof(json),
+                                 "{\"accepted\":true,\"completed\":false,\"state\":\"map_running\",\"slot\":%u}",
+                                 static_cast<unsigned>(slot));
+                        return std::string(json);
+                    }
+                    return std::string(
+                        "{\"accepted\":true,\"completed\":false,\"state\":\"returning_to_p0\"}");
+                }
+                return std::string(
+                    result == RobotMapCommandResult::TRANSPORT_TIMEOUT
+                        ? "{\"accepted\":false,\"completed\":false,\"error\":\"robotlink_timeout\"}"
+                        : "{\"accepted\":false,\"completed\":false,\"error\":\"map_command_rejected\"}");
+            });
         mcp_server.AddTool(
             "self.robot.get_diagnostics",
             "Read robot diagnostics without moving. target=state,encoder,heading,imu,fusion,obstacle,ps2, or all.",

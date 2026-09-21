@@ -351,8 +351,8 @@ void MapController::update() {
       } else if (ps2_.state().r3 || ps2_.motionCommandActive()) {
         abortReturnToP0(ps2_.state().r3 ? "R3" : "PS2_TAKEOVER");
       } else if (returnP0State_ == ReturnP0State::HOLD) {
-        // Return obstacle HOLD is intentionally non-resumable in Phase 2.
-        // Phase 3 may add an explicit caller using the same state machine.
+        // AI Return uses the same safety HOLD boundary as replay, but its
+        // clear/resume path is serviced below. PS2 Return remains manual-only.
       } else if (robot_.motionOwner() != MotionOwner::REPLAY &&
                  !robot_.aiMotionActive() &&
                  replayOperation_ != MapReplayOperation::NONE) {
@@ -936,6 +936,44 @@ bool MapController::requestStart(MapMissionInitiator initiator) {
   return started;
 }
 
+bool MapController::requestRunMap(uint8_t slot, MapMissionInitiator initiator,
+                                   const char*& reason) {
+  reason = nullptr;
+  if (slot != 1U && slot != 2U) {
+    reason = "MAP_NOT_AVAILABLE";
+    return false;
+  }
+  if (initiator == MapMissionInitiator::NONE) {
+    reason = "INITIATOR";
+    return false;
+  }
+  if (returnP0InProgress() || replayActive_ ||
+      mode_ == MapControllerMode::TEACHING ||
+      mode_ == MapControllerMode::SETTINGS ||
+      mode_ == MapControllerMode::HELP ||
+      mode_ == MapControllerMode::REPLAY_HOLD) {
+    reason = "MAP_BUSY";
+    return false;
+  }
+  if (static_cast<uint8_t>(selectedSlot_) != slot) {
+    handleSlot(slot);
+    if (static_cast<uint8_t>(selectedSlot_) != slot) {
+      reason = "MAP_BUSY";
+      return false;
+    }
+  }
+  if (!loadSelected()) {
+    reason = "MAP_NOT_AVAILABLE";
+    return false;
+  }
+  if (!requestStart(initiator)) {
+    reason = "MAP_COMMAND_REJECTED";
+    return false;
+  }
+  reason = "OK";
+  return true;
+}
+
 bool MapController::requestReturnToP0(ReturnP0Source source,
                                        const char*& reason) {
   return requestReturnToP0Internal(source, reason);
@@ -1030,6 +1068,12 @@ bool MapController::requestReturnToP0Internal(ReturnP0Source source,
   returnP0Generation_ = replayGeneration_;
   returnP0SegmentGeneration_ = 0U;
   returnP0Source_ = source;
+  if (source == ReturnP0Source::AI_VOICE) {
+    missionInitiator_ = MapMissionInitiator::AI_VOICE;
+    // An accepted AI MAP request is the explicit boundary that clears the
+    // previous autonomous-stop latch. PS2 requests never clear it.
+    autonomousResumeInhibited_ = false;
+  }
   returnP0Projection_ = projection;
   returnP0TargetIndex_ = projection.segmentStartIndex;
   returnP0SegmentStartIndex_ = projection.segmentStartIndex;
@@ -1037,6 +1081,9 @@ bool MapController::requestReturnToP0Internal(ReturnP0Source source,
   returnP0PositionCorrectionAttempts_ = 0U;
   returnP0HeadingAttempts_ = 0U;
   returnP0TurnPending_ = false;
+  returnP0HeldState_ = ReturnP0State::IDLE;
+  returnP0HeldTargetIndex_ = 0U;
+  returnP0HeldSegmentStartIndex_ = 0U;
   returnP0SettleSinceMs_ = 0U;
   replayOrigin_ = homeContext_.p0WorldPose;
   replayOriginValid_ = true;
@@ -3288,6 +3335,7 @@ void MapController::abortReturnToP0(const char* reason) {
   replayReason_ = reason != nullptr ? reason : "RETURN_ABORT";
   returnP0SegmentGeneration_ = 0U;
   returnP0TurnPending_ = false;
+  returnP0HeldState_ = ReturnP0State::IDLE;
   returnP0State_ = ReturnP0State::ABORTED;
   mode_ = storeState_ == MapStoreState::SAVED ? MapControllerMode::SAVED
                                                : MapControllerMode::READY;
@@ -3305,6 +3353,7 @@ void MapController::completeReturnToP0() {
   replayReason_ = "RETURN_P0_COMPLETE";
   returnP0SegmentGeneration_ = 0U;
   returnP0TurnPending_ = false;
+  returnP0HeldState_ = ReturnP0State::IDLE;
   returnP0State_ = ReturnP0State::COMPLETE;
   mode_ = MapControllerMode::REPLAY_COMPLETE;
   debug_.println("MAP,RETURN_P0,COMPLETE");
@@ -3334,6 +3383,9 @@ bool MapController::consumeReturnTurnResult(const AiTurnResult& result) {
     return true;
   }
   if (result.code == AiTurnResultCode::OBSTACLE) {
+    returnP0HeldState_ = returnP0State_;
+    returnP0HeldTargetIndex_ = returnP0TargetIndex_;
+    returnP0HeldSegmentStartIndex_ = returnP0SegmentStartIndex_;
     returnP0State_ = ReturnP0State::HOLD;
     enterReplayHold(MapHoldReason::OBSTACLE, false);
     return true;
@@ -3432,6 +3484,9 @@ bool MapController::consumeReturnDistanceResult(
     return true;
   }
   if (result.code == AiDistanceResultCode::OBSTACLE) {
+    returnP0HeldState_ = returnP0State_;
+    returnP0HeldTargetIndex_ = returnP0TargetIndex_;
+    returnP0HeldSegmentStartIndex_ = returnP0SegmentStartIndex_;
     returnP0State_ = ReturnP0State::HOLD;
     enterReplayHold(MapHoldReason::OBSTACLE, false);
     return true;
@@ -4080,6 +4135,9 @@ void MapController::clearReplayResumeContext() {
   replayOriginRouteGeneration_ = 0U;
   replayOriginResetGeneration_ = 0U;
   replayOriginHeadingResetGeneration_ = 0U;
+  returnP0HeldState_ = ReturnP0State::IDLE;
+  returnP0HeldTargetIndex_ = 0U;
+  returnP0HeldSegmentStartIndex_ = 0U;
   replayTargetDistanceMm_ = 0U;
   replayTargetDeg_ = 0;
   replayGuideBearingDeg_ = 0.0f;
@@ -4177,11 +4235,84 @@ void MapController::serviceObstacleHold() {
   if (aiAutoResume && !autonomousResumeInhibited_ &&
       (now - obstacleClearSinceMs_) >= AI_OBSTACLE_AUTO_RESUME_CLEAR_MS) {
     const char* rejectReason = nullptr;
-    if (!resumeReplayFromHold(ReplayResumeSource::AI_AUTO, rejectReason)) {
+    const bool resumed = returnP0InProgress()
+                             ? resumeReturnP0FromObstacleHold(rejectReason)
+                             : resumeReplayFromHold(ReplayResumeSource::AI_AUTO,
+                                                    rejectReason);
+    if (!resumed) {
       inhibitAutonomousResume(rejectReason != nullptr ? rejectReason
                                                        : "AUTO_RESUME_REJECT");
     }
   }
+}
+
+bool MapController::resumeReturnP0FromObstacleHold(const char*& rejectReason) {
+  rejectReason = nullptr;
+  if (returnP0Source_ != ReturnP0Source::AI_VOICE ||
+      returnP0State_ != ReturnP0State::HOLD ||
+      holdReason_ != MapHoldReason::OBSTACLE) {
+    rejectReason = "RETURN_HOLD_CONTEXT";
+    return false;
+  }
+  if (autonomousResumeInhibited_ || !homeContext_.valid ||
+      selectedSlot_ != homeContext_.slot ||
+      route_.header.generation != homeContext_.routeGeneration ||
+      odometry_.resetGeneration() != homeContext_.odometryResetGeneration ||
+      robot_.headingResetGeneration() != homeContext_.headingResetGeneration ||
+      !odometry_.ready() || !odometry_.healthy() || !fusion_.ready() ||
+      fusion_.health() == FusionHealth::NO_SOURCE ||
+      !ultrasonic_.isFresh() || !ultrasonic_.healthy() ||
+      ultrasonic_.overallZone() != ObstacleZone::CLEAR ||
+      !robot_.motorsStopped() || robot_.aiMotionActive() ||
+      robot_.motionOwner() != MotionOwner::NONE || ps2_.motionCommandActive() ||
+      ps2_.state().r3 || returnP0HeldTargetIndex_ >= route_.header.waypointCount) {
+    rejectReason = "RETURN_RESUME_GATE";
+    return false;
+  }
+  returnP0TargetIndex_ = returnP0HeldTargetIndex_;
+  returnP0SegmentStartIndex_ = returnP0HeldSegmentStartIndex_;
+  returnP0State_ = returnP0HeldState_;
+  nextReplayGeneration();
+  returnP0Generation_ = replayGeneration_;
+  returnP0SegmentGeneration_ = 0U;
+  replaySegmentGeneration_ = 0U;
+  replayActive_ = true;
+  replayOperation_ = MapReplayOperation::NONE;
+  replayResumeAllowed_ = false;
+  holdReason_ = MapHoldReason::NONE;
+  obstacleClearSinceMs_ = 0U;
+  mode_ = MapControllerMode::REPLAY_RUNNING;
+  statusDirty_ = true;
+
+  bool started = false;
+  switch (returnP0State_) {
+    case ReturnP0State::REACQUIRE_ROUTE:
+      started = startReturnReacquire();
+      break;
+    case ReturnP0State::RETURN_WAYPOINT:
+      started = startReturnWaypoint();
+      break;
+    case ReturnP0State::P0_POSITION_APPROACH:
+    case ReturnP0State::P0_POSITION_SETTLE:
+    case ReturnP0State::P0_HEADING_RESTORE:
+    case ReturnP0State::P0_HEADING_SETTLE:
+      returnP0State_ = ReturnP0State::P0_POSITION_APPROACH;
+      started = startReturnP0Position();
+      break;
+    default:
+      rejectReason = "RETURN_HOLD_STATE";
+      started = false;
+      break;
+  }
+  if (!started) {
+    rejectReason = "RETURN_RESUME_START";
+    abortReturnToP0(rejectReason);
+    return false;
+  }
+  debug_.print("MAP,RETURN_P0,AI_AUTO_RESUME,STATE=");
+  debug_.println(returnP0StateName(returnP0State_));
+  rejectReason = "OK";
+  return true;
 }
 
 bool MapController::canResumeReplay(const char*& rejectReason) {

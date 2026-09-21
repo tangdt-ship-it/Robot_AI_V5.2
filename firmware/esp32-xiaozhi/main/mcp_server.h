@@ -255,7 +255,7 @@ private:
             return "Đặt vị trí hiện tại làm HOME/điểm xuất phát. Dùng cho các cách nói set home, đặt vị trí nhà, đặt nhà, đặt vị trí xuất phát, đánh dấu điểm xuất phát. Tool không làm robot di chuyển và chỉ thành công khi odometry sẵn sàng, robot không có mission đang chạy.";
         }
         if (name == "self.robot.return_home") {
-            return "Cho robot trở về HOME đã lưu. Dùng cho các cách nói về nhà, quay về nhà, quay về chỗ cũ, trở lại vị trí ban đầu, quay về điểm xuất phát. Đây là mission Return Home riêng; chỉ xác nhận đã về khi mission state là return_completed.";
+            return "Cho robot trở về HOME đã lưu bằng breadcrumb navigation do self.robot.set_home tạo. Chỉ dùng cho HOME; không dùng cho P0, điểm bắt đầu MAP hoặc Teach origin. P0 phải dùng self.robot.map_route(action=return_p0). Chỉ xác nhận đã về khi mission state là return_completed.";
         }
         if (name == "self.robot.scan_obstacle") {
             return "PHYSICAL MOTION: robot sẽ thật sự xoay thân trái/phải để quét môi trường bằng HC-SR04 + camera rồi trở lại hướng gốc. Chỉ dùng khi người dùng yêu cầu quét/nhìn xung quanh hoặc kiểm tra hai bên. Nếu chỉ hỏi vật cản phía trước, dùng get_diagnostics(target=obstacle) vì tool đó không làm robot di chuyển.";

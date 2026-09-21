@@ -146,6 +146,13 @@ struct RobotLinkCalibrationStatus {
   uint16_t turnSamples = 0;
 };
 
+enum class RobotLinkMapRequestType : uint8_t { NONE, RUN, RETURN_P0 };
+struct RobotLinkMapRequest {
+  RobotLinkMapRequestType type = RobotLinkMapRequestType::NONE;
+  uint8_t slot = 0;
+  uint16_t sequence = 0;
+};
+
 class RobotLinkServer {
  public:
   RobotLinkServer(HardwareSerial& serial, Print& debugStream)
@@ -155,6 +162,9 @@ class RobotLinkServer {
   void update(const RobotTelemetry& telemetry);
   bool connected() const;
   bool takeStopRequest();
+  bool takeMapRequest(RobotLinkMapRequest& request);
+  void completeMapRequest(const RobotLinkMapRequest& request, bool success,
+                          const char* reason);
   bool takeMotionRequest(RobotLinkMotionRequest& request);
   void completeMotionRequest(const RobotLinkMotionRequest& request,
                              bool success);
@@ -194,6 +204,9 @@ class RobotLinkServer {
   bool linkReported_ = false;
   bool stopRequested_ = false;
   bool motionRequested_ = false;
+  bool mapRequestReady_ = false;
+  bool mapRequestInFlight_ = false;
+  RobotLinkMapRequest mapRequest_;
   RobotLinkMotionRequest motionRequest_;
   bool motionRequestInFlight_ = false;
   bool stopAckPending_ = false;

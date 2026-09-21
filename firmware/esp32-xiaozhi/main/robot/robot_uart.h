@@ -145,6 +145,12 @@ struct RobotCalibrationStatus {
     uint16_t turn_samples = 0;
 };
 
+enum class RobotMapCommandResult : uint8_t {
+    ACCEPTED,
+    REJECTED,
+    TRANSPORT_TIMEOUT,
+};
+
 class RobotUart {
 public:
     using ObstacleStoppedCallback = void (*)(void*, const RobotObstacleStatus&, bool);
@@ -172,6 +178,8 @@ public:
     bool Ping(uint32_t timeout_ms = 500);
     bool CheckProtocol(uint32_t timeout_ms = 500);
     bool SetMode(bool ai_mode, uint32_t timeout_ms = 500);
+    RobotMapCommandResult RunMap(uint8_t slot, uint32_t timeout_ms = 1500);
+    RobotMapCommandResult ReturnToP0(uint32_t timeout_ms = 1500);
     bool MoveForward(int speed, uint32_t timeout_ms = 500);
     bool MoveBackward(int speed, uint32_t timeout_ms = 500);
     bool TurnLeft(int speed, uint32_t timeout_ms = 500);
@@ -410,6 +418,11 @@ private:
                                 uint32_t operation_id) const;
     static int ClampSpeed(int speed);
     static int ClampDriveSpeed(int speed);
+    RobotMapCommandResult MapCommandResult(bool sent) const {
+        if (sent) return RobotMapCommandResult::ACCEPTED;
+        return last_transaction_nack_.load() ? RobotMapCommandResult::REJECTED
+                                             : RobotMapCommandResult::TRANSPORT_TIMEOUT;
+    }
 
     SemaphoreHandle_t transaction_mutex_ = nullptr;
     SemaphoreHandle_t tx_mutex_ = nullptr;
@@ -448,6 +461,7 @@ private:
     volatile bool motion_ack_waiting_ = false;
     volatile bool motion_correlation_active_ = false;
     std::atomic<uint32_t> motion_cancel_generation_{1U};
+    std::atomic_bool last_transaction_nack_{false};
     // Alpha.7 seeds both halves of the correlation pair from the ESP32
     // hardware RNG at construction. CheckProtocol() still advances SID on
     // each successful negotiation, preserving the existing session-boundary
