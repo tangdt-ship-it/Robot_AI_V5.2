@@ -970,6 +970,9 @@ bool MapController::requestRunMap(uint8_t slot, MapMissionInitiator initiator,
     reason = "MAP_COMMAND_REJECTED";
     return false;
   }
+  if (initiator == MapMissionInitiator::AI_VOICE) {
+    armAiRunHomeContextIfNeeded();
+  }
   reason = "OK";
   return true;
 }
@@ -1498,6 +1501,33 @@ void MapController::armHomeContextAfterSave() {
   debug_.print(homeContext_.p0WorldPose.yMm, 1);
   debug_.print(",H=");
   debug_.println(homeContext_.p0WorldPose.headingDeg, 1);
+}
+
+void MapController::armAiRunHomeContextIfNeeded() {
+  // Normal replay already binds route-local P0 to replayOrigin_.  Reuse that
+  // exact frame for a Voice Return-P0 command after boot, without persisting
+  // a new HOME record or altering the established post-Teach PS2 flow.
+  if (homeContext_.valid || !replayActive_ || !replayOriginValid_ ||
+      route_.header.waypointCount < 2U || route_.header.generation == 0U) {
+    return;
+  }
+  homeContext_ = {};
+  homeContext_.valid = true;
+  homeContext_.slot = selectedSlot_;
+  homeContext_.routeGeneration = route_.header.generation;
+  homeContext_.odometryResetGeneration = odometry_.resetGeneration();
+  homeContext_.headingResetGeneration = robot_.headingResetGeneration();
+  homeContext_.p0WorldPose = replayOrigin_;
+  // This session context is for authenticated AI Return-P0 only.  It must
+  // not advertise or arm the physical PS2 BACK-P0 action that is reserved
+  // for the existing post-Teach workflow.
+  backP0UiDismissed_ = true;
+  returnP0State_ = ReturnP0State::IDLE;
+  returnP0Source_ = ReturnP0Source::NONE;
+  debug_.print("MAP,HOME,ARM,REASON=AI_RUN,SLOT=");
+  debug_.print(static_cast<unsigned>(homeContext_.slot));
+  debug_.print(",GEN=");
+  debug_.println(homeContext_.routeGeneration);
 }
 
 void MapController::invalidateHomeContext(const char* reason) {

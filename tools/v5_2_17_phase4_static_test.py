@@ -33,6 +33,8 @@ def main() -> None:
     require(BOARD, 'run_map1')
     require(BOARD, 'run_map2')
     require(BOARD, 'return_p0')
+    require(BOARD, 'chạy về P0')
+    require(BOARD, 'không gọi stop, move_distance, turn, return_home')
     require(BOARD, 'completed\\":false')
     require(UART, "SetMode(true, 700)")
 
@@ -68,6 +70,13 @@ def main() -> None:
     require(STM32_MAP, "requestReturnToP0(ReturnP0Source::PS2_START")
     require(STM32_MAP, 'abortReturnToP0("EXTERNAL_STOP")')
 
+    # After boot, an accepted AI run may establish only a RAM-bound P0 frame
+    # from the existing replay origin.  It remains guarded by reset/route
+    # generations and never re-enables the physical post-Teach BACK action.
+    require(STM32_MAP, "armAiRunHomeContextIfNeeded")
+    require(STM32_MAP, "homeContext_.p0WorldPose = replayOrigin_")
+    require(STM32_MAP, "backP0UiDismissed_ = true")
+
     # ESP32 uses the transaction/ACK path; no direct callback UART command.
     require(UART_H, "RunMap(uint8_t slot")
     require(UART_H, "ReturnToP0(uint32_t timeout_ms")
@@ -77,7 +86,7 @@ def main() -> None:
     require(UART_H, "TRANSPORT_TIMEOUT")
 
     # HOME remains distinct from MAP Return-P0.
-    require(MCP, "P0 phải dùng self.robot.map_route")
+    require(MCP, "self.robot.map_route(action=return_p0)")
 
     print("V5_2_17_PHASE4_STATIC=PASS")
 

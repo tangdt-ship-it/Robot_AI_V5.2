@@ -140,6 +140,19 @@ class ReturnP0HostTests(unittest.TestCase):
         self.assertIn("homeContext_ = {}", MAP)
         self.assertIn("pendingHomeContextValid_ = false", MAP)
 
+    def test_09a_ai_run_arms_only_a_ram_session_p0_context_after_boot(self):
+        run = MAP[MAP.index("bool MapController::requestRunMap"):
+                  MAP.index("bool MapController::requestReturnToP0")]
+        arm = MAP[MAP.index("void MapController::armAiRunHomeContextIfNeeded"):
+                  MAP.index("void MapController::invalidateHomeContext")]
+        self.assertIn("initiator == MapMissionInitiator::AI_VOICE", run)
+        self.assertIn("armAiRunHomeContextIfNeeded()", run)
+        self.assertIn("homeContext_.valid || !replayActive_ || !replayOriginValid_", arm)
+        self.assertIn("homeContext_.p0WorldPose = replayOrigin_", arm)
+        self.assertIn("odometry_.resetGeneration()", arm)
+        self.assertIn("robot_.headingResetGeneration()", arm)
+        self.assertIn("backP0UiDismissed_ = true", arm)
+
     def test_10_normal_replay_does_not_invalidate_home(self):
         self.assertIn("if (returnP0InProgress())", MAP)
         self.assertIn("else if (odometry_.resetGeneration() != replayOriginResetGeneration_", MAP)

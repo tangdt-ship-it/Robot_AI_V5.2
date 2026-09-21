@@ -91,7 +91,8 @@ def main() -> int:
     require(board, "robot_uart_.ReturnToP0", "RobotLink P0 API")
     require(uart_source, "MAP,CMD,RUN", "RobotLink MAP run framing")
     require(uart_source, "MAP,CMD,RETURN_P0", "RobotLink P0 framing")
-    require(header, "P0 phải dùng self.robot.map_route", "HOME/P0 disambiguation")
+    require(header, "self.robot.map_route(action=return_p0)",
+            "HOME/P0 disambiguation")
     if '"completed":true' in board[board.find('"self.robot.map_route"'):board.find('"self.robot.map_route"') + 5000]:
         raise AssertionError("map_route reports completed=true on acceptance")
     require(header, "1 bước=5 cm=50 mm", "voice step conversion policy")

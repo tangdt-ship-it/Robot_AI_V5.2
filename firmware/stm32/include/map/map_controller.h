@@ -167,6 +167,11 @@ class MapController {
   bool startPostTeachBack(const char*& reason);
   bool backReadyP0Available(const char*& reason) const;
   void armHomeContextAfterSave();
+  // A persisted route has no world-frame P0 after a reboot.  An accepted AI
+  // MAP run defines that session's P0 from the same replay origin used by the
+  // normal route executor; it is intentionally RAM-only and never enables
+  // the PS2 post-Teach BACK offer.
+  void armAiRunHomeContextIfNeeded();
   void invalidateHomeContext(const char* reason);
   bool locateRouteProjection(RouteProjection& projection,
                              const char*& reason) const;
