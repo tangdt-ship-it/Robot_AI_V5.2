@@ -982,21 +982,74 @@ bool MapController::requestReturnToP0(ReturnP0Source source,
   return requestReturnToP0Internal(source, reason);
 }
 
+void MapController::logReturnP0RejectSnapshot(ReturnP0Source source,
+                                              const char* reason,
+                                              const char* boundary) const {
+  // One physical COM12 line.  Keep this read-only: it is deliberately emitted
+  // before the caller's stop/invalidate/abort action so a rejected AI request
+  // preserves the state that caused the rejection.
+  debug_.print("MAP,RETURN_P0,REJECT_SNAPSHOT,REASON=");
+  debug_.print(reason != nullptr ? reason : "REJECTED");
+  debug_.print(",SOURCE=");
+  debug_.print(ReturnP0SourceName(source));
+  if (boundary != nullptr) {
+    debug_.print(",BOUNDARY=");
+    debug_.print(boundary);
+  }
+  debug_.print(",HOME_VALID=");
+  debug_.print(homeContext_.valid ? 1 : 0);
+  debug_.print(",HOME_SLOT=");
+  debug_.print(static_cast<unsigned>(homeContext_.slot));
+  debug_.print(",SELECTED_SLOT=");
+  debug_.print(static_cast<unsigned>(selectedSlot_));
+  debug_.print(",HOME_ROUTE_GEN=");
+  debug_.print(homeContext_.routeGeneration);
+  debug_.print(",ROUTE_GEN=");
+  debug_.print(route_.header.generation);
+  debug_.print(",HOME_ODOM_GEN=");
+  debug_.print(homeContext_.odometryResetGeneration);
+  debug_.print(",ODOM_GEN=");
+  debug_.print(odometry_.resetGeneration());
+  debug_.print(",HOME_HEADING_GEN=");
+  debug_.print(homeContext_.headingResetGeneration);
+  debug_.print(",HEADING_GEN=");
+  debug_.print(robot_.headingResetGeneration());
+  debug_.print(",LOADED=");
+  debug_.print(loadedValid_ ? 1 : 0);
+  debug_.print(",MODE=");
+  debug_.print(static_cast<unsigned>(mode_));
+  debug_.print(",REPLAY_ACTIVE=");
+  debug_.print(replayActive_ ? 1 : 0);
+  debug_.print(",RETURN_STATE=");
+  debug_.print(static_cast<unsigned>(returnP0State_));
+  debug_.print(",OWNER=");
+  debug_.print(static_cast<unsigned>(robot_.motionOwner()));
+  debug_.print(",MOTORS_STOPPED=");
+  debug_.print(robot_.motorsStopped() ? 1 : 0);
+  debug_.print(",AI_ACTIVE=");
+  debug_.print(robot_.aiMotionActive() ? 1 : 0);
+  debug_.print(",PS2_MOTION=");
+  debug_.println((ps2_.motionCommandActive() || ps2_.state().r3) ? 1 : 0);
+}
+
 bool MapController::requestReturnToP0Internal(ReturnP0Source source,
                                               const char*& reason) {
   reason = nullptr;
   if (returnP0InProgress()) {
     reason = "RETURN_P0_ACTIVE";
+    logReturnP0RejectSnapshot(source, reason);
     return false;
   }
-  returnP0State_ = ReturnP0State::VALIDATE_HOME;
   if (source == ReturnP0Source::NONE) {
     reason = "SOURCE";
+    logReturnP0RejectSnapshot(source, reason);
     returnP0State_ = ReturnP0State::ABORTED;
     return false;
   }
+  returnP0State_ = ReturnP0State::VALIDATE_HOME;
   if (!homeContext_.valid) {
     reason = "HOME_CONTEXT_INVALID";
+    logReturnP0RejectSnapshot(source, reason);
     robot_.stopImmediately(true);
     returnP0State_ = ReturnP0State::ABORTED;
     debug_.println("MAP,RETURN_P0,ABORT,REASON=HOME_CONTEXT_INVALID");
@@ -1004,6 +1057,7 @@ bool MapController::requestReturnToP0Internal(ReturnP0Source source,
   }
   if (selectedSlot_ != homeContext_.slot) {
     reason = "SLOT_CHANGED";
+    logReturnP0RejectSnapshot(source, reason);
     robot_.stopImmediately(true);
     invalidateHomeContext(reason);
     returnP0State_ = ReturnP0State::ABORTED;
@@ -1011,6 +1065,7 @@ bool MapController::requestReturnToP0Internal(ReturnP0Source source,
   }
   if (odometry_.resetGeneration() != homeContext_.odometryResetGeneration) {
     reason = "RESET_BOUNDARY";
+    logReturnP0RejectSnapshot(source, reason, "ODOM");
     robot_.stopImmediately(true);
     invalidateHomeContext(reason);
     returnP0State_ = ReturnP0State::ABORTED;
@@ -1018,6 +1073,7 @@ bool MapController::requestReturnToP0Internal(ReturnP0Source source,
   }
   if (robot_.headingResetGeneration() != homeContext_.headingResetGeneration) {
     reason = "RESET_BOUNDARY";
+    logReturnP0RejectSnapshot(source, reason, "HEADING");
     robot_.stopImmediately(true);
     invalidateHomeContext(reason);
     returnP0State_ = ReturnP0State::ABORTED;
@@ -1025,12 +1081,14 @@ bool MapController::requestReturnToP0Internal(ReturnP0Source source,
   }
   if (!loadedValid_ && !loadSelected()) {
     reason = "ROUTE_INVALID";
+    logReturnP0RejectSnapshot(source, reason);
     robot_.stopImmediately(true);
     returnP0State_ = ReturnP0State::ABORTED;
     return false;
   }
   if (route_.header.generation != homeContext_.routeGeneration) {
     reason = "ROUTE_CHANGED";
+    logReturnP0RejectSnapshot(source, reason);
     robot_.stopImmediately(true);
     invalidateHomeContext(reason);
     returnP0State_ = ReturnP0State::ABORTED;
@@ -1039,6 +1097,7 @@ bool MapController::requestReturnToP0Internal(ReturnP0Source source,
   if (robot_.motionOwner() != MotionOwner::NONE &&
       robot_.motionOwner() != MotionOwner::REPLAY) {
     reason = "MOTION_OWNER";
+    logReturnP0RejectSnapshot(source, reason);
     robot_.stopImmediately(true);
     returnP0State_ = ReturnP0State::ABORTED;
     return false;
@@ -1048,6 +1107,7 @@ bool MapController::requestReturnToP0Internal(ReturnP0Source source,
     robot_.stopImmediately(true);
   } else if (!robot_.motorsStopped() || robot_.aiMotionActive()) {
     reason = "MOTION_OWNER";
+    logReturnP0RejectSnapshot(source, reason);
     robot_.stopImmediately(true);
     returnP0State_ = ReturnP0State::ABORTED;
     return false;
@@ -1056,6 +1116,7 @@ bool MapController::requestReturnToP0Internal(ReturnP0Source source,
   returnP0State_ = ReturnP0State::LOCATE_ON_ROUTE;
   RouteProjection projection;
   if (!locateRouteProjection(projection, reason)) {
+    logReturnP0RejectSnapshot(source, reason != nullptr ? reason : "LOCATE");
     robot_.stopImmediately(true);
     returnP0State_ = ReturnP0State::ABORTED;
     debug_.print("MAP,RETURN_P0,ABORT,REASON=");
@@ -1121,6 +1182,7 @@ bool MapController::requestReturnToP0Internal(ReturnP0Source source,
     returnP0State_ = ReturnP0State::REACQUIRE_ROUTE;
     if (!startReturnReacquire()) {
       reason = "REACQUIRE_START";
+      logReturnP0RejectSnapshot(source, reason);
       abortReturnToP0(reason);
       return false;
     }
@@ -1128,6 +1190,7 @@ bool MapController::requestReturnToP0Internal(ReturnP0Source source,
     returnP0State_ = ReturnP0State::RETURN_WAYPOINT;
     if (!startReturnWaypoint()) {
       reason = "RETURN_START";
+      logReturnP0RejectSnapshot(source, reason);
       abortReturnToP0(reason);
       return false;
     }

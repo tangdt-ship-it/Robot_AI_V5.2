@@ -173,6 +173,10 @@ class MapController {
   // the PS2 post-Teach BACK offer.
   void armAiRunHomeContextIfNeeded();
   void invalidateHomeContext(const char* reason);
+  // Debug-only pre-reject capture for the AI/PS2 Return-P0 request boundary.
+  // This helper only reads current state and writes one COM12 line.
+  void logReturnP0RejectSnapshot(ReturnP0Source source, const char* reason,
+                                 const char* boundary = nullptr) const;
   bool locateRouteProjection(RouteProjection& projection,
                              const char*& reason) const;
   bool requestReturnToP0Internal(ReturnP0Source source, const char*& reason);

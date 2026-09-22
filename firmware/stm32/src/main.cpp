@@ -282,8 +282,16 @@ void loop() {
         accepted = mapController.requestRunMap(
             mapRequest.slot, MapMissionInitiator::AI_VOICE, reason);
       } else if (mapRequest.type == RobotLinkMapRequestType::RETURN_P0) {
+        robotDebug.println("MAP,RETURN_P0,DISPATCH,SOURCE=AI_VOICE");
         accepted = mapController.requestReturnToP0(
             ReturnP0Source::AI_VOICE, reason);
+        robotDebug.print("MAP,RETURN_P0,DISPATCH_RESULT=");
+        robotDebug.print(accepted ? "ACCEPT" : "REJECT");
+        if (!accepted) {
+          robotDebug.print(",REASON=");
+          robotDebug.print(reason != nullptr ? reason : "REJECTED");
+        }
+        robotDebug.println();
       } else {
         reason = "INVALID_ACTION";
       }
