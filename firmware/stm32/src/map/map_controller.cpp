@@ -3414,6 +3414,34 @@ bool MapController::startReturnP0Position() {
   replayTravelMm_ = 0U;
   replayErrorMm_ = replayTargetDistanceMm_;
   returnP0State_ = ReturnP0State::P0_POSITION_APPROACH;
+  const uint32_t handoffNow = millis();
+  const bool handoffPs2Timeout = ps2_.frameTimedOut(handoffNow);
+  debug_.print("MAP,RETURN_P0,HANDOFF,FROM=P1,TO=P0,STATE=");
+  debug_.print(returnP0StateName(returnP0State_));
+  debug_.print(",OWNER=");
+  debug_.print(RobotController::motionOwnerText(robot_.motionOwner()));
+  debug_.print(",AI_MODE=");
+  debug_.print(robot_.aiMotionModeValue());
+  debug_.print(",MOTORS_STOPPED=");
+  debug_.print(robot_.motorsStopped() ? 1 : 0);
+  debug_.print(",PS2_FRESH=");
+  debug_.print(handoffPs2Timeout ? 0 : 1);
+  debug_.print(",PS2_TIMEOUT=");
+  debug_.print(handoffPs2Timeout ? 1 : 0);
+  debug_.print(",PS2_MOTION=");
+  debug_.print(ps2_.motionCommandActive() ? 1 : 0);
+  debug_.print(",ODOM_READY=");
+  debug_.print(odometry_.ready() ? 1 : 0);
+  debug_.print(",ODOM_HEALTHY=");
+  debug_.print(odometry_.healthy() ? 1 : 0);
+  debug_.print(",FUSION_HEALTH=");
+  debug_.print(fusion_.healthText());
+  debug_.print(",DIST=");
+  debug_.print(positionError, 1);
+  debug_.print(",BEARING=");
+  debug_.print(bearing, 2);
+  debug_.print(",TOL=");
+  debug_.println(MAP_RETURN_P0_POSITION_TOLERANCE_MM);
   if (!robot_.startReplayGuidedWaypoint(
           target.xMm, target.yMm, segmentStart.xMm, segmentStart.yMm,
           replaySpeed_, bearing, MAP_RETURN_P0_POSITION_TOLERANCE_MM,
