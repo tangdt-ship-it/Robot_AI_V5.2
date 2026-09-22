@@ -177,6 +177,14 @@ class MapController {
   // This helper only reads current state and writes one COM12 line.
   void logReturnP0RejectSnapshot(ReturnP0Source source, const char* reason,
                                  const char* boundary = nullptr) const;
+  // Accepted Return-P0 accuracy trace.  These helpers only read state and
+  // append one transition-level COM12 line; they never affect replay logic.
+  void logReturnP0TraceBase(const char* event, const Pose& live) const;
+  void logReturnP0TraceMotion(const char* event, const Pose& live) const;
+  void logReturnP0TraceP0Error(const Pose& live) const;
+  static float diagnosticCrossTrackToSegment(const Pose& live,
+                                             const Pose& segmentStart,
+                                             const Pose& segmentEnd);
   bool locateRouteProjection(RouteProjection& projection,
                              const char*& reason) const;
   bool requestReturnToP0Internal(ReturnP0Source source, const char*& reason);

@@ -1032,6 +1032,90 @@ void MapController::logReturnP0RejectSnapshot(ReturnP0Source source,
   debug_.println((ps2_.motionCommandActive() || ps2_.state().r3) ? 1 : 0);
 }
 
+void MapController::logReturnP0TraceBase(const char* event,
+                                         const Pose& live) const {
+  const Pose& p0 = homeContext_.p0WorldPose;
+  const float dx = live.xMm - p0.xMm;
+  const float dy = live.yMm - p0.yMm;
+  const float positionError = distanceMm(live.xMm, live.yMm, p0.xMm, p0.yMm);
+  const float headingError = shortestDeltaDeg(p0.headingDeg, live.headingDeg);
+  debug_.print("MAP,RETURN_P0,TRACE,EVENT=");
+  debug_.print(event);
+  debug_.print(",STATE=");
+  debug_.print(returnP0StateName(returnP0State_));
+  debug_.print(",LIVE_X=");
+  debug_.print(live.xMm, 1);
+  debug_.print(",LIVE_Y=");
+  debug_.print(live.yMm, 1);
+  debug_.print(",LIVE_H=");
+  debug_.print(live.headingDeg, 2);
+  debug_.print(",P0_X=");
+  debug_.print(p0.xMm, 1);
+  debug_.print(",P0_Y=");
+  debug_.print(p0.yMm, 1);
+  debug_.print(",P0_H=");
+  debug_.print(p0.headingDeg, 2);
+  debug_.print(",P0_DX=");
+  debug_.print(dx, 1);
+  debug_.print(",P0_DY=");
+  debug_.print(dy, 1);
+  debug_.print(",P0_POS_ERR=");
+  debug_.print(positionError, 1);
+  debug_.print(",P0_HEADING_ERR=");
+  debug_.print(headingError, 2);
+  debug_.print(",ROUTE_GEN=");
+  debug_.print(route_.header.generation);
+  debug_.print(",ODOM_GEN=");
+  debug_.print(odometry_.resetGeneration());
+  debug_.print(",HEADING_GEN=");
+  debug_.print(robot_.headingResetGeneration());
+}
+
+void MapController::logReturnP0TraceMotion(const char* event,
+                                           const Pose& live) const {
+  logReturnP0TraceBase(event, live);
+  debug_.print(",MOTOR_L=");
+  debug_.print(robot_.currentLeftCommand());
+  debug_.print(",MOTOR_R=");
+  debug_.print(robot_.currentRightCommand());
+  debug_.print(",LEFT_TICKS=");
+  debug_.print(static_cast<long>(odometry_.data().leftTicks));
+  debug_.print(",RIGHT_TICKS=");
+  debug_.print(static_cast<long>(odometry_.data().rightTicks));
+  debug_.print(",FUSED_HEADING=");
+  debug_.print(fusion_.headingDeg(), 2);
+  debug_.print(",ENCODER_HEALTH=");
+  debug_.print(odometry_.healthText());
+  debug_.print(",FUSION_HEALTH=");
+  debug_.print(fusion_.healthText());
+}
+
+void MapController::logReturnP0TraceP0Error(const Pose& live) const {
+  const Pose& p0 = homeContext_.p0WorldPose;
+  debug_.print(",DX=");
+  debug_.print(live.xMm - p0.xMm, 1);
+  debug_.print(",DY=");
+  debug_.print(live.yMm - p0.yMm, 1);
+  debug_.print(",POS_ERR=");
+  debug_.print(distanceMm(live.xMm, live.yMm, p0.xMm, p0.yMm), 1);
+  debug_.print(",HEADING_ERR=");
+  debug_.print(shortestDeltaDeg(p0.headingDeg, live.headingDeg), 2);
+}
+
+float MapController::diagnosticCrossTrackToSegment(
+    const Pose& live, const Pose& segmentStart, const Pose& segmentEnd) {
+  const float dx = segmentEnd.xMm - segmentStart.xMm;
+  const float dy = segmentEnd.yMm - segmentStart.yMm;
+  const float lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared <= 1.0e-3f) return distanceMm(
+      live.xMm, live.yMm, segmentStart.xMm, segmentStart.yMm);
+  float t = ((live.xMm - segmentStart.xMm) * dx +
+             (live.yMm - segmentStart.yMm) * dy) / lengthSquared;
+  t = constrain(t, 0.0f, 1.0f);
+  return distanceMm(live.xMm, live.yMm, segmentStart.xMm + t * dx,
+                    segmentStart.yMm + t * dy);
+}
+
 bool MapController::requestReturnToP0Internal(ReturnP0Source source,
                                               const char*& reason) {
   reason = nullptr;
@@ -1166,6 +1250,29 @@ bool MapController::requestReturnToP0Internal(ReturnP0Source source,
   replayActive_ = true;
   mode_ = MapControllerMode::REPLAY_CHECKED;
   statusDirty_ = true;
+  Pose acceptedPose;
+  if (readPose(acceptedPose)) {
+    logReturnP0TraceBase("ACCEPT", acceptedPose);
+    logReturnP0TraceP0Error(acceptedPose);
+    debug_.print(",SOURCE=");
+    debug_.println(ReturnP0SourceName(source));
+    logReturnP0TraceBase("PROJECTION", acceptedPose);
+    debug_.print(",SEG_START=");
+    debug_.print(static_cast<unsigned>(projection.segmentStartIndex));
+    debug_.print(",SEG_END=");
+    debug_.print(static_cast<unsigned>(projection.segmentEndIndex));
+    debug_.print(",T=");
+    debug_.print(projection.t, 3);
+    debug_.print(",PROJ_X=");
+    debug_.print(projection.projectedPose.xMm, 1);
+    debug_.print(",PROJ_Y=");
+    debug_.print(projection.projectedPose.yMm, 1);
+    debug_.print(",CROSS_TRACK=");
+    debug_.print(projection.crossTrackMm, 1);
+    debug_.print(",DIST_TO_PROJECTION=");
+    debug_.print(projection.distanceMm, 1);
+    debug_.println(",AMBIGUOUS=0");
+  }
   debug_.print("MAP,RETURN_P0,REQUEST,SOURCE=");
   debug_.print(ReturnP0SourceName(source));
   debug_.print(",GEN=");
@@ -3172,6 +3279,17 @@ bool MapController::startReturnReacquire() {
     returnP0SegmentGeneration_ = 0U;
     return false;
   }
+  logReturnP0TraceMotion("REACQUIRE_START", current);
+  debug_.print(",TARGET_X=");
+  debug_.print(target.xMm, 1);
+  debug_.print(",TARGET_Y=");
+  debug_.print(target.yMm, 1);
+  debug_.print(",DIST=");
+  debug_.print(targetDistance, 1);
+  debug_.print(",HEADING=");
+  debug_.print(current.headingDeg, 2);
+  debug_.print(",TARGET_BEARING=");
+  debug_.println(bearing, 2);
   debug_.print("MAP,RETURN_P0,REACQUIRE,SEG=");
   debug_.print(static_cast<unsigned>(returnP0Projection_.segmentStartIndex));
   debug_.print(",T=");
@@ -3225,6 +3343,24 @@ bool MapController::startReturnWaypoint() {
     returnP0SegmentGeneration_ = 0U;
     return false;
   }
+  logReturnP0TraceMotion("WP_START", current);
+  debug_.print(",FROM_INDEX=");
+  debug_.print(static_cast<unsigned>(returnP0TargetIndex_ + 1U));
+  debug_.print(",TARGET_INDEX=");
+  debug_.print(static_cast<unsigned>(returnP0TargetIndex_));
+  debug_.print(",TARGET_X=");
+  debug_.print(target.xMm, 1);
+  debug_.print(",TARGET_Y=");
+  debug_.print(target.yMm, 1);
+  debug_.print(",DIST=");
+  debug_.print(targetDistance, 1);
+  debug_.print(",POS_ERR=");
+  debug_.print(targetDistance, 1);
+  debug_.print(",TARGET_BEARING=");
+  debug_.print(bearing, 2);
+  debug_.print(",CROSS_TRACK=");
+  debug_.println(diagnosticCrossTrackToSegment(current, segmentStart, target),
+                 1);
   debug_.print("MAP,RETURN_P0,WP=");
   debug_.print(static_cast<unsigned>(returnP0TargetIndex_));
   debug_.print(",GEN=");
@@ -3242,11 +3378,25 @@ bool MapController::startReturnP0Position() {
   const float positionError = distanceMm(current.xMm, current.yMm,
                                          target.xMm, target.yMm);
   replayTargetIndex_ = 0U;
+  logReturnP0TraceMotion("P0_POSITION_START", current);
+  logReturnP0TraceP0Error(current);
+  debug_.print(",P0_X=");
+  debug_.print(target.xMm, 1);
+  debug_.print(",P0_Y=");
+  debug_.print(target.yMm, 1);
+  debug_.print(",P0_H=");
+  debug_.println(target.headingDeg, 2);
   if (positionError <= MAP_RETURN_P0_POSITION_TOLERANCE_MM) {
     robot_.stopImmediately(true);
     replayOperation_ = MapReplayOperation::NONE;
     returnP0State_ = ReturnP0State::P0_POSITION_SETTLE;
     returnP0SettleSinceMs_ = millis();
+    logReturnP0TraceMotion("P0_POSITION_ARRIVAL", current);
+    logReturnP0TraceP0Error(current);
+    debug_.println(",ARRIVAL=1");
+    logReturnP0TraceMotion("P0_POSITION_SETTLE", current);
+    logReturnP0TraceP0Error(current);
+    debug_.println(",PHASE=ENTER,SETTLE_MS=0");
     debug_.print("MAP,RETURN_P0,P0_POSITION,ERR=");
     debug_.println(positionError, 1);
     return true;
@@ -3286,6 +3436,12 @@ bool MapController::startReturnP0Heading() {
   if (!readPose(current)) return false;
   const float headingError = shortestDeltaDeg(
       homeContext_.p0WorldPose.headingDeg, current.headingDeg);
+  logReturnP0TraceMotion("P0_HEADING_START", current);
+  logReturnP0TraceP0Error(current);
+  debug_.print(",TARGET_H=");
+  debug_.print(homeContext_.p0WorldPose.headingDeg, 2);
+  debug_.print(",HEADING_ERR=");
+  debug_.println(headingError, 2);
   if (fabsf(headingError) <= MAP_RETURN_P0_HEADING_TOLERANCE_DEG) {
     robot_.stopImmediately(true);
     replayOperation_ = MapReplayOperation::NONE;
@@ -3359,6 +3515,10 @@ void MapController::updateReturnToP0() {
       const float positionError = distanceMm(
           current.xMm, current.yMm, homeContext_.p0WorldPose.xMm,
           homeContext_.p0WorldPose.yMm);
+      logReturnP0TraceMotion("P0_POSITION_SETTLE", current);
+      logReturnP0TraceP0Error(current);
+      debug_.print(",PHASE=DONE,SETTLE_MS=");
+      debug_.println(now - returnP0SettleSinceMs_);
       if (positionError > MAP_RETURN_P0_POSITION_TOLERANCE_MM) {
         if (returnP0PositionCorrectionAttempts_ >=
             MAP_RETURN_P0_MAX_POSITION_CORRECTIONS) {
@@ -3391,11 +3551,26 @@ void MapController::updateReturnToP0() {
           homeContext_.p0WorldPose.headingDeg, current.headingDeg));
       const bool sensorSafe = ultrasonic_.isFresh() && ultrasonic_.healthy() &&
                               ultrasonic_.overallZone() != ObstacleZone::UNKNOWN;
-      if (positionError <= MAP_RETURN_P0_POSITION_TOLERANCE_MM &&
+      const bool finalGatePass =
+          positionError <= MAP_RETURN_P0_POSITION_TOLERANCE_MM &&
           headingError <= MAP_RETURN_P0_HEADING_TOLERANCE_DEG &&
           robot_.motorsStopped() && !robot_.aiMotionActive() &&
           robot_.motionOwner() == MotionOwner::NONE && odometry_.healthy() &&
-          fusion_.health() != FusionHealth::NO_SOURCE && sensorSafe) {
+          fusion_.health() != FusionHealth::NO_SOURCE && sensorSafe;
+      logReturnP0TraceMotion("FINAL_GATE", current);
+      logReturnP0TraceP0Error(current);
+      debug_.print(",POS_LIMIT=");
+      debug_.print(MAP_RETURN_P0_POSITION_TOLERANCE_MM);
+      debug_.print(",HEADING_LIMIT=");
+      debug_.print(MAP_RETURN_P0_HEADING_TOLERANCE_DEG, 2);
+      debug_.print(",MOTORS_STOPPED=");
+      debug_.print(robot_.motorsStopped() ? 1 : 0);
+      debug_.print(",GATE_RESULT=");
+      debug_.println(finalGatePass ? "PASS" : "FAIL");
+      if (finalGatePass) {
+        logReturnP0TraceMotion("COMPLETE", current);
+        logReturnP0TraceP0Error(current);
+        debug_.println(",GATE_RESULT=PASS");
         completeReturnToP0();
       } else if (positionError > MAP_RETURN_P0_POSITION_TOLERANCE_MM) {
         if (returnP0PositionCorrectionAttempts_ >=
@@ -3466,6 +3641,17 @@ bool MapController::consumeReturnTurnResult(const AiTurnResult& result) {
   replayOperation_ = MapReplayOperation::NONE;
   if (result.code == AiTurnResultCode::DONE) {
     if (returnP0State_ == ReturnP0State::P0_HEADING_RESTORE) {
+      Pose current;
+      if (readPose(current)) {
+        logReturnP0TraceMotion("P0_HEADING_DONE", current);
+        logReturnP0TraceP0Error(current);
+        debug_.print(",TARGET_H=");
+        debug_.print(homeContext_.p0WorldPose.headingDeg, 2);
+        debug_.print(",TURN_FINAL_ERROR=");
+        debug_.print(result.errorDeg, 2);
+        debug_.print(",TURN_OVERSHOOT=");
+        debug_.println("NA");
+      }
       returnP0TurnPending_ = false;
       returnP0State_ = ReturnP0State::P0_HEADING_SETTLE;
       returnP0SettleSinceMs_ = millis();
@@ -3553,6 +3739,41 @@ bool MapController::consumeReturnDistanceResult(
                                       MAP_RETURN_P0_POSITION_TOLERANCE_MM)
                                 : static_cast<float>(
                                       MAP_GUIDE_BACK_ARRIVAL_POSITION_TOLERANCE_MM);
+    if (returnP0State_ == ReturnP0State::REACQUIRE_ROUTE) {
+      logReturnP0TraceMotion("REACQUIRE_DONE", current);
+      debug_.print(",TARGET_X=");
+      debug_.print(returnP0Projection_.projectedPose.xMm, 1);
+      debug_.print(",TARGET_Y=");
+      debug_.print(returnP0Projection_.projectedPose.yMm, 1);
+      debug_.print(",CROSS_TRACK=");
+      const float projectionError = distanceMm(
+          current.xMm, current.yMm, returnP0Projection_.projectedPose.xMm,
+          returnP0Projection_.projectedPose.yMm);
+      debug_.print(projectionError, 1);
+      debug_.print(",POS_ERR=");
+      debug_.println(projectionError, 1);
+    } else if (returnP0TargetIndex_ != 0U) {
+      const Pose segmentStart = routePointWorldFromOrigin(
+          homeContext_.p0WorldPose, returnP0TargetIndex_ + 1U);
+      const float routeBearing = atan2f(target.yMm - segmentStart.yMm,
+                                         target.xMm - segmentStart.xMm) *
+                                 kRadToDeg;
+      logReturnP0TraceMotion("WP_DONE", current);
+      debug_.print(",TARGET_INDEX=");
+      debug_.print(static_cast<unsigned>(returnP0TargetIndex_));
+      debug_.print(",TARGET_X=");
+      debug_.print(target.xMm, 1);
+      debug_.print(",TARGET_Y=");
+      debug_.print(target.yMm, 1);
+      debug_.print(",POS_ERR=");
+      debug_.print(positionError, 1);
+      debug_.print(",HEADING_ERR_TO_ROUTE=");
+      debug_.print(shortestDeltaDeg(routeBearing, current.headingDeg), 2);
+      debug_.print(",CROSS_TRACK=");
+      debug_.println(diagnosticCrossTrackToSegment(current, segmentStart,
+                                                    target),
+                     1);
+    }
     if (positionError > tolerance) {
       if (returnP0TargetIndex_ == 0U &&
           returnP0PositionCorrectionAttempts_ <
@@ -3566,8 +3787,14 @@ bool MapController::consumeReturnDistanceResult(
       return true;
     }
     if (returnP0TargetIndex_ == 0U) {
+      logReturnP0TraceMotion("P0_POSITION_ARRIVAL", current);
+      logReturnP0TraceP0Error(current);
+      debug_.println(",ARRIVAL=1");
       returnP0State_ = ReturnP0State::P0_POSITION_SETTLE;
       returnP0SettleSinceMs_ = millis();
+      logReturnP0TraceMotion("P0_POSITION_SETTLE", current);
+      logReturnP0TraceP0Error(current);
+      debug_.println(",PHASE=ENTER,SETTLE_MS=0");
     } else {
       replayCurrentIndex_ = returnP0TargetIndex_;
       --returnP0TargetIndex_;
