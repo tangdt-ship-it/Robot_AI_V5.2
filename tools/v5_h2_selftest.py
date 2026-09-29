@@ -182,11 +182,13 @@ class V5H2SelfTest(unittest.TestCase):
                           "StartContinuous(", "StartContinuousRotation("):
             self.assertNotIn(forbidden, recovery)
 
-    def test_version_is_alpha9_or_later(self) -> None:
+    def test_version_is_alpha9_or_current_v52(self) -> None:
         version = (ROOT / "VERSION").read_text().strip()
-        match = re.fullmatch(r"5\.0\.0-alpha\.(\d+)", version)
-        self.assertIsNotNone(match)
-        self.assertGreaterEqual(int(match.group(1)), 9)
+        legacy_match = re.fullmatch(r"5\.0\.0-alpha\.(\d+)", version)
+        current_match = re.fullmatch(r"5\.2\.\d+(?:-alpha\.\d+)?", version)
+        self.assertTrue(legacy_match or current_match)
+        if legacy_match:
+            self.assertGreaterEqual(int(legacy_match.group(1)), 9)
 
 
 if __name__ == "__main__":

@@ -53,6 +53,7 @@ bool RequiresIntegrity(const char* frame) {
          strncmp(frame, "SET,", 4) == 0 ||
          strncmp(frame, "CAL,", 4) == 0 ||
          strncmp(frame, "MAP,UI,", 7) == 0 ||
+         strncmp(frame, "MAP,CMD,", 8) == 0 ||
          strcmp(frame, "HEADING,RESET") == 0 ||
          strcmp(frame, "ENCODER,RESET") == 0 ||
          strcmp(frame, "HB") == 0 || strcmp(frame, "KEEPALIVE") == 0;
@@ -98,6 +99,30 @@ bool RobotLinkServer::takeStopRequest() {
   if (!stopRequested_) return false;
   stopRequested_ = false;
   return true;
+}
+
+bool RobotLinkServer::takeMapRequest(RobotLinkMapRequest& request) {
+  if (!mapRequestReady_) return false;
+  mapRequestReady_ = false;
+  request = mapRequest_;
+  return true;
+}
+
+void RobotLinkServer::completeMapRequest(const RobotLinkMapRequest& request,
+                                         bool success, const char* reason) {
+  if (!mapRequestInFlight_) return;
+  mapRequestReady_ = false;
+  mapRequestInFlight_ = false;
+  serial_.print(success ? "<ACK,MAP,CMD,SEQ," : "<ERR,MAP,CMD,SEQ,");
+  serial_.print(request.sequence);
+  if (!success) {
+    serial_.print(",REASON,");
+    // Reasons are internal constant identifiers, never caller text.
+    serial_.print(reason != nullptr ? reason : "REJECTED");
+  }
+  serial_.print(">\r\n");
+  debug_.print("MAP,CMD,");
+  debug_.println(success ? "ACCEPTED" : "REJECTED");
 }
 
 bool RobotLinkServer::takeMotionRequest(RobotLinkMotionRequest& request) {
@@ -633,6 +658,38 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     return;
   }
 
+  if (strncmp(frame, "MAP,CMD,", 8) == 0) {
+    RobotLinkMapRequest request;
+    request.sequence = lastRxSequence_;
+    const char* reject = nullptr;
+    if (strcmp(frame, "MAP,CMD,RUN,1") == 0 ||
+        strcmp(frame, "MAP,CMD,RUN,2") == 0) {
+      request.type = RobotLinkMapRequestType::RUN;
+      request.slot = static_cast<uint8_t>(frame[12] - '0');
+    } else if (strcmp(frame, "MAP,CMD,RETURN_P0") == 0) {
+      request.type = RobotLinkMapRequestType::RETURN_P0;
+    } else {
+      reject = "INVALID_ACTION";
+    }
+    if (!reject && (!motionSessionReady_ || !connected())) reject = "SESSION_NOT_READY";
+    if (!reject && !aiMode_) reject = "MODE";
+    if (!reject && telemetry.ps2CommandActive) reject = "PS2_OVERRIDE";
+    if (!reject && (mapRequestInFlight_ || motionRequested_ ||
+                    motionRequestInFlight_ || configRequestInFlight_ ||
+                    calibrationRequestInFlight_)) reject = "BUSY";
+    if (reject) {
+      serial_.print("<ERR,MAP,CMD,SEQ,");
+      serial_.print(request.sequence);
+      serial_.print(",REASON,");
+      serial_.print(reject);
+      serial_.print(">\r\n");
+      return;
+    }
+    mapRequest_ = request;
+    mapRequestReady_ = true;
+    mapRequestInFlight_ = true;
+    return;  // ACK only after MapController has accepted.
+  }
   if (strncmp(frame, "MAP,UI,", 7) == 0) {
 #if STM32_LOCAL_MAP_ENABLE
     // The STM32-local MapController is the sole MAP/LCD owner. Keep this
@@ -773,6 +830,7 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     return;
   }
   if (strcmp(frame, "CMD,STOP") == 0 || strcmp(frame, "STOP") == 0) {
+    completeMapRequest(mapRequest_, false, "STOP");
     stopRequested_ = true;
     motionRequested_ = false;
     motionRequest_ = {};
@@ -782,6 +840,7 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     return;
   }
   if (strcmp(frame, "MODE,AI") == 0) {
+    completeMapRequest(mapRequest_, false, "MODE_CHANGE");
     stopRequested_ = true;
     aiMode_ = true;
     lastSessionActivityMs_ = now;
@@ -789,6 +848,7 @@ void RobotLinkServer::handleAsciiFrame(const char* frame,
     return;
   }
   if (strcmp(frame, "MODE,MANUAL") == 0) {
+    completeMapRequest(mapRequest_, false, "MODE_CHANGE");
     stopRequested_ = true;
     motionRequested_ = false;
     motionRequest_ = {};
@@ -1025,6 +1085,7 @@ void RobotLinkServer::handleFrame(const RobotLink::Frame& frame,
     snprintf(body, sizeof(body), "%s,%s", frame.type, frame.payload);
   }
   if (strcmp(body, "HELLO,PROTO,3") == 0) {
+    completeMapRequest(mapRequest_, false, "SESSION_CHANGED");
     rxSequenceInitialized_ = true;
     lastRxSequence_ = frame.sequence;
     helloReceived_ = true;

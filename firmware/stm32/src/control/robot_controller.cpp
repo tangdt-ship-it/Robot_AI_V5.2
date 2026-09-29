@@ -3,6 +3,61 @@
 
 namespace {
 
+enum class ReplayGuidedStartReject : uint8_t {
+  NONE,
+  BRAKE,
+  AI_MOTION_ACTIVE,
+  PS2_FRAME_TIMEOUT,
+  MAP_UI_CAPTURE,
+  MOTION_OWNER,
+  PS2_MOTION_ACTIVE,
+  ODOM_NOT_READY,
+  ODOM_UNHEALTHY,
+  HEADING_UNAVAILABLE,
+  TARGET_NONFINITE,
+  SEGMENT_NONFINITE,
+  BEARING_NONFINITE,
+  TOLERANCE_ZERO,
+  TOLERANCE_RANGE,
+  DISTANCE_ZERO,
+  DISTANCE_RANGE,
+};
+
+const char* replayGuidedStartRejectText(ReplayGuidedStartReject reject) {
+  switch (reject) {
+    case ReplayGuidedStartReject::BRAKE: return "BRAKE";
+    case ReplayGuidedStartReject::AI_MOTION_ACTIVE: return "AI_MOTION_ACTIVE";
+    case ReplayGuidedStartReject::PS2_FRAME_TIMEOUT: return "PS2_FRAME_TIMEOUT";
+    case ReplayGuidedStartReject::MAP_UI_CAPTURE: return "MAP_UI_CAPTURE";
+    case ReplayGuidedStartReject::MOTION_OWNER: return "MOTION_OWNER";
+    case ReplayGuidedStartReject::PS2_MOTION_ACTIVE: return "PS2_MOTION_ACTIVE";
+    case ReplayGuidedStartReject::ODOM_NOT_READY: return "ODOM_NOT_READY";
+    case ReplayGuidedStartReject::ODOM_UNHEALTHY: return "ODOM_UNHEALTHY";
+    case ReplayGuidedStartReject::HEADING_UNAVAILABLE: return "HEADING_UNAVAILABLE";
+    case ReplayGuidedStartReject::TARGET_NONFINITE: return "TARGET_NONFINITE";
+    case ReplayGuidedStartReject::SEGMENT_NONFINITE: return "SEGMENT_NONFINITE";
+    case ReplayGuidedStartReject::BEARING_NONFINITE: return "BEARING_NONFINITE";
+    case ReplayGuidedStartReject::TOLERANCE_ZERO: return "TOLERANCE_ZERO";
+    case ReplayGuidedStartReject::TOLERANCE_RANGE: return "TOLERANCE_RANGE";
+    case ReplayGuidedStartReject::DISTANCE_ZERO: return "DISTANCE_ZERO";
+    case ReplayGuidedStartReject::DISTANCE_RANGE: return "DISTANCE_RANGE";
+    case ReplayGuidedStartReject::NONE: return "NONE";
+  }
+  return "NONE";
+}
+
+const char* aiMotionModeText(AiMotionMode mode) {
+  switch (mode) {
+    case AiMotionMode::PULSE: return "PULSE";
+    case AiMotionMode::CONTINUOUS: return "CONTINUOUS";
+    case AiMotionMode::TURN: return "TURN";
+    case AiMotionMode::DISTANCE: return "DISTANCE";
+    case AiMotionMode::GUIDED_WAYPOINT: return "GUIDED_WAYPOINT";
+    case AiMotionMode::NONE: return "NONE";
+  }
+  return "NONE";
+}
+
 float mapTurnPdDamping(float errorDeg, float yawRateDegS) {
   const float relation = errorDeg * yawRateDegS;
   const float rate = fabsf(yawRateDegS);
@@ -530,15 +585,19 @@ bool RobotController::canStartAiMotion(uint32_t nowMs) const {
 
 bool RobotController::canStartMotion(uint32_t nowMs, MotionOwner owner) const {
   if (brakeEnabled_ || aiMotionMode_ != AiMotionMode::NONE ||
-      ps2_.frameTimedOut(nowMs) || ps2_.mapUiCaptureActive()) {
+      ps2_.mapUiCaptureActive()) {
     return false;
   }
   if (owner == MotionOwner::REPLAY) {
-    // A MAP START frame is itself PS2 activity. Require a neutral frame but
-    // do not apply the general activity hold, or START would cancel replay.
+    // A missing PS2 frame means the manual controller is absent; it is not a
+    // safety reason to strand an autonomous MAP segment between waypoints.
+    // Fresh manual motion still prevents a start here and takes ownership in
+    // updateControl(), while MAP UI, brake, ownership and all pose/sensor
+    // gates above remain mandatory.
     return motionOwner_ == MotionOwner::NONE &&
            !ps2_.motionCommandActive();
   }
+  if (ps2_.frameTimedOut(nowMs)) return false;
   return motionOwner_ == MotionOwner::NONE || motionOwner_ == owner;
 }
 
@@ -617,18 +676,99 @@ bool RobotController::startReplayGuidedWaypoint(
     uint32_t arrivalPositionToleranceMm,
     uint32_t motionGeneration) {
   const uint32_t now = millis();
-  if (!canStartReplayMotion(now) || !odometry_.ready() ||
-      !odometry_.healthy() || !headingAvailable() ||
-      !isfinite(targetXMm) || !isfinite(targetYMm) ||
-      !isfinite(segmentStartXMm) || !isfinite(segmentStartYMm) ||
-      !isfinite(arrivalBearingDeg) || arrivalPositionToleranceMm == 0U ||
-      arrivalPositionToleranceMm > MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM) {
-    return false;
+  // Ordinary guided MAP segments use the 5 mm waypoint tolerance.  The
+  // universal Return-to-P0 final-position phase deliberately uses its own
+  // 30 mm completion contract, so the common guided primitive must accept
+  // that bounded value too.  This only widens the input validation gate;
+  // each caller still supplies and enforces its existing tolerance.
+  const uint32_t maxArrivalPositionToleranceMm =
+      MAP_RETURN_P0_POSITION_TOLERANCE_MM >
+              MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM
+          ? MAP_RETURN_P0_POSITION_TOLERANCE_MM
+          : MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM;
+  const bool ps2Timeout = ps2_.frameTimedOut(now);
+  const bool mapUiCapture = ps2_.mapUiCaptureActive();
+  const bool ps2Motion = ps2_.motionCommandActive();
+  const bool targetFinite = isfinite(targetXMm) && isfinite(targetYMm);
+  const bool segmentFinite = isfinite(segmentStartXMm) &&
+                             isfinite(segmentStartYMm);
+  const float initialDistance = targetFinite && segmentFinite
+                                    ? hypotf(targetXMm - segmentStartXMm,
+                                             targetYMm - segmentStartYMm)
+                                    : NAN;
+  ReplayGuidedStartReject reject = ReplayGuidedStartReject::NONE;
+  // Keep this ordered exactly as the previous canStartReplayMotion() and
+  // input-validation gates. The branch adds a one-shot diagnosis only.
+  if (brakeEnabled_) {
+    reject = ReplayGuidedStartReject::BRAKE;
+  } else if (aiMotionMode_ != AiMotionMode::NONE) {
+    reject = ReplayGuidedStartReject::AI_MOTION_ACTIVE;
+  } else if (mapUiCapture) {
+    reject = ReplayGuidedStartReject::MAP_UI_CAPTURE;
+  } else if (motionOwner_ != MotionOwner::NONE) {
+    reject = ReplayGuidedStartReject::MOTION_OWNER;
+  } else if (ps2Motion) {
+    reject = ReplayGuidedStartReject::PS2_MOTION_ACTIVE;
+  } else if (!odometry_.ready()) {
+    reject = ReplayGuidedStartReject::ODOM_NOT_READY;
+  } else if (!odometry_.healthy()) {
+    reject = ReplayGuidedStartReject::ODOM_UNHEALTHY;
+  } else if (!headingAvailable()) {
+    reject = ReplayGuidedStartReject::HEADING_UNAVAILABLE;
+  } else if (!targetFinite) {
+    reject = ReplayGuidedStartReject::TARGET_NONFINITE;
+  } else if (!segmentFinite) {
+    reject = ReplayGuidedStartReject::SEGMENT_NONFINITE;
+  } else if (!isfinite(arrivalBearingDeg)) {
+    reject = ReplayGuidedStartReject::BEARING_NONFINITE;
+  } else if (arrivalPositionToleranceMm == 0U) {
+    reject = ReplayGuidedStartReject::TOLERANCE_ZERO;
+  } else if (arrivalPositionToleranceMm > maxArrivalPositionToleranceMm) {
+    reject = ReplayGuidedStartReject::TOLERANCE_RANGE;
+  } else if (initialDistance <= 0.0f) {
+    reject = ReplayGuidedStartReject::DISTANCE_ZERO;
+  } else if (initialDistance > static_cast<float>(ROBOT_AI_DISTANCE_MAX_MM)) {
+    reject = ReplayGuidedStartReject::DISTANCE_RANGE;
   }
-  const float initialDistance = hypotf(targetXMm - segmentStartXMm,
-                                       targetYMm - segmentStartYMm);
-  if (initialDistance <= 0.0f ||
-      initialDistance > static_cast<float>(ROBOT_AI_DISTANCE_MAX_MM)) {
+  if (reject != ReplayGuidedStartReject::NONE) {
+    debug_.print("ROBOT,REPLAY_GUIDED_START_REJECT,REASON=");
+    debug_.print(replayGuidedStartRejectText(reject));
+    debug_.print(",OWNER=");
+    debug_.print(motionOwnerText(motionOwner_));
+    debug_.print(",AI_MODE=");
+    debug_.print(aiMotionModeText(aiMotionMode_));
+    debug_.print(",BRAKE=");
+    debug_.print(brakeEnabled_ ? 1 : 0);
+    debug_.print(",PS2_FRESH=");
+    debug_.print(ps2Timeout ? 0 : 1);
+    debug_.print(",PS2_TIMEOUT=");
+    debug_.print(ps2Timeout ? 1 : 0);
+    debug_.print(",PS2_MOTION=");
+    debug_.print(ps2Motion ? 1 : 0);
+    debug_.print(",MAP_UI_CAPTURE=");
+    debug_.print(mapUiCapture ? 1 : 0);
+    debug_.print(",ODOM_READY=");
+    debug_.print(odometry_.ready() ? 1 : 0);
+    debug_.print(",ODOM_HEALTHY=");
+    debug_.print(odometry_.healthy() ? 1 : 0);
+    debug_.print(",HEADING_AVAILABLE=");
+    debug_.print(headingAvailable() ? 1 : 0);
+    debug_.print(",TARGET_X=");
+    debug_.print(targetXMm, 1);
+    debug_.print(",TARGET_Y=");
+    debug_.print(targetYMm, 1);
+    debug_.print(",SEG_X=");
+    debug_.print(segmentStartXMm, 1);
+    debug_.print(",SEG_Y=");
+    debug_.print(segmentStartYMm, 1);
+    debug_.print(",BEARING=");
+    debug_.print(arrivalBearingDeg, 2);
+    debug_.print(",TOL=");
+    debug_.print(arrivalPositionToleranceMm);
+    debug_.print(",DIST=");
+    debug_.print(initialDistance, 1);
+    debug_.print(",GEN=");
+    debug_.println(motionGeneration);
     return false;
   }
   motionOwner_ = MotionOwner::REPLAY;
@@ -693,10 +833,12 @@ int16_t RobotController::distanceWheelBalance() const {
                    DISTANCE_WHEEL_BALANCE_MAX);
 }
 
-void RobotController::finishAiDistance(AiDistanceResultCode code) {
+void RobotController::finishAiDistance(AiDistanceResultCode code,
+                                       bool cancelledByPs2Motion) {
   const MotionOwner owner = motionOwner_;
   aiDistanceResult_.owner = owner;
   aiDistanceResult_.code = code;
+  aiDistanceResult_.cancelledByPs2Motion = cancelledByPs2Motion;
   aiDistanceResult_.motionGeneration = aiMotionGeneration_;
   aiDistanceResult_.targetMm = aiDistanceTargetMm_;
   aiDistanceResult_.travelledMm = aiDistanceTravelledMm();
@@ -707,9 +849,9 @@ void RobotController::finishAiDistance(AiDistanceResultCode code) {
 void RobotController::cancelAiMotionForManual() {
   if (aiMotionMode_ == AiMotionMode::DISTANCE ||
       aiMotionMode_ == AiMotionMode::GUIDED_WAYPOINT) {
-    finishAiDistance(AiDistanceResultCode::CANCELLED);
+    finishAiDistance(AiDistanceResultCode::CANCELLED, true);
   } else if (aiMotionMode_ == AiMotionMode::TURN) {
-    finishAiTurn(AiTurnResultCode::CANCELLED);
+    finishAiTurn(AiTurnResultCode::CANCELLED, true);
   } else if (aiMotionMode_ != AiMotionMode::NONE) {
     stopImmediately();
   }
@@ -828,7 +970,8 @@ bool RobotController::startReplayTurnRelative(bool left, float degrees,
                           maxSpeed, motionGeneration, profile);
 }
 
-void RobotController::finishAiTurn(AiTurnResultCode code) {
+void RobotController::finishAiTurn(AiTurnResultCode code,
+                                   bool cancelledByPs2Motion) {
   const MotionOwner owner = motionOwner_;
   const uint32_t motionGeneration = aiMotionGeneration_;
   const float headingNow = currentHeadingDeg();
@@ -847,6 +990,7 @@ void RobotController::finishAiTurn(AiTurnResultCode code) {
   stopImmediately();
   aiTurnResult_.owner = owner;
   aiTurnResult_.code = code;
+  aiTurnResult_.cancelledByPs2Motion = cancelledByPs2Motion;
   aiTurnResult_.motionGeneration = motionGeneration;
   aiTurnResult_.headingDeg = headingNow;
   aiTurnResult_.targetDeg = target;

@@ -50,6 +50,15 @@ class UltrasonicHostTests(unittest.TestCase):
         self.assertIn("o.health=SensorHealth::DISABLED;", SENSOR_TEXT)
         self.assertIn("if(!leftEnabled||!rightEnabled){suggestion_=AvoidanceDirection::STOP;return;}", SENSOR_TEXT)
 
+    def test_active_echo_uses_floating_input_without_weak_pull_load(self):
+        begin = SENSOR_TEXT[SENSOR_TEXT.index("void UltrasonicSensor::begin()"):
+                            SENSOR_TEXT.index("void UltrasonicSensor::echoIsrMountLeft")]
+        # Disabled harnesses remain pulled down. The active PC9 Echo is driven
+        # by the module and must not be loaded by an internal pull resistor.
+        self.assertIn("pinMode(c.echoPin,INPUT_PULLDOWN);", begin)
+        self.assertIn("pinMode(c.echoPin,INPUT_FLOATING);", begin)
+        self.assertIn("minimum-rise gate", begin)
+
     def test_single_channel_clear_and_fault_state_remain_fail_closed(self):
         self.assertIn("overallFresh_=(!leftEnabled||frontLeft_.fresh)&&(!rightEnabled||frontRight_.fresh);", SENSOR_TEXT)
         self.assertIn("if(!anyEnabled||!l||!r){overallZone_=ObstacleZone::UNKNOWN", SENSOR_TEXT)
@@ -92,6 +101,20 @@ class UltrasonicHostTests(unittest.TestCase):
         self.assertIn("A disconnected or", SENSOR_TEXT)
         self.assertIn("floating Echo input must not globally block", SENSOR_TEXT)
         self.assertNotIn("digitalRead(channels_[LEFT_MOUNT].echoPin)==HIGH ||", SENSOR_TEXT)
+
+    def test_prolonged_valid_echo_is_far_but_silent_or_early_echo_fails_closed(self):
+        # Regression for the installed single front SR04: an empty corridor
+        # produces a valid-start Echo that remains HIGH past 30 ms. It is an
+        # out-of-range report, while no rising edge (or an early coupled one)
+        # remains a fail-closed timeout.
+        self.assertIn("void acceptOutOfRangeEcho", SENSOR_HEADER_TEXT)
+        self.assertIn("const bool prolongedEcho=c.echoRiseUs!=0U;", SENSOR_TEXT)
+        self.assertIn("if(pulse>=ULTRASONIC_ECHO_TIMEOUT_US)", SENSOR_TEXT)
+        self.assertIn("if(prolongedEcho)", SENSOR_TEXT)
+        self.assertIn("acceptOutOfRangeEcho(i,millis());", SENSOR_TEXT)
+        self.assertIn("else{\n        acceptTimeout(i,millis());", SENSOR_TEXT)
+        self.assertIn("riseDelayUs<ULTRASONIC_ECHO_MIN_RISE_US", SENSOR_TEXT)
+        self.assertIn("acceptPulse(i,farPulseUs,now);", SENSOR_TEXT)
 
     def test_inter_sensor_guard_preserves_continuous_observation(self):
         sample_ms = constant("ULTRASONIC_SAMPLE_PERIOD_MS")

@@ -114,6 +114,9 @@ class UltrasonicSensor {
   static void echoIsrMountLeft(); static void echoIsrMountRight();
   void handleEchoEdge(uint8_t index);
   void acceptPulse(uint8_t index,uint32_t pulseUs,uint32_t nowMs);
+  // A valid-start Echo held beyond the ranging window is the HC-SR04
+  // out-of-range response, not the same failure as an absent/noisy Echo.
+  void acceptOutOfRangeEcho(uint8_t index,uint32_t nowMs);
   void acceptTimeout(uint8_t index,uint32_t nowMs,bool noEcho=true);
   void updateChannelZone(uint8_t index,float distanceCm);
   float medianHistory(const Channel& channel) const; bool channelFresh(const Channel& channel,uint32_t nowMs) const;

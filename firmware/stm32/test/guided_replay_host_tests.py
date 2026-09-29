@@ -436,8 +436,15 @@ class GuidedReplayHostTests(unittest.TestCase):
         self.assertIn("replayRealignReason_", MAP)
         self.assertIn("logGuideRealign(replayRealignReason_", MAP)
         self.assertIn("startReplayGuidedWaypoint", MAP)
+        # Phase 2 has a separate Return-to-P0 result consumer with its own
+        # REALIGN_REQUIRED branch.  Scope this legacy assertion to normal
+        # replay so it does not inspect the new state machine.
+        replay_consumer = MAP.find(
+            "bool MapController::consumeReplayDistanceResult"
+        )
         realign_start = MAP.find(
-            "if (result.code == AiDistanceResultCode::REALIGN_REQUIRED)"
+            "if (result.code == AiDistanceResultCode::REALIGN_REQUIRED)",
+            replay_consumer,
         )
         realign_block = MAP[realign_start:MAP.find(
             "} else if (result.code == AiDistanceResultCode::DONE",
@@ -680,7 +687,7 @@ class GuidedReplayHostTests(unittest.TestCase):
     def test_hold_resume_cancel_and_safety_fences_remain(self):
         for token in (
             "cancelAiMotionForManual",
-            "finishAiDistance(AiDistanceResultCode::CANCELLED)",
+            "finishAiDistance(AiDistanceResultCode::CANCELLED, true)",
             "MotionOwner::REPLAY",
             "motionGeneration",
             "obstacleLimited_",

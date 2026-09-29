@@ -264,6 +264,7 @@ void loop() {
     // controller requires a fresh, deliberate PS2 motion frame before
     // Manual can energize the motors again.
     robot.stopImmediately(true);
+    mapController.notifyExternalStop();
     stopCompletionPending = true;
   }
   if (stopCompletionPending && motors.leftSpeed() == 0 &&
@@ -271,8 +272,35 @@ void loop() {
     robotLink.completeStopRequest();
     stopCompletionPending = false;
   } else if (!stopCompletionPending) {
+    bool mapRequestHandled = false;
+    RobotLinkMapRequest mapRequest;
+    if (robotLink.takeMapRequest(mapRequest)) {
+      mapRequestHandled = true;
+      const char* reason = nullptr;
+      bool accepted = false;
+      if (mapRequest.type == RobotLinkMapRequestType::RUN) {
+        accepted = mapController.requestRunMap(
+            mapRequest.slot, MapMissionInitiator::AI_VOICE, reason);
+      } else if (mapRequest.type == RobotLinkMapRequestType::RETURN_P0) {
+        robotDebug.println("MAP,RETURN_P0,DISPATCH,SOURCE=AI_VOICE");
+        accepted = mapController.requestReturnToP0(
+            ReturnP0Source::AI_VOICE, reason);
+        robotDebug.print("MAP,RETURN_P0,DISPATCH_RESULT=");
+        robotDebug.print(accepted ? "ACCEPT" : "REJECT");
+        if (!accepted) {
+          robotDebug.print(",REASON=");
+          robotDebug.print(reason != nullptr ? reason : "REJECTED");
+        }
+        robotDebug.println();
+      } else {
+        reason = "INVALID_ACTION";
+      }
+      robotLink.completeMapRequest(mapRequest, accepted,
+                                   reason != nullptr ? reason : "REJECTED");
+    }
+
     RobotLinkMotionRequest request;
-    if (robotLink.takeMotionRequest(request)) {
+    if (!mapRequestHandled && robotLink.takeMotionRequest(request)) {
       const int16_t speed = request.speed;
       bool started = false;
       switch (request.motion) {

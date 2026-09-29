@@ -32,6 +32,15 @@ class MapController {
   void processInput();
   void update();
 
+  // Unified MAP mission entry for physical PS2 and authenticated AI voice.
+  bool requestStart(MapMissionInitiator initiator);
+  bool requestRunMap(uint8_t slot, MapMissionInitiator initiator,
+                     const char*& reason);
+  bool requestReturnToP0(ReturnP0Source source, const char*& reason);
+  // Called at the existing RobotLink STOP boundary after the electrical stop
+  // has been consumed. It never starts motion or changes the wire protocol.
+  void notifyExternalStop();
+
   // Main uses these hooks to consume REPLAY results internally. Returning
   // false leaves normal MCP SID/OP RobotLink routing unchanged.
   bool consumeReplayTurnResult(const AiTurnResult& result);
@@ -42,8 +51,11 @@ class MapController {
   MapSlot selectedSlot() const { return selectedSlot_; }
   MapReplayMode replayMode() const { return routeMode_; }
   MapUserMode userMode() const { return userMode_; }
+  ReturnP0State returnP0State() const { return returnP0State_; }
+  bool homeContextValid() const { return homeContext_.valid; }
 
  private:
+  enum class ReplayResumeSource : uint8_t { PS2_START, AI_AUTO };
   enum class ReplayRealignReason : uint8_t { NONE, PATH, ARRIVAL };
   enum class ReplayReturnPhase : uint8_t {
     NONE = 0U,
@@ -91,6 +103,25 @@ class MapController {
     Pose teachOrigin{};
   };
 
+  struct HomeContext {
+    bool valid = false;
+    MapSlot slot = MapSlot::MAP_1;
+    uint32_t routeGeneration = 0U;
+    uint32_t odometryResetGeneration = 0U;
+    uint32_t headingResetGeneration = 0U;
+    Pose p0WorldPose{};
+  };
+
+  struct RouteProjection {
+    bool valid = false;
+    uint16_t segmentStartIndex = 0U;
+    uint16_t segmentEndIndex = 0U;
+    float t = 0.0f;
+    Pose projectedPose{};
+    float crossTrackMm = 0.0f;
+    float distanceMm = 0.0f;
+  };
+
   void handleEvent(const Ps2MapEvent& event);
   void handleStart();
   void handleTriangle();
@@ -134,6 +165,41 @@ class MapController {
   bool postTeachBackRejectShouldInvalidate(const char* reason) const;
   bool postTeachBackAvailable(const char*& reason) const;
   bool startPostTeachBack(const char*& reason);
+  bool backReadyP0Available(const char*& reason) const;
+  void armHomeContextAfterSave();
+  // A persisted route has no world-frame P0 after a reboot.  An accepted AI
+  // MAP run defines that session's P0 from the same replay origin used by the
+  // normal route executor; it is intentionally RAM-only and never enables
+  // the PS2 post-Teach BACK offer.
+  void armAiRunHomeContextIfNeeded();
+  void invalidateHomeContext(const char* reason);
+  // Debug-only pre-reject capture for the AI/PS2 Return-P0 request boundary.
+  // This helper only reads current state and writes one COM12 line.
+  void logReturnP0RejectSnapshot(ReturnP0Source source, const char* reason,
+                                 const char* boundary = nullptr) const;
+  // Accepted Return-P0 accuracy trace.  These helpers only read state and
+  // append one transition-level COM12 line; they never affect replay logic.
+  void logReturnP0TraceBase(const char* event, const Pose& live) const;
+  void logReturnP0TraceMotion(const char* event, const Pose& live) const;
+  void logReturnP0TraceP0Error(const Pose& live) const;
+  static float diagnosticCrossTrackToSegment(const Pose& live,
+                                             const Pose& segmentStart,
+                                             const Pose& segmentEnd);
+  bool locateRouteProjection(RouteProjection& projection,
+                             const char*& reason) const;
+  bool requestReturnToP0Internal(ReturnP0Source source, const char*& reason);
+  void updateReturnToP0();
+  bool startReturnReacquire();
+  bool startReturnWaypoint();
+  bool startReturnP0Position();
+  bool startReturnP0Heading();
+  bool consumeReturnTurnResult(const AiTurnResult& result);
+  bool consumeReturnDistanceResult(const AiDistanceResult& result);
+  void terminateReturnToP0ForPs2Takeover();
+  void abortReturnToP0(const char* reason);
+  void completeReturnToP0();
+  bool returnP0InProgress() const;
+  static const char* returnP0StateName(ReturnP0State state);
   bool validateRoute(const MapRouteData& route, const char*& reason) const;
   bool hasValidClosingEdge(const MapRouteData& route,
                            const char*& reason) const;
@@ -158,8 +224,10 @@ class MapController {
                                 MapReplayMode runtimeMode) const;
 
   void cycleReplayMode();
-  bool prepareReplay(const char*& rejectReason);
-  bool replayPrecheck(const MapRouteData& route, const char*& reason) const;
+  bool prepareReplay(const char*& rejectReason,
+                     MapMissionInitiator initiator);
+  bool replayPrecheck(const MapRouteData& route, const char*& reason,
+                      MapMissionInitiator initiator) const;
   void updateReplay();
   bool startNextReplaySegment();
   bool obstacleDetourContextActive() const;
@@ -188,7 +256,14 @@ class MapController {
   void completeReplay();
   void cancelReplay(const char* reason = "CANCELLED");
   void serviceObstacleHold();
+  void logReplayPoseDriftOnce(const Pose& current, bool poseValid);
   bool canResumeReplay(const char*& rejectReason);
+  bool canResumeReplay(ReplayResumeSource source,
+                       const char*& rejectReason);
+  bool resumeReplayFromHold(ReplayResumeSource source,
+                            const char*& rejectReason);
+  bool resumeReturnP0FromObstacleHold(const char*& rejectReason);
+  void inhibitAutonomousResume(const char* reason);
   void clearReplayResumeContext();
   uint32_t nextReplayGeneration();
   void beginCancelTrace();
@@ -242,6 +317,8 @@ class MapController {
   MapRouteType routeType_ = MapRouteType::OPEN;
   MapUserMode userMode_ = MapUserMode::ONCE;
   MapReplayMode routeMode_ = MapReplayMode::ONCE;
+  MapMissionInitiator missionInitiator_ = MapMissionInitiator::NONE;
+  bool autonomousResumeInhibited_ = true;
   int16_t replaySpeed_ = MAP_REPLAY_SPEED_DEFAULT;
   uint8_t loopTarget_ = MAP_LOOP_TARGET_MIN;
   MapTeachMode teachMode_ = MapTeachMode::MANUAL_KEYFRAME;
@@ -265,6 +342,12 @@ class MapController {
   PostTeachBackContext postTeachBack_{};
   bool postTeachBackActive_ = false;
   bool postTeachBackComplete_ = false;
+  HomeContext homeContext_{};
+  bool backP0UiDismissed_ = false;
+  Pose pendingHomeOrigin_{};
+  uint32_t pendingHomeResetGeneration_ = 0U;
+  uint32_t pendingHomeHeadingResetGeneration_ = 0U;
+  bool pendingHomeContextValid_ = false;
   Pose lastTeachSample_{};
   bool teachOriginValid_ = false;
   bool lastTeachSampleValid_ = false;
@@ -307,6 +390,11 @@ class MapController {
   Pose replayTarget_{};
   Pose replayHoldPose_{};
   bool replayHoldPoseValid_ = false;
+  bool replayPoseDriftLogged_ = false;
+  uint32_t replayHoldOdometryGeneration_ = 0U;
+  uint32_t replayHoldHeadingGeneration_ = 0U;
+  int64_t replayHoldLeftTicks_ = 0;
+  int64_t replayHoldRightTicks_ = 0;
   uint32_t replayTargetDistanceMm_ = 0U;
   int16_t replayTargetDeg_ = 0;
   float replayGuideBearingDeg_ = 0.0f;
@@ -332,6 +420,21 @@ class MapController {
   int8_t obstacleDetourOriginalDirection_ = 1;
   uint32_t obstacleDetourOriginalRouteGeneration_ = 0U;
   uint32_t obstacleDetourOriginalReplayGeneration_ = 0U;
+  ReturnP0State returnP0State_ = ReturnP0State::IDLE;
+  ReturnP0Source returnP0Source_ = ReturnP0Source::NONE;
+  uint32_t returnP0Generation_ = 0U;
+  uint32_t returnP0SegmentGeneration_ = 0U;
+  uint16_t returnP0TargetIndex_ = 0U;
+  uint16_t returnP0SegmentStartIndex_ = 0U;
+  uint8_t returnP0ReacquireAttempts_ = 0U;
+  uint8_t returnP0PositionCorrectionAttempts_ = 0U;
+  uint8_t returnP0HeadingAttempts_ = 0U;
+  bool returnP0TurnPending_ = false;
+  ReturnP0State returnP0HeldState_ = ReturnP0State::IDLE;
+  uint16_t returnP0HeldTargetIndex_ = 0U;
+  uint16_t returnP0HeldSegmentStartIndex_ = 0U;
+  uint32_t returnP0SettleSinceMs_ = 0U;
+  RouteProjection returnP0Projection_{};
   uint32_t closeCandidateDistanceMm_ = 0U;
   int16_t closeCandidateHeadingDeg_ = 0;
   bool cancelTraceActive_ = false;

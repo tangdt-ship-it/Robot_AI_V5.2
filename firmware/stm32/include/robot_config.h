@@ -241,6 +241,24 @@ static constexpr float MAP_GUIDE_HEADING_DERIVATIVE_FILTER = 0.20f;
 static constexpr float MAP_GUIDE_CROSSTRACK_GAIN = 0.040f;
 static constexpr float MAP_GUIDE_MAX_CROSSTRACK_MM = 250.0f;
 static constexpr int16_t MAP_GUIDE_MIN_SPEED = 15;
+// Universal Return-to-P0 remains a bounded local MAP operation. These gates
+// are deliberately no wider than the existing guided corridor and are not
+// persisted in the MAP record.
+static constexpr float MAP_RETURN_P0_MAX_CROSSTRACK_MM = 250.0f;
+static constexpr float MAP_RETURN_P0_AMBIGUITY_MARGIN_MM = 30.0f;
+static constexpr uint32_t MAP_RETURN_P0_POSITION_TOLERANCE_MM = 30U;
+// A sub-30 mm projection correction is shorter than one controlled guided
+// minimum-speed update.  Do not launch that micro-move: return directly to
+// the preceding waypoint after its normal coarse pre-turn.
+static constexpr uint32_t MAP_RETURN_P0_REACQUIRE_BYPASS_MM = 30U;
+static constexpr float MAP_RETURN_P0_HEADING_TOLERANCE_DEG = 2.0f;
+static constexpr uint32_t MAP_RETURN_P0_SETTLE_MS = 100U;
+static constexpr uint8_t MAP_RETURN_P0_MAX_REACQUIRE_ATTEMPTS = 3U;
+static constexpr uint8_t MAP_RETURN_P0_MAX_POSITION_CORRECTIONS = 3U;
+static constexpr uint8_t MAP_RETURN_P0_MAX_HEADING_ATTEMPTS = 3U;
+static_assert(MAP_RETURN_P0_MAX_CROSSTRACK_MM <=
+                  MAP_GUIDE_MAX_CROSSTRACK_MM,
+              "Return-to-P0 corridor must stay within guided corridor");
 static_assert(MAP_GUIDE_SLOW_DISTANCE_MM >
                   MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM,
               "MAP guide slow distance must exceed arrival tolerance");
@@ -260,6 +278,9 @@ static constexpr uint32_t MAP_GUIDE_TELEMETRY_MS = 250U;
 // deliberately longer than one alternating sensor sample (60 ms) and does
 // not alter any obstacle threshold or automatic-detour policy.
 static constexpr uint32_t OBSTACLE_CLEAR_STABLE_MS = 400U;
+// AI autonomous MAP replay uses a stricter independent clear window. The
+// existing 400 ms window remains the manual START compatibility gate.
+static constexpr uint32_t AI_OBSTACLE_AUTO_RESUME_CLEAR_MS = 1000U;
 
 // All MAP long-press gestures share one deliberate threshold. X still enters
 // HOLD on its down edge; this value only controls escalation to CANCEL.

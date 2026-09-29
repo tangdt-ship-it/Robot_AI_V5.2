@@ -181,6 +181,7 @@ bool RobotUart::SendAndWait(const char* body, EventBits_t expected,
                  body != nullptr ? body : "");
         return false;
     }
+    last_transaction_nack_.store(false);
     xEventGroupClearBits(response_events_, expected | kResponseNack);
     const bool sent = SendFrame(body);
     EventBits_t bits = 0;
@@ -196,6 +197,7 @@ bool RobotUart::SendAndWait(const char* body, EventBits_t expected,
         return false;
     }
     if ((bits & kResponseNack) != 0) {
+        last_transaction_nack_.store(true);
         ESP_LOGW(kTag, "ROBOT_TXN_FAIL,BODY=%s,STAGE=NACK",
                  body != nullptr ? body : "");
         return false;
@@ -208,6 +210,24 @@ bool RobotUart::SendAndWait(const char* body, EventBits_t expected,
         return false;
     }
     return true;
+}
+
+RobotMapCommandResult RobotUart::RunMap(uint8_t slot, uint32_t timeout_ms) {
+    if (slot != 1U && slot != 2U) {
+        return RobotMapCommandResult::REJECTED;
+    }
+    if (!SetMode(true, 700)) return MapCommandResult(false);
+    char command[24];
+    snprintf(command, sizeof(command), "MAP,CMD,RUN,%u",
+             static_cast<unsigned>(slot));
+    return MapCommandResult(
+        SendAndWait(command, kResponseAck, timeout_ms));
+}
+
+RobotMapCommandResult RobotUart::ReturnToP0(uint32_t timeout_ms) {
+    if (!SetMode(true, 700)) return MapCommandResult(false);
+    return MapCommandResult(
+        SendAndWait("MAP,CMD,RETURN_P0", kResponseAck, timeout_ms));
 }
 
 bool RobotUart::Ping(uint32_t timeout_ms) {

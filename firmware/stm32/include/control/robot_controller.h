@@ -38,6 +38,9 @@ enum class AiTurnResultCode : uint8_t {
 struct AiTurnResult {
   MotionOwner owner = MotionOwner::NONE;
   AiTurnResultCode code = AiTurnResultCode::NONE;
+  // Set only when a fresh, active PS2 drive command cancelled this primitive.
+  // Other cancellations (STOP, faults, timeout) retain their normal meaning.
+  bool cancelledByPs2Motion = false;
   // Non-zero for STM32-local MAP replay. MCP results keep the default zero
   // value, so the replay fence never changes RobotLink correlation semantics.
   uint32_t motionGeneration = 0U;
@@ -54,6 +57,8 @@ enum class AiDistanceResultCode : uint8_t {
 struct AiDistanceResult {
   MotionOwner owner = MotionOwner::NONE;
   AiDistanceResultCode code = AiDistanceResultCode::NONE;
+  // Set only when a fresh, active PS2 drive command cancelled this primitive.
+  bool cancelledByPs2Motion = false;
   // Non-zero for STM32-local MAP replay; see AiTurnResult above.
   uint32_t motionGeneration = 0U;
   float targetMm = 0.0f;
@@ -178,8 +183,10 @@ class RobotController {
                         float targetUnwrappedHeading, bool multiTurn,
                         int16_t maxSpeed, uint32_t motionGeneration = 0U,
                         AiTurnProfile profile = AiTurnProfile::PRECISE);
-  void finishAiTurn(AiTurnResultCode code);
-  void finishAiDistance(AiDistanceResultCode code);
+  void finishAiTurn(AiTurnResultCode code,
+                    bool cancelledByPs2Motion = false);
+  void finishAiDistance(AiDistanceResultCode code,
+                        bool cancelledByPs2Motion = false);
   void updateAiGuidedWaypoint(uint32_t nowMs);
   void updateGuidedPid(uint32_t nowMs, float headingErrorDeg,
                        float remainingMm);

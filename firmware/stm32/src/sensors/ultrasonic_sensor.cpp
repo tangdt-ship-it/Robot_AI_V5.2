@@ -26,11 +26,12 @@ void UltrasonicSensor::begin() {
     }
     pinMode(c.trigPin,OUTPUT);
     digitalWrite(c.trigPin,LOW);
-    // HC-SR04 Echo is push-pull, but the long harness can briefly float while
-    // the module is idle or between valid pulses. Keep a weak pull-down so
-    // noise cannot create a false edge; it is negligible while Echo drives
-    // HIGH and does not alter the motor/safety policy.
-    pinMode(c.echoPin,INPUT_PULLDOWN);
+    // The active HC-SR04 drives Echo for both pulse edges. Do not add the
+    // STM32 internal pull-down here: on the installed long harness it loads
+    // the return transition enough to stretch a real pulse beyond the 30 ms
+    // validity window. Electrical-noise protection remains in the ISR's
+    // minimum-rise gate and the fail-closed timeout path.
+    pinMode(c.echoPin,INPUT_FLOATING);
     c.lastTriggerMs=now-ULTRASONIC_SAMPLE_PERIOD_MS;
   }
   if(channels_[LEFT_MOUNT].enabled) attachInterrupt(
@@ -155,6 +156,15 @@ void UltrasonicSensor::acceptPulse(uint8_t i,uint32_t pulse,uint32_t now){
     c.displayFar=false;
   }
   static uint32_t prevMs[2]={};static float prevD[2]={};if(prevMs[i]&&now>prevMs[i]){const float rate=(prevD[i]-c.filteredDistanceCm)/(float)(now-prevMs[i])*1000.0f;c.approachRateCmS=constrain(0.30f*rate+0.70f*c.approachRateCmS,-250.0f,250.0f);}prevMs[i]=now;prevD[i]=c.filteredDistanceCm;updateChannelZone(i,c.filteredDistanceCm);
+}
+void UltrasonicSensor::acceptOutOfRangeEcho(uint8_t i,uint32_t now){
+  // HC-SR04 represents no reflector in range by holding Echo HIGH through
+  // the measurement window.  A preceding, non-early rising edge proves that
+  // the module and PC9 path are responding; model that response as the
+  // bounded maximum range.  Never use this path for a silent input or for an
+  // early TRIG-coupled edge: those still go through fail-closed timeout.
+  const uint32_t farPulseUs=static_cast<uint32_t>(ULTRASONIC_MAX_CM/0.01715f);
+  acceptPulse(i,farPulseUs,now);
 }
 void UltrasonicSensor::acceptTimeout(uint8_t i,uint32_t now,bool noEcho){
   Channel& c=channels_[i];
@@ -338,14 +348,27 @@ void UltrasonicSensor::update(){
     interrupts();
     const uint32_t us=micros();
     const bool timedOut=(us-c.waitEchoStartedUs)>=ULTRASONIC_ECHO_TIMEOUT_US;
+    const bool prolongedEcho=c.echoRiseUs!=0U;
     if(ready){
-      acceptPulse(i,pulse,millis());
+      // Main-loop diagnostics can occasionally observe the falling edge only
+      // after the timeout window.  The captured long pulse has the same
+      // verified-start semantics as an in-window prolonged Echo.
+      if(pulse>=ULTRASONIC_ECHO_TIMEOUT_US){
+        acceptOutOfRangeEcho(i,millis());
+      }else{
+        acceptPulse(i,pulse,millis());
+      }
       ++measurementSequence_;
     }else if(timedOut){
-      acceptTimeout(i,millis());
+      if(prolongedEcho){
+        acceptOutOfRangeEcho(i,millis());
+      }else{
+        acceptTimeout(i,millis());
+      }
       ++measurementSequence_;
     }
     if(ready||timedOut){
+      c.echoRiseUs=0;
       c.state=TriggerState::IDLE;
       activeChannel_=0xFF;
       nextTriggerAllowedMs_=millis()+ULTRASONIC_INTER_SENSOR_GUARD_MS;

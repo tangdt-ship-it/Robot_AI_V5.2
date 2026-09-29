@@ -1084,7 +1084,9 @@ class MapHostTests(unittest.TestCase):
         self.assertIn("OBS,HOLD,CLEAR_PENDING", MAP_TEXT)
         self.assertIn("OBS,HOLD,WAIT", MAP_TEXT)
         self.assertIn("OBS,HOLD,RESUME", MAP_TEXT)
-        self.assertIn("(now - obstacleClearSinceMs_) < OBSTACLE_CLEAR_STABLE_MS", MAP_TEXT)
+        self.assertIn("const uint32_t requiredClearMs", MAP_TEXT)
+        self.assertIn("source == ReplayResumeSource::AI_AUTO", MAP_TEXT)
+        self.assertIn("AI_OBSTACLE_AUTO_RESUME_CLEAR_MS", MAP_TEXT)
         self.assertIn("replayOperation_ = MapReplayOperation::NONE", MAP_TEXT)
         self.assertIn("enterReplayHold(MapHoldReason::OBSTACLE, true)", MAP_TEXT)
         self.assertIn("result.motionGeneration != replaySegmentGeneration_", MAP_TEXT)
@@ -1351,7 +1353,6 @@ class MapHostTests(unittest.TestCase):
             'invalidatePostTeachBack("RESET_BOUNDARY")',
             'invalidatePostTeachBack("STORAGE_ERROR")',
             'MAP,BACK_P0,INVALIDATE,REASON=',
-            'MAP,BACK_P0,REJECT,REASON=',
         ):
             self.assertIn(token, MAP_TEXT)
         self.assertIn('route_.header.generation != postTeachBack_.routeGeneration',
@@ -1368,12 +1369,15 @@ class MapHostTests(unittest.TestCase):
             '"ODOMETRY"', '"HEADING"', '"OBSTACLE_SENSOR"',
             '"OBSTACLE_NOT_CLEAR"', '"POSE"'):
             self.assertIn(reason, MAP_TEXT)
-        self.assertIn('debug_.println(",RETRY=1")', MAP_TEXT)
+        helper = MAP_TEXT.split(
+            'bool MapController::postTeachBackRejectShouldInvalidate', 1
+        )[1].split('bool MapController::postTeachBackAvailable', 1)[0]
+        self.assertIn('const char* transientReasons[]', helper)
         start_block = MAP_TEXT.split(
             'void MapController::handleStart()', 1
         )[1].split('void MapController::handleTriangle()', 1)[0]
         self.assertIn('robot_.stopImmediately(true)', start_block)
-        self.assertIn('postTeachBackRejectShouldInvalidate(reason)', start_block)
+        self.assertIn('requestReturnToP0(ReturnP0Source::PS2_START', start_block)
         self.assertIn('postTeachBack_.valid && !postTeachBackActive_', MAP_TEXT)
 
     def test_post_teach_back_motion_owner_is_hard_invalidated(self):
@@ -1386,7 +1390,8 @@ class MapHostTests(unittest.TestCase):
         start_block = MAP_TEXT.split(
             'void MapController::handleStart()', 1
         )[1].split('void MapController::handleTriangle()', 1)[0]
-        self.assertIn('invalidatePostTeachBack(reason)', start_block)
+        self.assertIn('backReadyP0Available', start_block)
+        self.assertIn('MAP,RETURN_P0,REJECT,REASON=', start_block)
 
         for owner in ("REPLAY", "MCP", "MISSION", "PS2"):
             model = PostTeachBackModel(4)
@@ -1688,7 +1693,7 @@ class MapHostTests(unittest.TestCase):
 
     def test_TEST_SAVED_START_RUN(self):
         self.assertIn('debug_.println("MAP,START,ACTION=RUN")', MAP_TEXT)
-        self.assertIn("prepareReplay(reason)", MAP_TEXT)
+        self.assertIn("prepareReplay(reason, initiator)", MAP_TEXT)
         self.assertIn("replayCurrentIndex_ = 0U", MAP_TEXT)
         self.assertIn("replayTargetIndex_ = 1U", MAP_TEXT)
 
@@ -1735,7 +1740,7 @@ class MapHostTests(unittest.TestCase):
         self.assertIn("result.motionGeneration != replaySegmentGeneration_", MAP_TEXT)
 
     def test_TEST_USER_HOLD_RESUME(self):
-        self.assertIn("canResumeReplay(rejectReason)", MAP_TEXT)
+        self.assertIn("resumeReplayFromHold(ReplayResumeSource::PS2_START, rejectReason)", MAP_TEXT)
         self.assertIn('debug_.println("MAP,START,ACTION=RESUME")', MAP_TEXT)
         self.assertIn("replayTargetIndex_", MAP_TEXT)
         self.assertIn("replayActive_ = true", MAP_TEXT)
