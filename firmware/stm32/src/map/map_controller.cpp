@@ -4391,9 +4391,34 @@ void MapController::enterReplayHold(MapHoldReason reason, bool allowResume) {
   }
   obstacleClearSinceMs_ = 0U;
   replayHoldPoseValid_ = readPose(replayHoldPose_);
+  replayPoseDriftLogged_ = false;
+  replayHoldOdometryGeneration_ = odometry_.resetGeneration();
+  replayHoldHeadingGeneration_ = robot_.headingResetGeneration();
+  replayHoldLeftTicks_ = odometry_.data().leftTicks;
+  replayHoldRightTicks_ = odometry_.data().rightTicks;
   mode_ = MapControllerMode::REPLAY_HOLD;
   statusDirty_ = true;
   ps2_.holdMapInput();
+  debug_.print("MAP,HOLD,POSE,X=");
+  debug_.print(replayHoldPose_.xMm, 2);
+  debug_.print(",Y=");
+  debug_.print(replayHoldPose_.yMm, 2);
+  debug_.print(",H=");
+  debug_.print(replayHoldPose_.headingDeg, 2);
+  debug_.print(",ODOM_GEN=");
+  debug_.print(replayHoldOdometryGeneration_);
+  debug_.print(",HDG_GEN=");
+  debug_.print(replayHoldHeadingGeneration_);
+  debug_.print(",L_TICKS=");
+  debug_.print(static_cast<long>(replayHoldLeftTicks_));
+  debug_.print(",R_TICKS=");
+  debug_.print(static_cast<long>(replayHoldRightTicks_));
+  debug_.print(",FUSION=");
+  debug_.print(fusion_.healthText());
+  debug_.print(",YAW_RATE=");
+  debug_.print(fusion_.yawRateDegS(), 2);
+  debug_.print(",POSE_VALID=");
+  debug_.println(replayHoldPoseValid_ ? "YES" : "NO");
   debug_.print("MAP,HOLD,REASON=");
   debug_.print(HoldReasonName(reason));
   debug_.print(",WP=");
@@ -4616,12 +4641,22 @@ void MapController::serviceObstacleHold() {
     inhibitAutonomousResume("POSE");
   } else if (aiAutoResume) {
     Pose current;
-    if (!readPose(current) ||
-        distanceMm(current.xMm, current.yMm, replayHoldPose_.xMm,
-                   replayHoldPose_.yMm) > kReplayPoseHoldToleranceMm ||
-        fabsf(shortestDeltaDeg(current.headingDeg,
-                               replayHoldPose_.headingDeg)) >
-            kReplayPoseHoldToleranceDeg) {
+    const bool currentPoseValid = readPose(current);
+    const bool poseDrift =
+        !currentPoseValid ||
+        (currentPoseValid &&
+         (distanceMm(current.xMm, current.yMm, replayHoldPose_.xMm,
+                     replayHoldPose_.yMm) > kReplayPoseHoldToleranceMm ||
+          fabsf(shortestDeltaDeg(current.headingDeg,
+                                 replayHoldPose_.headingDeg)) >
+              kReplayPoseHoldToleranceDeg));
+    if (poseDrift) {
+      if (!currentPoseValid) {
+        current.xMm = odometry_.data().xMm;
+        current.yMm = odometry_.data().yMm;
+        current.headingDeg = fusion_.headingDeg();
+      }
+      logReplayPoseDriftOnce(current, currentPoseValid);
       inhibitAutonomousResume("POSE_DRIFT");
     }
   }
@@ -4661,6 +4696,66 @@ void MapController::serviceObstacleHold() {
                                                        : "AUTO_RESUME_REJECT");
     }
   }
+}
+
+void MapController::logReplayPoseDriftOnce(const Pose& current,
+                                           bool poseValid) {
+  if (replayPoseDriftLogged_) return;
+  replayPoseDriftLogged_ = true;
+
+  const float dx = current.xMm - replayHoldPose_.xMm;
+  const float dy = current.yMm - replayHoldPose_.yMm;
+  const float distance = hypotf(dx, dy);
+  const float headingDelta =
+      shortestDeltaDeg(current.headingDeg, replayHoldPose_.headingDeg);
+  const WheelOdometryData& odometry = odometry_.data();
+
+  debug_.print("MAP,RESUME,POSE_DRIFT,HOLD_X=");
+  debug_.print(replayHoldPose_.xMm, 2);
+  debug_.print(",HOLD_Y=");
+  debug_.print(replayHoldPose_.yMm, 2);
+  debug_.print(",HOLD_H=");
+  debug_.print(replayHoldPose_.headingDeg, 2);
+  debug_.print(",NOW_X=");
+  debug_.print(current.xMm, 2);
+  debug_.print(",NOW_Y=");
+  debug_.print(current.yMm, 2);
+  debug_.print(",NOW_H=");
+  debug_.print(current.headingDeg, 2);
+  debug_.print(",DX=");
+  debug_.print(dx, 2);
+  debug_.print(",DY=");
+  debug_.print(dy, 2);
+  debug_.print(",DIST=");
+  debug_.print(distance, 2);
+  debug_.print(",DH=");
+  debug_.print(headingDelta, 2);
+  debug_.print(",LIMIT_DIST=");
+  debug_.print(kReplayPoseHoldToleranceMm, 0);
+  debug_.print(",LIMIT_HDG=");
+  debug_.print(kReplayPoseHoldToleranceDeg, 0);
+  debug_.print(",L_TICKS_HOLD=");
+  debug_.print(static_cast<long>(replayHoldLeftTicks_));
+  debug_.print(",R_TICKS_HOLD=");
+  debug_.print(static_cast<long>(replayHoldRightTicks_));
+  debug_.print(",L_TICKS_NOW=");
+  debug_.print(static_cast<long>(odometry.leftTicks));
+  debug_.print(",R_TICKS_NOW=");
+  debug_.print(static_cast<long>(odometry.rightTicks));
+  debug_.print(",ODOM_GEN_HOLD=");
+  debug_.print(replayHoldOdometryGeneration_);
+  debug_.print(",ODOM_GEN_NOW=");
+  debug_.print(odometry_.resetGeneration());
+  debug_.print(",HDG_GEN_HOLD=");
+  debug_.print(replayHoldHeadingGeneration_);
+  debug_.print(",HDG_GEN_NOW=");
+  debug_.print(robot_.headingResetGeneration());
+  debug_.print(",FUSION_HEALTH=");
+  debug_.print(fusion_.healthText());
+  debug_.print(",YAW_RATE=");
+  debug_.print(fusion_.yawRateDegS(), 2);
+  debug_.print(",POSE_VALID=");
+  debug_.println(poseValid ? "YES" : "NO");
 }
 
 bool MapController::resumeReturnP0FromObstacleHold(const char*& rejectReason) {
@@ -4854,10 +4949,14 @@ bool MapController::canResumeReplay(ReplayResumeSource source,
     rejectReason = "POSE";
     return false;
   }
-  if (distanceMm(pose.xMm, pose.yMm, replayHoldPose_.xMm,
-                 replayHoldPose_.yMm) > kReplayPoseHoldToleranceMm ||
-      fabsf(shortestDeltaDeg(pose.headingDeg, replayHoldPose_.headingDeg)) >
-          kReplayPoseHoldToleranceDeg) {
+  const float poseDistanceMm =
+      distanceMm(pose.xMm, pose.yMm, replayHoldPose_.xMm,
+                 replayHoldPose_.yMm);
+  const float poseHeadingDeltaDeg =
+      shortestDeltaDeg(pose.headingDeg, replayHoldPose_.headingDeg);
+  if (poseDistanceMm > kReplayPoseHoldToleranceMm ||
+      fabsf(poseHeadingDeltaDeg) > kReplayPoseHoldToleranceDeg) {
+    logReplayPoseDriftOnce(pose, true);
     rejectReason = "POSE_DRIFT";
     return false;
   }

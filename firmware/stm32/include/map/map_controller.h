@@ -256,6 +256,7 @@ class MapController {
   void completeReplay();
   void cancelReplay(const char* reason = "CANCELLED");
   void serviceObstacleHold();
+  void logReplayPoseDriftOnce(const Pose& current, bool poseValid);
   bool canResumeReplay(const char*& rejectReason);
   bool canResumeReplay(ReplayResumeSource source,
                        const char*& rejectReason);
@@ -389,6 +390,11 @@ class MapController {
   Pose replayTarget_{};
   Pose replayHoldPose_{};
   bool replayHoldPoseValid_ = false;
+  bool replayPoseDriftLogged_ = false;
+  uint32_t replayHoldOdometryGeneration_ = 0U;
+  uint32_t replayHoldHeadingGeneration_ = 0U;
+  int64_t replayHoldLeftTicks_ = 0;
+  int64_t replayHoldRightTicks_ = 0;
   uint32_t replayTargetDistanceMm_ = 0U;
   int16_t replayTargetDeg_ = 0;
   float replayGuideBearingDeg_ = 0.0f;

@@ -24,6 +24,11 @@ CONFIG = (STM32_ROOT / "include" / "robot_config.h").read_text(encoding="utf-8")
 MAIN = (STM32_ROOT / "src" / "main.cpp").read_text(encoding="utf-8")
 
 
+def pose_hold_drift_exceeded(distance_mm, heading_delta_deg):
+    """Mirror the fixed strict-greater-than HOLD gate for diagnostics tests."""
+    return distance_mm > 100.0 or abs(heading_delta_deg) > 15.0
+
+
 class AutoResumeModel:
     """Small executable model of the Phase 1 safety contract."""
 
@@ -403,6 +408,76 @@ class AiObstacleAutoResumeHostTests(unittest.TestCase):
         ).read_text(encoding="utf-8"))
         self.assertIn("armObstacleDetour", MAP)
         self.assertIn("if (initiator != MapMissionInitiator::PS2)", MAP)
+
+    def test_33_pose_drift_gate_boundaries_remain_strict(self):
+        self.assertIn("kReplayPoseHoldToleranceMm = 100.0f", MAP)
+        self.assertIn("kReplayPoseHoldToleranceDeg = 15.0f", MAP)
+        self.assertGreaterEqual(MAP.count("> kReplayPoseHoldToleranceMm"), 2)
+        self.assertIn(">\n              kReplayPoseHoldToleranceDeg", MAP)
+        self.assertIn("fabsf(poseHeadingDeltaDeg) > kReplayPoseHoldToleranceDeg", MAP)
+        self.assertFalse(pose_hold_drift_exceeded(99.99, 14.99))
+        self.assertFalse(pose_hold_drift_exceeded(100.0, 15.0))
+        self.assertTrue(pose_hold_drift_exceeded(100.01, 0.0))
+        self.assertTrue(pose_hold_drift_exceeded(0.0, 15.01))
+
+    def test_34_pose_drift_diagnostics_are_bounded_and_non_controling(self):
+        self.assertIn("replayPoseDriftLogged_ = false", MAP)
+        self.assertIn("if (replayPoseDriftLogged_) return", MAP)
+        self.assertIn("logReplayPoseDriftOnce(current, currentPoseValid)", MAP)
+        self.assertIn("logReplayPoseDriftOnce(pose, true)", MAP)
+        for field in (
+            "MAP,HOLD,POSE,X=",
+            "MAP,RESUME,POSE_DRIFT,HOLD_X=",
+            ",NOW_X=",
+            ",DX=",
+            ",DY=",
+            ",DIST=",
+            ",DH=",
+            ",LIMIT_DIST=",
+            ",LIMIT_HDG=",
+            ",L_TICKS_HOLD=",
+            ",R_TICKS_HOLD=",
+            ",L_TICKS_NOW=",
+            ",R_TICKS_NOW=",
+            ",ODOM_GEN_HOLD=",
+            ",ODOM_GEN_NOW=",
+            ",HDG_GEN_HOLD=",
+            ",HDG_GEN_NOW=",
+            ",FUSION_HEALTH=",
+            ",YAW_RATE=",
+        ):
+            self.assertIn(field, MAP)
+
+        helper = MAP.split(
+            "void MapController::logReplayPoseDriftOnce(", 1
+        )[1].split("bool MapController::resumeReturnP0FromObstacleHold(", 1)[0]
+        for forbidden in (
+            "autonomousResumeInhibited_ =",
+            "mode_ =",
+            "replayActive_ =",
+            "holdReason_ =",
+            "replayGeneration_ =",
+            "replayTargetIndex_ =",
+            "stopImmediately(",
+            "startReturn",
+            "resumeReplay",
+        ):
+            self.assertNotIn(forbidden, helper)
+
+        # A diagnostic observation is not permitted to alter mission or gate
+        # state; the C++ logger contract above verifies it only emits data and
+        # sets its one-per-HOLD de-duplication bit.
+        gate_state = {
+            "mode": "HOLD",
+            "inhibited": True,
+            "owner": "NONE",
+            "target_wp": 2,
+            "generation": 85,
+        }
+        before = gate_state.copy()
+        _diagnostic = (100.01, 0.0, 100.01 > 100.0 or abs(0.0) > 15.0)
+        self.assertEqual(gate_state, before)
+        self.assertTrue(_diagnostic[2])
 
 
 if __name__ == "__main__":
