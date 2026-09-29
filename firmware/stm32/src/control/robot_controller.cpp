@@ -585,15 +585,19 @@ bool RobotController::canStartAiMotion(uint32_t nowMs) const {
 
 bool RobotController::canStartMotion(uint32_t nowMs, MotionOwner owner) const {
   if (brakeEnabled_ || aiMotionMode_ != AiMotionMode::NONE ||
-      ps2_.frameTimedOut(nowMs) || ps2_.mapUiCaptureActive()) {
+      ps2_.mapUiCaptureActive()) {
     return false;
   }
   if (owner == MotionOwner::REPLAY) {
-    // A MAP START frame is itself PS2 activity. Require a neutral frame but
-    // do not apply the general activity hold, or START would cancel replay.
+    // A missing PS2 frame means the manual controller is absent; it is not a
+    // safety reason to strand an autonomous MAP segment between waypoints.
+    // Fresh manual motion still prevents a start here and takes ownership in
+    // updateControl(), while MAP UI, brake, ownership and all pose/sensor
+    // gates above remain mandatory.
     return motionOwner_ == MotionOwner::NONE &&
            !ps2_.motionCommandActive();
   }
+  if (ps2_.frameTimedOut(nowMs)) return false;
   return motionOwner_ == MotionOwner::NONE || motionOwner_ == owner;
 }
 
@@ -699,8 +703,6 @@ bool RobotController::startReplayGuidedWaypoint(
     reject = ReplayGuidedStartReject::BRAKE;
   } else if (aiMotionMode_ != AiMotionMode::NONE) {
     reject = ReplayGuidedStartReject::AI_MOTION_ACTIVE;
-  } else if (ps2Timeout) {
-    reject = ReplayGuidedStartReject::PS2_FRAME_TIMEOUT;
   } else if (mapUiCapture) {
     reject = ReplayGuidedStartReject::MAP_UI_CAPTURE;
   } else if (motionOwner_ != MotionOwner::NONE) {
@@ -831,10 +833,12 @@ int16_t RobotController::distanceWheelBalance() const {
                    DISTANCE_WHEEL_BALANCE_MAX);
 }
 
-void RobotController::finishAiDistance(AiDistanceResultCode code) {
+void RobotController::finishAiDistance(AiDistanceResultCode code,
+                                       bool cancelledByPs2Motion) {
   const MotionOwner owner = motionOwner_;
   aiDistanceResult_.owner = owner;
   aiDistanceResult_.code = code;
+  aiDistanceResult_.cancelledByPs2Motion = cancelledByPs2Motion;
   aiDistanceResult_.motionGeneration = aiMotionGeneration_;
   aiDistanceResult_.targetMm = aiDistanceTargetMm_;
   aiDistanceResult_.travelledMm = aiDistanceTravelledMm();
@@ -845,9 +849,9 @@ void RobotController::finishAiDistance(AiDistanceResultCode code) {
 void RobotController::cancelAiMotionForManual() {
   if (aiMotionMode_ == AiMotionMode::DISTANCE ||
       aiMotionMode_ == AiMotionMode::GUIDED_WAYPOINT) {
-    finishAiDistance(AiDistanceResultCode::CANCELLED);
+    finishAiDistance(AiDistanceResultCode::CANCELLED, true);
   } else if (aiMotionMode_ == AiMotionMode::TURN) {
-    finishAiTurn(AiTurnResultCode::CANCELLED);
+    finishAiTurn(AiTurnResultCode::CANCELLED, true);
   } else if (aiMotionMode_ != AiMotionMode::NONE) {
     stopImmediately();
   }
@@ -966,7 +970,8 @@ bool RobotController::startReplayTurnRelative(bool left, float degrees,
                           maxSpeed, motionGeneration, profile);
 }
 
-void RobotController::finishAiTurn(AiTurnResultCode code) {
+void RobotController::finishAiTurn(AiTurnResultCode code,
+                                   bool cancelledByPs2Motion) {
   const MotionOwner owner = motionOwner_;
   const uint32_t motionGeneration = aiMotionGeneration_;
   const float headingNow = currentHeadingDeg();
@@ -985,6 +990,7 @@ void RobotController::finishAiTurn(AiTurnResultCode code) {
   stopImmediately();
   aiTurnResult_.owner = owner;
   aiTurnResult_.code = code;
+  aiTurnResult_.cancelledByPs2Motion = cancelledByPs2Motion;
   aiTurnResult_.motionGeneration = motionGeneration;
   aiTurnResult_.headingDeg = headingNow;
   aiTurnResult_.targetDeg = target;

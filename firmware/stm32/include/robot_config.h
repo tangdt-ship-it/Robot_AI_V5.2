@@ -247,6 +247,10 @@ static constexpr int16_t MAP_GUIDE_MIN_SPEED = 15;
 static constexpr float MAP_RETURN_P0_MAX_CROSSTRACK_MM = 250.0f;
 static constexpr float MAP_RETURN_P0_AMBIGUITY_MARGIN_MM = 30.0f;
 static constexpr uint32_t MAP_RETURN_P0_POSITION_TOLERANCE_MM = 30U;
+// A sub-30 mm projection correction is shorter than one controlled guided
+// minimum-speed update.  Do not launch that micro-move: return directly to
+// the preceding waypoint after its normal coarse pre-turn.
+static constexpr uint32_t MAP_RETURN_P0_REACQUIRE_BYPASS_MM = 30U;
 static constexpr float MAP_RETURN_P0_HEADING_TOLERANCE_DEG = 2.0f;
 static constexpr uint32_t MAP_RETURN_P0_SETTLE_MS = 100U;
 static constexpr uint8_t MAP_RETURN_P0_MAX_REACQUIRE_ATTEMPTS = 3U;

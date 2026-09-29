@@ -687,7 +687,7 @@ class GuidedReplayHostTests(unittest.TestCase):
     def test_hold_resume_cancel_and_safety_fences_remain(self):
         for token in (
             "cancelAiMotionForManual",
-            "finishAiDistance(AiDistanceResultCode::CANCELLED)",
+            "finishAiDistance(AiDistanceResultCode::CANCELLED, true)",
             "MotionOwner::REPLAY",
             "motionGeneration",
             "obstacleLimited_",

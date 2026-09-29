@@ -1674,10 +1674,12 @@ void MapController::armHomeContextAfterSave() {
 }
 
 void MapController::armAiRunHomeContextIfNeeded() {
-  // Normal replay already binds route-local P0 to replayOrigin_.  Reuse that
-  // exact frame for a Voice Return-P0 command after boot, without persisting
-  // a new HOME record or altering the established post-Teach PS2 flow.
-  if (homeContext_.valid || !replayActive_ || !replayOriginValid_ ||
+  // A voice MAP run defines a new runtime P0 at replayOrigin_.  It must
+  // replace an older Teach/PS2 Home frame too: normal replay is intentionally
+  // allowed to start from the live pose, and Return-P0 must project and return
+  // in that exact same frame.  This remains RAM-only and does not alter the
+  // established post-Teach PS2 BACK-P0 context or stored route.
+  if (!replayActive_ || !replayOriginValid_ ||
       route_.header.waypointCount < 2U || route_.header.generation == 0U) {
     return;
   }
@@ -3248,7 +3250,11 @@ bool MapController::startReturnReacquire() {
   const float targetDistance = distanceMm(current.xMm, current.yMm,
                                           target.xMm, target.yMm);
   if (targetDistance <=
-      static_cast<float>(MAP_GUIDE_ARRIVAL_POSITION_TOLERANCE_MM)) {
+      static_cast<float>(MAP_RETURN_P0_REACQUIRE_BYPASS_MM)) {
+    // A projection only a few centimetres away cannot be approached reliably
+    // at MAP_GUIDE_MIN_SPEED.  It previously overshot, then converted a
+    // harmless cross-track correction into a full return realign.  Continue
+    // directly with the preceding route waypoint instead.
     returnP0State_ = ReturnP0State::RETURN_WAYPOINT;
     return startReturnWaypoint();
   }
@@ -3324,6 +3330,34 @@ bool MapController::startReturnWaypoint() {
       homeContext_.p0WorldPose, returnP0TargetIndex_ + 1U);
   const float bearing = atan2f(target.yMm - segmentStart.yMm,
                                target.xMm - segmentStart.xMm) * kRadToDeg;
+  const float headingError = shortestDeltaDeg(bearing, current.headingDeg);
+  if (fabsf(headingError) > MAP_REPLAY_PRETURN_TOLERANCE_DEG) {
+    const uint32_t generation = nextReplayGeneration();
+    returnP0Generation_ = generation;
+    returnP0SegmentGeneration_ = generation;
+    replaySegmentGeneration_ = generation;
+    replayOperation_ = MapReplayOperation::TURN;
+    returnP0TurnPending_ = true;
+    if (!robot_.startReplayTurnRelative(
+            headingError > 0.0f, fabsf(headingError), replaySpeed_, generation,
+            AiTurnProfile::MAP_COARSE)) {
+      replayOperation_ = MapReplayOperation::NONE;
+      replaySegmentGeneration_ = 0U;
+      returnP0SegmentGeneration_ = 0U;
+      returnP0TurnPending_ = false;
+      return false;
+    }
+    logReturnP0TraceMotion("WP_PRETURN", current);
+    debug_.print(",TARGET_INDEX=");
+    debug_.print(static_cast<unsigned>(returnP0TargetIndex_));
+    debug_.print(",TARGET_BEARING=");
+    debug_.print(bearing, 2);
+    debug_.print(",HEADING_ERR=");
+    debug_.print(headingError, 2);
+    debug_.print(",GEN=");
+    debug_.println(generation);
+    return true;
+  }
   const uint32_t generation = nextReplayGeneration();
   returnP0Generation_ = generation;
   returnP0SegmentGeneration_ = generation;
@@ -3640,6 +3674,25 @@ void MapController::abortReturnToP0(const char* reason) {
   statusDirty_ = true;
 }
 
+void MapController::terminateReturnToP0ForPs2Takeover() {
+  // updateFast() has already stopped the AI primitive and applied the fresh
+  // PS2 command. Retire only the MAP/Return bookkeeping; a second stop here
+  // would erase the newly claimed PS2 motor command and owner.
+  nextReplayGeneration();
+  replaySegmentGeneration_ = 0U;
+  replayOperation_ = MapReplayOperation::NONE;
+  replayActive_ = false;
+  replayReason_ = "PS2_TAKEOVER";
+  returnP0SegmentGeneration_ = 0U;
+  returnP0TurnPending_ = false;
+  returnP0HeldState_ = ReturnP0State::IDLE;
+  returnP0State_ = ReturnP0State::ABORTED;
+  mode_ = storeState_ == MapStoreState::SAVED ? MapControllerMode::SAVED
+                                               : MapControllerMode::READY;
+  debug_.println("MAP,RETURN_P0,ABORT,REASON=PS2_TAKEOVER");
+  statusDirty_ = true;
+}
+
 void MapController::completeReturnToP0() {
   robot_.stopImmediately(true);
   nextReplayGeneration();
@@ -3664,6 +3717,14 @@ bool MapController::consumeReturnTurnResult(const AiTurnResult& result) {
       debug_.print("MAP,RETURN_P0,DROP_STALE,GEN=");
       debug_.println(result.motionGeneration);
     }
+    return true;
+  }
+  if (result.code == AiTurnResultCode::CANCELLED &&
+      result.cancelledByPs2Motion &&
+      returnP0Source_ == ReturnP0Source::AI_VOICE &&
+      robot_.motionOwner() == MotionOwner::PS2 &&
+      ps2_.motionCommandActive() && !ps2_.state().r3) {
+    terminateReturnToP0ForPs2Takeover();
     return true;
   }
   replayOperation_ = MapReplayOperation::NONE;
@@ -3712,6 +3773,14 @@ bool MapController::consumeReturnDistanceResult(
       debug_.print("MAP,RETURN_P0,DROP_STALE,GEN=");
       debug_.println(result.motionGeneration);
     }
+    return true;
+  }
+  if (result.code == AiDistanceResultCode::CANCELLED &&
+      result.cancelledByPs2Motion &&
+      returnP0Source_ == ReturnP0Source::AI_VOICE &&
+      robot_.motionOwner() == MotionOwner::PS2 &&
+      ps2_.motionCommandActive() && !ps2_.state().r3) {
+    terminateReturnToP0ForPs2Takeover();
     return true;
   }
   replayOperation_ = MapReplayOperation::NONE;

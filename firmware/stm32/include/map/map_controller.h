@@ -195,6 +195,7 @@ class MapController {
   bool startReturnP0Heading();
   bool consumeReturnTurnResult(const AiTurnResult& result);
   bool consumeReturnDistanceResult(const AiDistanceResult& result);
+  void terminateReturnToP0ForPs2Takeover();
   void abortReturnToP0(const char* reason);
   void completeReturnToP0();
   bool returnP0InProgress() const;

@@ -19,8 +19,6 @@ def reject_reason(**state: object) -> str:
         return "BRAKE"
     if state["ai_active"]:
         return "AI_MOTION_ACTIVE"
-    if state["ps2_timeout"]:
-        return "PS2_FRAME_TIMEOUT"
     if state["map_ui"]:
         return "MAP_UI_CAPTURE"
     if state["owner"] != "NONE":
@@ -54,7 +52,7 @@ def reject_reason(**state: object) -> str:
 
 def valid(**overrides: object) -> dict[str, object]:
     state: dict[str, object] = dict(
-        brake=False, ai_active=False, ps2_timeout=False, map_ui=False,
+        brake=False, ai_active=False, ps2_timeout=False, r3=False, map_ui=False,
         owner="NONE", ps2_motion=False, odom_ready=True,
         odom_healthy=True, heading=True, target_x=109.5, target_y=-15.6,
         seg_x=908.1, seg_y=-134.4, bearing=-171.5, tol=30,
@@ -83,9 +81,13 @@ def main() -> None:
     assert "MAP,RETURN_P0,HANDOFF,FROM=P1,TO=P0,STATE=" in MAP
 
     # A: a completed P1 leaves the owner/mode clear and an ~800 mm P1->P0
-    # request with its contractual 30 mm tolerance is admitted.
+    # request with its contractual 30 mm tolerance is admitted. The absence
+    # of a PS2 frame is normal autonomous operation, not a replay rejection.
     assert reject_reason(**valid()) == "NONE"
-    assert reject_reason(**valid(ps2_timeout=True)) == "PS2_FRAME_TIMEOUT"
+    # Case C2: exact timeout-only frame with no active motion, no R3 and no
+    # current owner must admit autonomous Return/guided movement.
+    timeout_only = valid(ps2_timeout=True, ps2_motion=False, r3=False)
+    assert reject_reason(**timeout_only) == "NONE"
     assert reject_reason(**valid(ps2_motion=True)) == "PS2_MOTION_ACTIVE"
     assert reject_reason(**valid(brake=True)) == "BRAKE"
     assert reject_reason(**valid(map_ui=True)) == "MAP_UI_CAPTURE"
@@ -95,10 +97,20 @@ def main() -> None:
     assert reject_reason(**valid(tol=31)) == "TOLERANCE_RANGE"
     assert reject_reason(**valid(target_x=908.1, target_y=-134.4)) == "DISTANCE_ZERO"
 
-    # Current source explicitly applies passive PS2 freshness before REPLAY
-    # ownership, documenting the design-mismatch candidate without changing it.
+    # Replay may start without a paired PS2 transmitter. Fresh manual motion
+    # remains the takeover boundary; MCP keeps the strict PS2-frame gate.
     can_start = ROBOT[ROBOT.index("bool RobotController::canStartMotion"):ROBOT.index("bool RobotController::startAiMotion")]
-    assert can_start.index("ps2_.frameTimedOut(nowMs)") < can_start.index("owner == MotionOwner::REPLAY")
+    replay_gate = can_start.split("if (owner == MotionOwner::REPLAY)", 1)[1].split(
+        "if (ps2_.frameTimedOut(nowMs))", 1
+    )[0]
+    assert "!ps2_.motionCommandActive()" in replay_gate
+    assert "frameTimedOut" not in replay_gate
+    assert "ps2_.frameTimedOut(nowMs)) return false" in can_start  # MCP remains strict.
+    guided = ROBOT[ROBOT.index("bool RobotController::startReplayGuidedWaypoint"):ROBOT.index("motionOwner_ = MotionOwner::REPLAY", ROBOT.index("bool RobotController::startReplayGuidedWaypoint"))]
+    assert "else if (ps2Timeout)" not in guided
+    assert "else if (ps2Motion)" in guided
+    assert 'abortReturnToP0(ps2_.state().r3 ? "R3" : "PS2_TAKEOVER")' in MAP
+    assert "if (!ps2_.state().frameFresh || ps2_.frameTimedOut(now)" in MAP  # PS2 MAP freshness stays gated.
     print("REPLAY_GUIDED_START_HANDOFF_STATIC=PASS")
 
 

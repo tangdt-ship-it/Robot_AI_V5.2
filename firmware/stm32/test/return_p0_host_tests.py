@@ -140,14 +140,18 @@ class ReturnP0HostTests(unittest.TestCase):
         self.assertIn("homeContext_ = {}", MAP)
         self.assertIn("pendingHomeContextValid_ = false", MAP)
 
-    def test_09a_ai_run_arms_only_a_ram_session_p0_context_after_boot(self):
+    def test_09a_ai_run_refreshes_ram_session_p0_context_each_run(self):
         run = MAP[MAP.index("bool MapController::requestRunMap"):
                   MAP.index("bool MapController::requestReturnToP0")]
         arm = MAP[MAP.index("void MapController::armAiRunHomeContextIfNeeded"):
                   MAP.index("void MapController::invalidateHomeContext")]
         self.assertIn("initiator == MapMissionInitiator::AI_VOICE", run)
         self.assertIn("armAiRunHomeContextIfNeeded()", run)
-        self.assertIn("homeContext_.valid || !replayActive_ || !replayOriginValid_", arm)
+        # A fresh AI MAP run can start from a different physical P0 than the
+        # older Teach/PS2 Home frame.  Return-P0 must use the active replay
+        # frame, not reject it as OFF_ROUTE after the RobotLink stop handoff.
+        self.assertIn("if (!replayActive_ || !replayOriginValid_", arm)
+        self.assertNotIn("homeContext_.valid ||", arm)
         self.assertIn("homeContext_.p0WorldPose = replayOrigin_", arm)
         self.assertIn("odometry_.resetGeneration()", arm)
         self.assertIn("robot_.headingResetGeneration()", arm)
