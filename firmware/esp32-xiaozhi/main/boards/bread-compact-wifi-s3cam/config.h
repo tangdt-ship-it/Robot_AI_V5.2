@@ -54,12 +54,24 @@
 #define XCLK_FREQ_HZ 20000000
 
 
-#define DISPLAY_BACKLIGHT_PIN GPIO_NUM_45
-#define DISPLAY_MOSI_PIN      GPIO_NUM_20
-#define DISPLAY_CLK_PIN       GPIO_NUM_19
-#define DISPLAY_DC_PIN        GPIO_NUM_47
-#define DISPLAY_RST_PIN       GPIO_NUM_21
-#define DISPLAY_CS_PIN        GPIO_NUM_48
+// V5.2.18 ST7796U/FT6336U wiring verified in standalone hardware test.
+// LCD reset is tied to 3V3 on the module. Backlight is powered by the module
+// wiring, so no ESP32 PWM GPIO is assigned during display bring-up.
+#define DISPLAY_BACKLIGHT_PIN GPIO_NUM_NC
+#define DISPLAY_MOSI_PIN      GPIO_NUM_47
+#define DISPLAY_CLK_PIN       GPIO_NUM_48
+#define DISPLAY_DC_PIN        GPIO_NUM_21
+#define DISPLAY_RST_PIN       GPIO_NUM_NC
+#define DISPLAY_CS_PIN        GPIO_NUM_19
+#define DISPLAY_SPI_PCLK_HZ   (20 * 1000 * 1000)
+#define DISPLAY_LVGL_BUFFER_LINES 10
+
+// Capacitive touch (FT6336U/FT6x36 family), integration enabled in a later phase.
+#define TOUCH_I2C_SDA_PIN     GPIO_NUM_3
+#define TOUCH_I2C_SCL_PIN     GPIO_NUM_20
+#define TOUCH_RST_PIN         GPIO_NUM_45
+#define TOUCH_INT_PIN         GPIO_NUM_NC
+#define TOUCH_I2C_ADDRESS     0x38
 
 // RobotLink UART to STM32F103VET6. Do not change without rewiring hardware.
 #define ROBOT_UART_RX_PIN     GPIO_NUM_14
@@ -217,12 +229,13 @@
 #endif
 
 #ifdef CONFIG_LCD_ST7796_320X480
-#define LCD_TYPE_ST7789_SERIAL
-#define DISPLAY_WIDTH   320
-#define DISPLAY_HEIGHT  480
+#define LCD_TYPE_ST7796_SERIAL
+// ST7796U native matrix is 320x480; Robot_AI uses verified landscape 480x320.
+#define DISPLAY_WIDTH   480
+#define DISPLAY_HEIGHT  320
 #define DISPLAY_MIRROR_X true
 #define DISPLAY_MIRROR_Y false
-#define DISPLAY_SWAP_XY false
+#define DISPLAY_SWAP_XY true
 #define DISPLAY_INVERT_COLOR    true
 #define DISPLAY_RGB_ORDER  LCD_RGB_ELEMENT_ORDER_BGR
 #define DISPLAY_OFFSET_X  0
@@ -232,12 +245,12 @@
 #endif
 
 #ifdef CONFIG_LCD_ST7796_320X480_NO_IPS
-#define LCD_TYPE_ST7789_SERIAL
-#define DISPLAY_WIDTH   320
-#define DISPLAY_HEIGHT  480
+#define LCD_TYPE_ST7796_SERIAL
+#define DISPLAY_WIDTH   480
+#define DISPLAY_HEIGHT  320
 #define DISPLAY_MIRROR_X true
 #define DISPLAY_MIRROR_Y false
-#define DISPLAY_SWAP_XY false
+#define DISPLAY_SWAP_XY true
 #define DISPLAY_INVERT_COLOR    false
 #define DISPLAY_RGB_ORDER  LCD_RGB_ELEMENT_ORDER_BGR
 #define DISPLAY_OFFSET_X  0
