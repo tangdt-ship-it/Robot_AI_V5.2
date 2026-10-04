@@ -134,11 +134,18 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     lvgl_port_init(&port_cfg);
 
     ESP_LOGI(TAG, "Adding LCD display");
+#if defined(CONFIG_LCD_ST7796_320X480) || defined(CONFIG_LCD_ST7796_320X480_NO_IPS)
+    // Keep the ST7796U DMA draw buffer near the old 240x240 memory footprint.
+    // 480 px x 10 lines x RGB565 = 9.6 KiB.
+    constexpr uint32_t kSpiDrawBufferLines = 10;
+#else
+    constexpr uint32_t kSpiDrawBufferLines = 20;
+#endif
     const lvgl_port_display_cfg_t display_cfg = {
         .io_handle = panel_io_,
         .panel_handle = panel_,
         .control_handle = nullptr,
-        .buffer_size = static_cast<uint32_t>(width_ * 20),
+        .buffer_size = static_cast<uint32_t>(width_ * kSpiDrawBufferLines),
         .double_buffer = false,
         .trans_size = 0,
         .hres = static_cast<uint32_t>(width_),
